@@ -1,0 +1,11 @@
+[package]
+name = "semper-ramp-up"
+version = "0.1.0"
+edition = "2021"
+description = "Week 1–2 katas for the lattice e-graph practicum"
+license = "Apache-2.0"
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"

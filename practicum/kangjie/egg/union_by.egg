@@ -1,0 +1,26 @@
+;; Kata 2 — a program whose *operational* path depends on --union-by.
+;; EXPECT: ok
+;; TYPES: bignum
+;; UNION_BY: size
+;;
+;; Semantically the equalities should agree across rank|size|uses|sum.
+;; Operationally the survivor of each merge changes which node is recanonized
+;; first and which class id is printed. Task 2 later requires abstract values
+;; to be independent of this heuristic — that is why this file exists.
+;;
+;; Run three ways (once the engine binary is built):
+;;   semi-persistent --union-by size  ramp-up/egg/union_by.egg
+;;   semi-persistent --union-by uses  ramp-up/egg/union_by.egg
+;;   semi-persistent --union-by sum   ramp-up/egg/union_by.egg
+(datatype T (A) (B) (C) (F T T))
+(let a (A))
+(let b (B))
+(let c (C))
+(let f1 (F a b))
+(let f2 (F b c))
+(union a b)
+(union b c)
+(run 2)
+(check (= (A) (B)))
+(check (= (B) (C)))
+(check (= (F a b) (F b c)))

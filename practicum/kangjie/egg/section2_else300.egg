@@ -1,0 +1,20 @@
+;; §2 else-arm 300. The test suite must contain this version.
+;; Today: same as classic — `within` is not a primitive, so the engine
+;; cannot license the clamp rewrite from a range.
+;; EXPECT: error
+;; TYPES: bignum
+(sort B)
+(sort I)
+(function True () B)
+(function Lt (I I) B)
+(function Lit (IBig) I)
+(function Ite (B I I) I)
+(function Clamp (I I I) I)
+(let three (Lit 3))
+(let ten (Lit 300))
+(let c (Lt three ten))
+(let t (Ite c three ten))
+(let u (Clamp t (Lit 0) (Lit 255)))
+(rewrite (Clamp x (Lit 0) (Lit 255)) x :when ((within x 0 255)))
+(union c (True))
+(run 3)

@@ -1,0 +1,11 @@
+;; Kata 2 — a rule set that diverges if you do not cap fuel.
+;; EXPECT: ok
+;; TYPES: bignum
+;; EVAL: naive
+(datatype Nat (Z) (S Nat) (F Nat))
+;; Each application of F grows another successor. Without a fuel bound this
+;; does not terminate. We run a small fuel and then stop on purpose.
+(rewrite (F x) (F (S x)))
+(let seed (F (Z)))
+(run 5)
+(check (= (F (Z)) (F (S (S (S (S (S (Z)))))))))

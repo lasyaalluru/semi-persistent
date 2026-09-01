@@ -1,0 +1,12 @@
+;; Kata 2 — a rule set that saturates.
+;; EXPECT: ok
+;; TYPES: bignum
+;; EVAL: both
+(datatype Math (Num IBig) (Add Math Math))
+(rewrite (Add a b) (Add b a))
+(let e (Add (Num 1) (Num 2)))
+(run 10)
+(check (= (Add (Num 1) (Num 2)) (Add (Num 2) (Num 1))))
+;; A second commute does not grow the graph: the swapped term is already there.
+(run 10)
+(check (= (Add (Num 1) (Num 2)) (Add (Num 2) (Num 1))))
