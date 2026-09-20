@@ -5,6 +5,7 @@
 /// Pure Rust — no Verus. Reimplements the domain ops for testing.
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
+use semi_persistent_abstract_domains::domains::d8::Interval as D8Interval;
 
 const DEFAULT_TEST_SEED: u64 = 0x5eed_5eed;
 
@@ -1005,6 +1006,27 @@ fn fuzz_eun_plus_assoc() {
 // ----------------------------------------------------------------
 // Identity elements
 // ----------------------------------------------------------------
+
+#[test]
+fn production_interval_bottom_is_empty_and_canonical() {
+    let bottom = D8Interval::bottom();
+    assert!(bottom.is_bottom);
+    assert_eq!(bottom.lo, 0);
+    assert_eq!(bottom.hi, 0);
+
+    let seven = D8Interval::constant(7);
+    assert!(bottom.add(&seven).is_bottom);
+    assert!(bottom.meet(&seven).is_bottom);
+    assert!(bottom.div_const(1).is_bottom);
+
+    let joined = bottom.join(&seven);
+    assert!(!joined.is_bottom);
+    assert_eq!(joined.lo, 7);
+    assert_eq!(joined.hi, 7);
+
+    let disjoint = D8Interval::constant(1).meet(&D8Interval::constant(2));
+    assert!(disjoint.is_bottom);
+}
 
 #[test]
 fn fuzz_eun_plus_zero_identity() {
