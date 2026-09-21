@@ -248,6 +248,27 @@ impl Interval {
             hi,
         }
     }
+    fn neg(&self) -> Interval {
+        if self.is_bottom {
+            return Interval::bottom();
+        }
+        if self.lo == 0 {
+            return if self.hi == 0 {
+                Interval {
+                    is_bottom: false,
+                    lo: 0,
+                    hi: 0,
+                }
+            } else {
+                Interval::top()
+            };
+        }
+        Interval {
+            is_bottom: false,
+            lo: 0u64.wrapping_sub(self.hi),
+            hi: 0u64.wrapping_sub(self.lo),
+        }
+    }
     fn rsh(&self) -> Interval {
         if self.is_bottom {
             Interval::bottom()
@@ -537,6 +558,13 @@ fuzz_binop!(
     contains,
     mul,
     |x: u64, y: u64| x.wrapping_mul(y)
+);
+fuzz_unop!(
+    fuzz_iv_neg,
+    rand_interval,
+    sample_interval,
+    neg,
+    |x: u64| x.wrapping_neg()
 );
 fuzz_unop!(
     fuzz_iv_rsh,
@@ -1355,6 +1383,43 @@ fn production_interval_mul_small_exhaustive() {
                 for y in right.lo..=right.hi {
                     assert!(d8_interval_contains(&product, x.wrapping_mul(y)));
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn production_interval_neg_u8_exhaustive() {
+    let bottom = D8Interval::bottom().neg();
+    assert!(bottom.is_bottom);
+    assert_eq!(bottom.lo, 0);
+    assert_eq!(bottom.hi, 0);
+
+    let top = D8Interval::top();
+    for lo in u8::MIN..=u8::MAX {
+        for hi in lo..=u8::MAX {
+            let interval = D8Interval {
+                is_bottom: false,
+                lo,
+                hi,
+            };
+            let negated = interval.neg();
+            if lo == 0 {
+                if hi == 0 {
+                    assert!(!negated.is_bottom);
+                    assert_eq!(negated.lo, 0);
+                    assert_eq!(negated.hi, 0);
+                } else {
+                    assert!(d8_interval_eq(&negated, &top));
+                }
+            } else {
+                assert!(!negated.is_bottom);
+                assert_eq!(negated.lo, 0u8.wrapping_sub(hi));
+                assert_eq!(negated.hi, 0u8.wrapping_sub(lo));
+            }
+
+            for value in lo..=hi {
+                assert!(d8_interval_contains(&negated, value.wrapping_neg()));
             }
         }
     }

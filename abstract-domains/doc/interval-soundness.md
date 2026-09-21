@@ -35,6 +35,9 @@ The executable methods carry containment postconditions:
 - `mul(a, b)` returns `[a.lo * b.lo, a.hi * b.hi]` when the maximum endpoint
   product fits in the machine width and returns `top` otherwise. It propagates
   `bottom`.
+- `neg(a)` returns `[0 - a.hi, 0 - a.lo]` when `a` excludes zero, preserves the
+  zero singleton, and returns `top` when `a` contains zero and positive values.
+  It propagates `bottom`.
 - `join(a, b)` is the interval hull and contains every value represented by
   either operand.
 - `meet(a, b)` returns their intersection and returns `bottom` when the
@@ -60,7 +63,7 @@ for join; and that bottom is absorbing for meet and the identity for join.
 `ReducedProduct` denotes the intersection of its Tnum, Anum, Interval, and Unum
 components. Its reduction step narrows interval bounds using information from
 the other domains and then rebuilds compatible component values. Subtraction,
-multiplication, and both shifts use their interval transfers directly.
+multiplication, negation, and both shifts use their interval transfers directly.
 Operations without an interval transfer function use `Interval::top()`. This
 loses interval precision but remains sound because `top` contains every machine
 value and the other components continue to constrain the product.

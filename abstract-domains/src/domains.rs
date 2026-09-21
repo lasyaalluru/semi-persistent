@@ -1504,6 +1504,58 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
+                #[inline] pub fn neg(&self) -> (r: Interval)
+                    requires self.wf()
+                    ensures r.wf(),
+                        forall|x: $uint| #![auto]
+                            self.has(x) ==> r.has((0 as $uint).wrapping_sub(x))
+                {
+                    if self.is_bottom { return Interval::bottom(); }
+                    let slo = self.lo; let shi = self.hi;
+                    if slo == 0 {
+                        if shi == 0 {
+                            let r = Interval::constant(0);
+                            proof {
+                                assert forall|x: $uint| #![auto]
+                                    self.has(x)
+                                    implies r.has((0 as $uint).wrapping_sub(x)) by {
+                                    assert(x == 0);
+                                    assert((0 as $uint).wrapping_sub(x) == 0) by(bit_vector)
+                                        requires x == 0;
+                                };
+                            }
+                            return r;
+                        }
+                        let r = Interval::top();
+                        proof {
+                            assert forall|x: $uint| #![auto]
+                                self.has(x)
+                                implies r.has((0 as $uint).wrapping_sub(x)) by {
+                                Self::top_has((0 as $uint).wrapping_sub(x));
+                            };
+                        }
+                        return r;
+                    }
+                    let lo = (0 as $uint).wrapping_sub(shi);
+                    let hi = (0 as $uint).wrapping_sub(slo);
+                    let r = Interval { is_bottom: false, lo, hi };
+                    proof {
+                        assert(lo <= hi) by(bit_vector)
+                            requires 0 < slo, slo <= shi,
+                                lo == (0 as $uint).wrapping_sub(shi),
+                                hi == (0 as $uint).wrapping_sub(slo);
+                        assert forall|x: $uint| #![auto]
+                            self.has(x)
+                            implies r.has((0 as $uint).wrapping_sub(x)) by {
+                            assert(lo <= (0 as $uint).wrapping_sub(x)
+                                && (0 as $uint).wrapping_sub(x) <= hi) by(bit_vector)
+                                requires 0 < slo, slo <= x, x <= shi,
+                                    lo == (0 as $uint).wrapping_sub(shi),
+                                    hi == (0 as $uint).wrapping_sub(slo);
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn meet(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
                     ensures r.wf(), r == self.meet_spec(*t),
@@ -1818,7 +1870,7 @@ macro_rules! abstract_domain {
                     ReducedProduct { tnum: self.tnum.meet(&t.tnum), anum: ExecAnum::top(), interval: self.interval.meet(&t.interval), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn neg(&self) -> (r: ReducedProduct) requires self.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.neg(), anum: ExecAnum::top(), interval: Interval::top(), unum: self.unum.neg() }.reduce()
+                    ReducedProduct { tnum: self.tnum.neg(), anum: ExecAnum::top(), interval: self.interval.neg(), unum: self.unum.neg() }.reduce()
                 }
                 #[inline] pub fn is_const(&self) -> bool { !self.interval.is_bottom && self.tnum.is_const() && self.interval.lo == self.interval.hi }
                 #[inline] pub fn min_val(&self) -> $uint {
