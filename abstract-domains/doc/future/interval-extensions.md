@@ -20,10 +20,10 @@ are absent.
 ### Gap
 
 The interval component cannot contribute precision for bitwise operations,
-subtraction, multiplication, or negation, and it cannot distinguish division
-that is safe, may divide by zero, or must divide by zero. Left and right shift
-by one bit have proved endpoint transfers; left shift conservatively returns
-`top` when the upper endpoint overflows.
+multiplication, or negation, and it cannot distinguish division that is safe,
+may divide by zero, or must divide by zero. Subtraction and both one-bit shifts
+have proved endpoint transfers; subtraction returns `top` on possible underflow
+and left shift returns `top` when the upper endpoint overflows.
 
 ### Task
 

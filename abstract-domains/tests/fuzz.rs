@@ -217,6 +217,19 @@ impl Interval {
             }
         }
     }
+    fn sub(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            return Interval::bottom();
+        }
+        if self.lo < t.hi {
+            return Interval::top();
+        }
+        Interval {
+            is_bottom: false,
+            lo: self.lo.wrapping_sub(t.hi),
+            hi: self.hi.wrapping_sub(t.lo),
+        }
+    }
     fn rsh(&self) -> Interval {
         if self.is_bottom {
             Interval::bottom()
@@ -488,6 +501,15 @@ fuzz_binop!(
         let (r, of) = x.overflowing_add(y);
         if of { 0u64 } else { r } // skip overflow cases
     }
+);
+fuzz_binop!(
+    fuzz_iv_sub,
+    Interval,
+    rand_interval,
+    sample_interval,
+    contains,
+    sub,
+    |x: u64, y: u64| x.wrapping_sub(y)
 );
 fuzz_unop!(
     fuzz_iv_rsh,
@@ -1220,6 +1242,55 @@ fn production_interval_lsh_u8_exhaustive() {
 
             for value in lo..=hi {
                 assert!(d8_interval_contains(&shifted, value << 1));
+            }
+        }
+    }
+}
+
+#[test]
+fn production_interval_sub_small_exhaustive() {
+    let mut intervals = small_d8_intervals();
+    intervals.extend([
+        D8Interval {
+            is_bottom: false,
+            lo: 127,
+            hi: 128,
+        },
+        D8Interval {
+            is_bottom: false,
+            lo: 128,
+            hi: u8::MAX,
+        },
+        D8Interval {
+            is_bottom: false,
+            lo: 254,
+            hi: u8::MAX,
+        },
+        D8Interval::constant(u8::MAX),
+    ]);
+    let bottom = D8Interval::bottom();
+    let top = D8Interval::top();
+
+    for left in &intervals {
+        for right in &intervals {
+            let difference = left.sub(right);
+            if left.is_bottom || right.is_bottom {
+                assert!(d8_interval_eq(&difference, &bottom));
+                continue;
+            }
+
+            if left.lo < right.hi {
+                assert!(d8_interval_eq(&difference, &top));
+            } else {
+                assert!(!difference.is_bottom);
+                assert_eq!(difference.lo, left.lo.wrapping_sub(right.hi));
+                assert_eq!(difference.hi, left.hi.wrapping_sub(right.lo));
+            }
+
+            for x in left.lo..=left.hi {
+                for y in right.lo..=right.hi {
+                    assert!(d8_interval_contains(&difference, x.wrapping_sub(y)));
+                }
             }
         }
     }

@@ -1387,6 +1387,47 @@ macro_rules! abstract_domain {
                         Interval { is_bottom: false, lo, hi }
                     }
                 }
+                #[inline] pub fn sub(&self, t: &Interval) -> (r: Interval)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(),
+                        forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_sub(c2))
+                {
+                    if self.is_bottom || t.is_bottom { return Interval::bottom(); }
+                    let slo = self.lo; let shi = self.hi;
+                    let tlo = t.lo; let thi = t.hi;
+                    if slo < thi {
+                        let r = Interval::top();
+                        proof {
+                            assert forall|c1: $uint, c2: $uint| #![auto]
+                                self.has(c1) && t.has(c2)
+                                implies r.has(c1.wrapping_sub(c2)) by {
+                                Self::top_has(c1.wrapping_sub(c2));
+                            };
+                        }
+                        return r;
+                    }
+                    let lo = slo.wrapping_sub(thi);
+                    let hi = shi.wrapping_sub(tlo);
+                    let r = Interval { is_bottom: false, lo, hi };
+                    proof {
+                        assert(lo <= hi) by(bit_vector)
+                            requires slo <= shi, tlo <= thi, slo >= thi,
+                                lo == slo.wrapping_sub(thi),
+                                hi == shi.wrapping_sub(tlo);
+                        assert forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2)
+                            implies r.has(c1.wrapping_sub(c2)) by {
+                            assert(lo <= c1.wrapping_sub(c2)
+                                && c1.wrapping_sub(c2) <= hi) by(bit_vector)
+                                requires slo <= c1, c1 <= shi,
+                                    tlo <= c2, c2 <= thi, slo >= thi,
+                                    lo == slo.wrapping_sub(thi),
+                                    hi == shi.wrapping_sub(tlo);
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn meet(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
                     ensures r.wf(), r == self.meet_spec(*t),
@@ -1680,7 +1721,7 @@ macro_rules! abstract_domain {
                     r
                 }
                 #[inline] pub fn sub(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.sub(&t.tnum), anum: self.anum.sub(&t.anum), interval: Interval::top(), unum: self.unum.sub(&t.unum) }.reduce()
+                    ReducedProduct { tnum: self.tnum.sub(&t.tnum), anum: self.anum.sub(&t.anum), interval: self.interval.sub(&t.interval), unum: self.unum.sub(&t.unum) }.reduce()
                 }
                 pub fn mul(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
                     ReducedProduct { tnum: self.tnum.mul(&t.tnum), anum: ExecAnum::top(), interval: Interval::top(), unum: self.unum.mul(&t.unum) }.reduce()
