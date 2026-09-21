@@ -20,15 +20,15 @@ are absent.
 ### Gap
 
 The interval component cannot contribute precision for bitwise operations,
-subtraction, multiplication, negation, or shifts, and it cannot distinguish
-division that is safe, may divide by zero, or must divide by zero.
+subtraction, multiplication, negation, or left shift, and it cannot distinguish
+division that is safe, may divide by zero, or must divide by zero. Right shift
+by one bit has a proved endpoint transfer.
 
 ### Task
 
 First give every reduced-product operation an explicit interval transfer
-contract. A conservative implementation may return `top`; right shift can use
-endpoint monotonicity, and left shift can use a checked endpoint calculation
-with `top` on wrap.
+contract. A conservative implementation may return `top`; left shift can use a
+checked endpoint calculation with `top` on wrap.
 
 Add interval division with a value result and a may-error abstraction. For
 unsigned dividend `[a,b]` and divisor `[c,d]`:

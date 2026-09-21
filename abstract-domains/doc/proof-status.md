@@ -1,12 +1,12 @@
 # Abstract Domains Proof Status
 
-Last refreshed: 2026-08-21.
+Last refreshed: 2026-09-20.
 
 ## Current result
 
 ```text
 cargo verus verify
-994 verified, 0 errors
+1058 verified, 0 errors
 ```
 
 The project source contains no executable `admit()` or `assume()` calls. CI
@@ -27,7 +27,7 @@ The `d128` macro invocation remains disabled because its bitvector obligations
 exceed the current solver capacity. Do not describe `u128` as an enabled or
 verified executable instance.
 
-The separate Rust mirror suite contains 32 tests:
+The separate Rust mirror suite contains 36 tests:
 
 ```text
 cargo test -p semi-persistent-abstract-domains --test fuzz
@@ -54,7 +54,7 @@ The current **universal containment** contracts are:
 | `ExecTnum` | `bw_or`, `bw_and`, `bw_xor`, `add`, `join`, `meet` |
 | `ExecAnum` | `add`, `div_const` |
 | `ExecUnum` | `top`, `add`, `from_interval`, `mul` |
-| `Interval` | `add`, `meet`, `join`, `div_const` |
+| `Interval` | `add`, `meet`, `join`, `rsh`, `div_const` |
 | `ReducedProduct` | `reduce`, `add` |
 
 The `ExecUnum` proofs use native/spec bridge lemmas, the L3 `ChoppedUnum`

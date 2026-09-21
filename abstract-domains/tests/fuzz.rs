@@ -217,6 +217,17 @@ impl Interval {
             }
         }
     }
+    fn rsh(&self) -> Interval {
+        if self.is_bottom {
+            Interval::bottom()
+        } else {
+            Interval {
+                is_bottom: false,
+                lo: self.lo >> 1,
+                hi: self.hi >> 1,
+            }
+        }
+    }
 }
 
 // ================================================================
@@ -464,6 +475,13 @@ fuzz_binop!(
         let (r, of) = x.overflowing_add(y);
         if of { 0u64 } else { r } // skip overflow cases
     }
+);
+fuzz_unop!(
+    fuzz_iv_rsh,
+    rand_interval,
+    sample_interval,
+    rsh,
+    |x: u64| x >> 1
 );
 
 // ================================================================
@@ -1121,6 +1139,36 @@ fn production_interval_lattice_laws_small_exhaustive() {
                 let ab_c_join = ab_join.join(c);
                 let a_bc_join = a.join(&b.join(c));
                 assert!(d8_interval_eq(&ab_c_join, &a_bc_join));
+            }
+        }
+    }
+}
+
+#[test]
+fn production_interval_rsh_small_exhaustive() {
+    let bottom = D8Interval::bottom().rsh();
+    assert!(bottom.is_bottom);
+    assert_eq!(bottom.lo, 0);
+    assert_eq!(bottom.hi, 0);
+
+    let top = D8Interval::top().rsh();
+    assert!(!top.is_bottom);
+    assert_eq!(top.lo, 0);
+    assert_eq!(top.hi, u8::MAX >> 1);
+
+    for interval in small_d8_intervals() {
+        let shifted = interval.rsh();
+        if interval.is_bottom {
+            assert!(shifted.is_bottom);
+            continue;
+        }
+
+        assert!(!shifted.is_bottom);
+        assert_eq!(shifted.lo, interval.lo >> 1);
+        assert_eq!(shifted.hi, interval.hi >> 1);
+        for value in u8::MIN..=u8::MAX {
+            if d8_interval_contains(&interval, value) {
+                assert!(d8_interval_contains(&shifted, value >> 1));
             }
         }
     }

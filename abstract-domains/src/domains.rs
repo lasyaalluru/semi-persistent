@@ -1414,6 +1414,27 @@ macro_rules! abstract_domain {
                         }
                     }
                 }
+                #[inline] pub fn rsh(&self) -> (r: Interval)
+                    requires self.wf()
+                    ensures r.wf(),
+                        forall|x: $uint| #![auto] self.has(x) ==> r.has(x >> 1)
+                {
+                    if self.is_bottom { return Interval::bottom(); }
+                    let slo = self.lo; let shi = self.hi;
+                    let lo = slo >> 1;
+                    let hi = shi >> 1;
+                    let r = Interval { is_bottom: false, lo, hi };
+                    proof {
+                        assert(lo <= hi) by(bit_vector)
+                            requires slo <= shi, lo == slo >> 1, hi == shi >> 1;
+                        assert forall|x: $uint| #![auto] self.has(x) implies r.has(x >> 1) by {
+                            assert(lo <= x >> 1 && x >> 1 <= hi) by(bit_vector)
+                                requires slo <= x, x <= shi,
+                                    lo == slo >> 1, hi == shi >> 1;
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn div_const(&self, d: $uint) -> (r: Interval)
                     requires self.wf(), d > 0
                     ensures r.wf(),
@@ -1636,7 +1657,7 @@ macro_rules! abstract_domain {
                     ReducedProduct { tnum: ExecTnum::top(), anum: self.anum.div_const(d), interval: self.interval.div_const(d), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn rsh(&self) -> (r: ReducedProduct) requires self.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.rsh(), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
+                    ReducedProduct { tnum: self.tnum.rsh(), anum: ExecAnum::top(), interval: self.interval.rsh(), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn lsh(&self) -> (r: ReducedProduct) requires self.wf() ensures r.wf() {
                     ReducedProduct { tnum: self.tnum.lsh(), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
