@@ -6,7 +6,10 @@
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
 use semi_persistent_abstract_domains::domains::DivAlarm;
-use semi_persistent_abstract_domains::domains::d8::Interval as D8Interval;
+use semi_persistent_abstract_domains::domains::d8::{
+    ExecAnum as D8ExecAnum, ExecTnum as D8ExecTnum, ExecUnum as D8ExecUnum, Interval as D8Interval,
+    ReducedProduct as D8ReducedProduct,
+};
 
 const DEFAULT_TEST_SEED: u64 = 0x5eed_5eed;
 
@@ -1265,6 +1268,27 @@ fn d8_interval_contains(iv: &D8Interval, value: u8) -> bool {
     !iv.is_bottom && iv.lo <= value && value <= iv.hi
 }
 
+fn d8_reduced_from_interval(interval: D8Interval) -> D8ReducedProduct {
+    D8ReducedProduct {
+        tnum: D8ExecTnum::top(),
+        anum: D8ExecAnum::top(),
+        interval,
+        unum: D8ExecUnum::top(),
+    }
+}
+
+fn d8_reduced_div_result_contains(value: &D8ReducedProduct, concrete: u8) -> bool {
+    let tnum_contains = concrete & !value.tnum.mask == value.tnum.val;
+    let anum_contains =
+        concrete >= value.anum.base && (concrete - value.anum.base) & !value.anum.span == 0;
+    let unum_contains =
+        concrete >= value.unum.base && concrete - value.unum.base <= value.unum.extent;
+    tnum_contains
+        && anum_contains
+        && d8_interval_contains(&value.interval, concrete)
+        && unum_contains
+}
+
 fn small_d8_intervals() -> Vec<D8Interval> {
     let mut intervals = vec![D8Interval::bottom(), D8Interval::top()];
     for lo in 0u8..=7 {
@@ -1512,6 +1536,72 @@ fn production_interval_division_small_exhaustive() {
                     assert!(result.alarm.has(y == 0));
                     if y != 0 {
                         assert!(d8_interval_contains(&result.value, x / y));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn production_reduced_product_division_cases() {
+    use DivAlarm::{DefiniteError, MaybeError, NoError};
+
+    let dividend = d8_reduced_from_interval(D8Interval {
+        is_bottom: false,
+        lo: 10,
+        hi: 20,
+    });
+
+    let safe = dividend.div(&d8_reduced_from_interval(D8Interval {
+        is_bottom: false,
+        lo: 2,
+        hi: 5,
+    }));
+    assert_eq!(safe.value.interval.lo, 2);
+    assert_eq!(safe.value.interval.hi, 10);
+    assert!(safe.alarm == NoError);
+
+    let mixed = dividend.div(&d8_reduced_from_interval(D8Interval {
+        is_bottom: false,
+        lo: 0,
+        hi: 5,
+    }));
+    assert_eq!(mixed.value.interval.lo, 2);
+    assert_eq!(mixed.value.interval.hi, 20);
+    assert!(mixed.alarm == MaybeError);
+
+    let zero_only = dividend.div(&D8ReducedProduct::constant(0));
+    assert!(zero_only.value.interval.is_bottom);
+    assert!(zero_only.alarm == DefiniteError);
+
+    let unreachable =
+        d8_reduced_from_interval(D8Interval::bottom()).div(&D8ReducedProduct::constant(0));
+    assert!(unreachable.value.interval.is_bottom);
+    assert!(unreachable.alarm == NoError);
+}
+
+#[test]
+fn production_reduced_product_division_small_exhaustive() {
+    let intervals = arithmetic_d8_intervals();
+
+    for dividend_interval in &intervals {
+        for divisor_interval in &intervals {
+            let dividend = d8_reduced_from_interval(*dividend_interval);
+            let divisor = d8_reduced_from_interval(*divisor_interval);
+            let result = dividend.div(&divisor);
+
+            if dividend_interval.is_bottom || divisor_interval.is_bottom {
+                assert!(result.value.interval.is_bottom);
+                assert!(result.alarm == DivAlarm::NoError);
+                continue;
+            }
+
+            for x in dividend_interval.lo..=dividend_interval.hi {
+                for y in divisor_interval.lo..=divisor_interval.hi {
+                    assert!(result.alarm.has(y == 0));
+                    if y != 0 {
+                        assert!(d8_reduced_div_result_contains(&result.value, x / y));
                     }
                 }
             }

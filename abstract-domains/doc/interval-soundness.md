@@ -73,18 +73,22 @@ the other domains and then rebuilds compatible component values. Subtraction,
 multiplication, negation, and both shifts use their interval transfers directly.
 Bitwise operations use explicit conservative transfers that return `top` for
 non-bottom operands. This loses interval precision but remains sound because
-the Tnum component continues to constrain the result.
+the Tnum component continues to constrain the result. General division uses the
+proved interval quotient and alarm, widens the other components to `top`, and
+then runs the ordinary reduction. The resulting reduced product contains every
+quotient for a represented nonzero divisor, and its alarm contains the concrete
+zero-divisor outcome.
 
 ## Scope
 
 The shared `DivAlarm` domain represents no-error, definite-error, and
 maybe-error outcomes with a proved join. `Interval::div` returns this alarm and
-proves both nonzero quotient containment and alarm membership. General division
-has not yet been composed through `ReducedProduct`. The generated API also does
-not provide abstract booleans, backward assumptions, wrapped intervals, or
-strided intervals. The standalone `exec_tnum.rs` experiment has a broader Rust
-surface, but it is not the contract inventory described here. No claim in this
-document applies to the disabled `u128` instantiation.
+proves both nonzero quotient containment and alarm membership;
+`ReducedProduct::div` preserves both guarantees through reduction. The generated
+API does not provide abstract booleans, backward assumptions, wrapped intervals,
+or strided intervals. The standalone `exec_tnum.rs` experiment has a broader
+Rust surface, but it is not the contract inventory described here. No claim in
+this document applies to the disabled `u128` instantiation.
 
 The maintained designs and proof obligations for those extensions are in
 [`future/interval-extensions.md`](future/interval-extensions.md).

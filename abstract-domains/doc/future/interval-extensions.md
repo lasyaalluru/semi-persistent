@@ -14,22 +14,23 @@ corresponding operation exists or verifies.
 ### Current state
 
 `Interval::div` returns a value interval and the shared `DivAlarm`, with proved
-nonzero quotient containment and alarm membership. General division has not yet
-been composed through the reduced product.
+nonzero quotient containment and alarm membership. `ReducedProduct::div`
+propagates both results through the reduced product and proves that reduction
+preserves every quotient for a represented nonzero divisor.
 
 ### Gap
 
 The interval component has explicit, proved bitwise transfers, but they
 deliberately return `top` for non-bottom operands and therefore contribute no
-bitwise precision. It also cannot distinguish division that is safe, may divide
-by zero, or must divide by zero. Subtraction, multiplication, negation, and both
-one-bit shifts have proved endpoint transfers; operations conservatively return
-`top` when their results cross the unsigned wrap boundary.
+bitwise precision. Subtraction, multiplication, negation, and both one-bit
+shifts have proved endpoint transfers; operations conservatively return `top`
+when their results cross the unsigned wrap boundary.
 
 ### Task
 
-The remaining transfer task is to compose interval-by-interval division and its
-alarm through the reduced product.
+The division and alarm composition task is complete. The remaining interval
+transfer opportunity is to replace conservative bitwise `top` results with
+proved endpoint bounds when those bounds improve precision.
 
 The interval division transfer uses the following cases for unsigned dividend
 `[a,b]` and divisor `[c,d]`:
@@ -47,8 +48,9 @@ MaybeError    = {false, true}
 ```
 
 Thus `NoError` and `DefiniteError` are incomparable and their proved join is
-`MaybeError`. The remaining work is to propagate alarms through reduced-product
-division and joins according to that concretization.
+`MaybeError`. Reduced-product division propagates the alarm according to this
+concretization. Alarm-bearing control-flow joins remain future client-level
+work.
 
 ### Acceptance criteria
 

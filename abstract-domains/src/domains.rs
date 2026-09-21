@@ -1896,6 +1896,11 @@ macro_rules! abstract_domain {
             // ============================================================
             #[derive(Clone, Copy)]
             pub struct ReducedProduct { pub tnum: ExecTnum, pub anum: ExecAnum, pub interval: Interval, pub unum: ExecUnum }
+            #[derive(Clone, Copy)]
+            pub struct ReducedProductDivResult {
+                pub value: ReducedProduct,
+                pub alarm: DivAlarm,
+            }
             impl ReducedProduct {
                 pub open spec fn wf(self) -> bool { self.tnum.wf() && self.interval.wf() }
                 pub open spec fn has(self, x: $uint) -> bool {
@@ -2094,6 +2099,53 @@ macro_rules! abstract_domain {
                 }
                 pub fn div_const(&self, d: $uint) -> (r: ReducedProduct) requires self.wf(), d > 0 ensures r.wf() {
                     ReducedProduct { tnum: ExecTnum::top(), anum: self.anum.div_const(d), interval: self.interval.div_const(d), unum: ExecUnum::top() }.reduce()
+                }
+                pub fn div(&self, divisor: &ReducedProduct) -> (r: ReducedProductDivResult)
+                    requires self.wf(), divisor.wf()
+                    ensures r.value.wf(),
+                        forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y) && y != 0
+                                ==> r.value.has(x / y),
+                        forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y)
+                                ==> r.alarm.has_spec(y == 0)
+                {
+                    let interval_result = self.interval.div(&divisor.interval);
+                    let combined = ReducedProduct {
+                        tnum: ExecTnum { val: 0, mask: !(0 as $uint) },
+                        anum: ExecAnum { base: 0, span: !(0 as $uint) },
+                        interval: interval_result.value,
+                        unum: ExecUnum { base: 0, walls: 0, extent: !(0 as $uint) },
+                    };
+                    proof {
+                        assert((0 as $uint) & (!(0 as $uint)) == (0 as $uint)) by(bit_vector);
+                    }
+                    let value = combined.reduce();
+                    let r = ReducedProductDivResult {
+                        value,
+                        alarm: interval_result.alarm,
+                    };
+                    proof {
+                        assert forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y) && y != 0
+                            implies r.value.has(x / y) by {
+                            let quotient = x / y;
+                            assert(self.interval.has(x));
+                            assert(divisor.interval.has(y));
+                            assert(interval_result.value.has(quotient));
+                            ExecTnum::top_has(quotient);
+                            ExecAnum::top_has(quotient);
+                            ExecUnum::top_has(quotient);
+                            assert(combined.has(quotient));
+                        };
+                        assert forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y)
+                            implies r.alarm.has_spec(y == 0) by {
+                            assert(self.interval.has(x));
+                            assert(divisor.interval.has(y));
+                        };
+                    }
+                    r
                 }
                 #[inline] pub fn rsh(&self) -> (r: ReducedProduct) requires self.wf() ensures r.wf() {
                     ReducedProduct { tnum: self.tnum.rsh(), anum: ExecAnum::top(), interval: self.interval.rsh(), unum: ExecUnum::top() }.reduce()
