@@ -230,6 +230,24 @@ impl Interval {
             hi: self.hi.wrapping_sub(t.lo),
         }
     }
+    fn mul(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            return Interval::bottom();
+        }
+        let hi = match self.hi.checked_mul(t.hi) {
+            Some(value) => value,
+            None => return Interval::top(),
+        };
+        let lo = match self.lo.checked_mul(t.lo) {
+            Some(value) => value,
+            None => return Interval::top(),
+        };
+        Interval {
+            is_bottom: false,
+            lo,
+            hi,
+        }
+    }
     fn rsh(&self) -> Interval {
         if self.is_bottom {
             Interval::bottom()
@@ -510,6 +528,15 @@ fuzz_binop!(
     contains,
     sub,
     |x: u64, y: u64| x.wrapping_sub(y)
+);
+fuzz_binop!(
+    fuzz_iv_mul,
+    Interval,
+    rand_interval,
+    sample_interval,
+    contains,
+    mul,
+    |x: u64, y: u64| x.wrapping_mul(y)
 );
 fuzz_unop!(
     fuzz_iv_rsh,
@@ -1247,8 +1274,7 @@ fn production_interval_lsh_u8_exhaustive() {
     }
 }
 
-#[test]
-fn production_interval_sub_small_exhaustive() {
+fn arithmetic_d8_intervals() -> Vec<D8Interval> {
     let mut intervals = small_d8_intervals();
     intervals.extend([
         D8Interval {
@@ -1268,6 +1294,12 @@ fn production_interval_sub_small_exhaustive() {
         },
         D8Interval::constant(u8::MAX),
     ]);
+    intervals
+}
+
+#[test]
+fn production_interval_sub_small_exhaustive() {
+    let intervals = arithmetic_d8_intervals();
     let bottom = D8Interval::bottom();
     let top = D8Interval::top();
 
@@ -1290,6 +1322,38 @@ fn production_interval_sub_small_exhaustive() {
             for x in left.lo..=left.hi {
                 for y in right.lo..=right.hi {
                     assert!(d8_interval_contains(&difference, x.wrapping_sub(y)));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn production_interval_mul_small_exhaustive() {
+    let intervals = arithmetic_d8_intervals();
+    let bottom = D8Interval::bottom();
+    let top = D8Interval::top();
+
+    for left in &intervals {
+        for right in &intervals {
+            let product = left.mul(right);
+            if left.is_bottom || right.is_bottom {
+                assert!(d8_interval_eq(&product, &bottom));
+                continue;
+            }
+
+            match left.hi.checked_mul(right.hi) {
+                Some(hi) => {
+                    assert!(!product.is_bottom);
+                    assert_eq!(product.lo, left.lo * right.lo);
+                    assert_eq!(product.hi, hi);
+                }
+                None => assert!(d8_interval_eq(&product, &top)),
+            }
+
+            for x in left.lo..=left.hi {
+                for y in right.lo..=right.hi {
+                    assert!(d8_interval_contains(&product, x.wrapping_mul(y)));
                 }
             }
         }

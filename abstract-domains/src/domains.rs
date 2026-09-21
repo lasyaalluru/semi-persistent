@@ -1428,6 +1428,82 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
+                pub fn mul(&self, t: &Interval) -> (r: Interval)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(),
+                        forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2))
+                {
+                    if self.is_bottom || t.is_bottom { return Interval::bottom(); }
+                    let slo = self.lo; let shi = self.hi;
+                    let tlo = t.lo; let thi = t.hi;
+                    let hi = match shi.checked_mul(thi) {
+                        Some(value) => value,
+                        None => {
+                            let r = Interval::top();
+                            proof {
+                                assert forall|c1: $uint, c2: $uint| #![auto]
+                                    self.has(c1) && t.has(c2)
+                                    implies r.has(c1.wrapping_mul(c2)) by {
+                                    Self::top_has(c1.wrapping_mul(c2));
+                                };
+                            }
+                            return r;
+                        }
+                    };
+                    let lo = match slo.checked_mul(tlo) {
+                        Some(value) => value,
+                        None => {
+                            let r = Interval::top();
+                            proof {
+                                assert forall|c1: $uint, c2: $uint| #![auto]
+                                    self.has(c1) && t.has(c2)
+                                    implies r.has(c1.wrapping_mul(c2)) by {
+                                    Self::top_has(c1.wrapping_mul(c2));
+                                };
+                            }
+                            return r;
+                        }
+                    };
+                    let r = Interval { is_bottom: false, lo, hi };
+                    proof {
+                        let width = $bits as nat;
+                        mul_exact(shi, thi, hi);
+                        mul_exact(slo, tlo, lo);
+                        assert(lo <= hi) by(nonlinear_arith)
+                            requires slo <= shi, tlo <= thi,
+                                lo as nat == (slo as nat) * (tlo as nat),
+                                hi as nat == (shi as nat) * (thi as nat);
+                        assert forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2)
+                            implies r.has(c1.wrapping_mul(c2)) by {
+                            let concrete = c1.wrapping_mul(c2);
+                            vstd::arithmetic::mul::lemma_mul_upper_bound(
+                                slo as int,
+                                c1 as int,
+                                tlo as int,
+                                c2 as int,
+                            );
+                            vstd::arithmetic::mul::lemma_mul_upper_bound(
+                                c1 as int,
+                                shi as int,
+                                c2 as int,
+                                thi as int,
+                            );
+                            assert(prod(slo as nat, tlo as nat)
+                                <= prod(c1 as nat, c2 as nat));
+                            assert(prod(c1 as nat, c2 as nat)
+                                <= prod(shi as nat, thi as nat));
+                            assert(prod(shi as nat, thi as nat) == hi as nat);
+                            assert((hi as nat) < exp(width));
+                            chop_id(prod(c1 as nat, c2 as nat), width);
+                            bridge_mul(c1, c2);
+                            assert(concrete as nat == prod(c1 as nat, c2 as nat));
+                            assert(lo <= concrete && concrete <= hi);
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn meet(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
                     ensures r.wf(), r == self.meet_spec(*t),
@@ -1724,7 +1800,7 @@ macro_rules! abstract_domain {
                     ReducedProduct { tnum: self.tnum.sub(&t.tnum), anum: self.anum.sub(&t.anum), interval: self.interval.sub(&t.interval), unum: self.unum.sub(&t.unum) }.reduce()
                 }
                 pub fn mul(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.mul(&t.tnum), anum: ExecAnum::top(), interval: Interval::top(), unum: self.unum.mul(&t.unum) }.reduce()
+                    ReducedProduct { tnum: self.tnum.mul(&t.tnum), anum: ExecAnum::top(), interval: self.interval.mul(&t.interval), unum: self.unum.mul(&t.unum) }.reduce()
                 }
                 pub fn div_const(&self, d: $uint) -> (r: ReducedProduct) requires self.wf(), d > 0 ensures r.wf() {
                     ReducedProduct { tnum: ExecTnum::top(), anum: self.anum.div_const(d), interval: self.interval.div_const(d), unum: ExecUnum::top() }.reduce()
