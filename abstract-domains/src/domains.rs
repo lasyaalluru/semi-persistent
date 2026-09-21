@@ -15,6 +15,77 @@
 /// let y = ReducedProduct::constant(10);
 /// let sum = x.add(&y);  // ReducedProduct with Tnum=00110100, Anum=52, Iv=52
 /// ```
+use vstd::prelude::*;
+
+verus! {
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DivAlarm {
+    NoError,
+    DefiniteError,
+    MaybeError,
+}
+
+impl DivAlarm {
+    pub open spec fn has_spec(self, error: bool) -> bool {
+        match self {
+            DivAlarm::NoError => !error,
+            DivAlarm::DefiniteError => error,
+            DivAlarm::MaybeError => true,
+        }
+    }
+
+    pub open spec fn join_spec(self, t: DivAlarm) -> DivAlarm {
+        match (self, t) {
+            (DivAlarm::NoError, DivAlarm::NoError) => DivAlarm::NoError,
+            (DivAlarm::DefiniteError, DivAlarm::DefiniteError) => DivAlarm::DefiniteError,
+            _ => DivAlarm::MaybeError,
+        }
+    }
+
+    #[inline]
+    pub fn has(&self, error: bool) -> (r: bool)
+        ensures r == self.has_spec(error)
+    {
+        match self {
+            DivAlarm::NoError => !error,
+            DivAlarm::DefiniteError => error,
+            DivAlarm::MaybeError => true,
+        }
+    }
+
+    #[inline]
+    pub fn join(&self, t: &DivAlarm) -> (r: DivAlarm)
+        ensures r == self.join_spec(*t)
+    {
+        match (self, t) {
+            (DivAlarm::NoError, DivAlarm::NoError) => DivAlarm::NoError,
+            (DivAlarm::DefiniteError, DivAlarm::DefiniteError) => DivAlarm::DefiniteError,
+            _ => DivAlarm::MaybeError,
+        }
+    }
+
+    pub proof fn join_sound(self, t: DivAlarm)
+        ensures forall|error: bool| #![auto]
+            self.join_spec(t).has_spec(error)
+                <==> (self.has_spec(error) || t.has_spec(error))
+    {}
+
+    pub proof fn join_idempotent(self)
+        ensures self.join_spec(self) == self
+    {}
+
+    pub proof fn join_commutative(self, t: DivAlarm)
+        ensures self.join_spec(t) == t.join_spec(self)
+    {}
+
+    pub proof fn join_associative(self, t: DivAlarm, u: DivAlarm)
+        ensures self.join_spec(t).join_spec(u) == self.join_spec(t.join_spec(u))
+    {}
+}
+
+}
+
 macro_rules! abstract_domain {
     ($mod_name:ident, $uint:ty, $bits:expr, $max_val:expr) => {
         pub mod $mod_name {

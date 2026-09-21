@@ -5,6 +5,7 @@
 /// Pure Rust — no Verus. Reimplements the domain ops for testing.
 use rand::rngs::StdRng;
 use rand::{Rng, RngExt, SeedableRng};
+use semi_persistent_abstract_domains::domains::DivAlarm;
 use semi_persistent_abstract_domains::domains::d8::Interval as D8Interval;
 
 const DEFAULT_TEST_SEED: u64 = 0x5eed_5eed;
@@ -1203,6 +1204,37 @@ fn fuzz_eun_plus_assoc() {
 // ----------------------------------------------------------------
 // Identity elements
 // ----------------------------------------------------------------
+
+#[test]
+fn division_alarm_truth_table_and_join_laws() {
+    use DivAlarm::{DefiniteError, MaybeError, NoError};
+
+    assert!(NoError.has(false));
+    assert!(!NoError.has(true));
+    assert!(!DefiniteError.has(false));
+    assert!(DefiniteError.has(true));
+    assert!(MaybeError.has(false));
+    assert!(MaybeError.has(true));
+
+    let alarms = [NoError, DefiniteError, MaybeError];
+    for left in alarms {
+        assert!(left.join(&left) == left);
+        for right in alarms {
+            let joined = left.join(&right);
+            assert!(joined == right.join(&left));
+            for error in [false, true] {
+                assert_eq!(joined.has(error), left.has(error) || right.has(error));
+            }
+            for third in alarms {
+                assert!(left.join(&right).join(&third) == left.join(&right.join(&third)));
+            }
+        }
+    }
+
+    assert!(NoError.join(&DefiniteError) == MaybeError);
+    assert!(NoError.join(&MaybeError) == MaybeError);
+    assert!(DefiniteError.join(&MaybeError) == MaybeError);
+}
 
 #[test]
 fn production_interval_bottom_is_empty_and_canonical() {

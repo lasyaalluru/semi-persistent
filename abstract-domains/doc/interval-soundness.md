@@ -73,8 +73,10 @@ the Tnum component continues to constrain the result.
 
 ## Scope
 
-The current generated interval API does not provide interval-by-interval
-division, alarms, abstract booleans, backward assumptions, wrapped intervals,
+The shared `DivAlarm` domain represents no-error, definite-error, and
+maybe-error outcomes with a proved join, but the generated interval API does
+not yet provide interval-by-interval division returning that alarm. It also
+does not provide abstract booleans, backward assumptions, wrapped intervals,
 or strided intervals. The standalone `exec_tnum.rs` experiment has a broader
 Rust surface, but it is not the contract inventory described here. No claim in
 this document applies to the disabled `u128` instantiation.

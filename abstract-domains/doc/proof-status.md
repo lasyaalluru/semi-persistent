@@ -6,7 +6,7 @@ Last refreshed: 2026-09-20.
 
 ```text
 cargo verus verify
-1118 verified, 0 errors
+1125 verified, 0 errors
 ```
 
 The project source contains no executable `admit()` or `assume()` calls. CI
@@ -27,7 +27,7 @@ The `d128` macro invocation remains disabled because its bitvector obligations
 exceed the current solver capacity. Do not describe `u128` as an enabled or
 verified executable instance.
 
-The separate Rust mirror suite contains 48 tests:
+The separate Rust mirror suite contains 49 tests:
 
 ```text
 cargo test -p semi-persistent-abstract-domains --test fuzz
@@ -61,6 +61,10 @@ The `ExecUnum` proofs use native/spec bridge lemmas, the L3 `ChoppedUnum`
 soundness theorems, explicit overflow-to-top cases, and interval-to-Unum range
 lemmas. `ReducedProduct::add` composes the four component containment
 postconditions and then applies the proved containment of `reduce`.
+
+`DivAlarm` has executable membership and join operations linked to their
+specifications. Its join is proved sound, idempotent, commutative, and
+associative.
 
 Other executable methods currently prove well-formedness only. In particular,
 this includes Tnum multiplication, shifts, negation and subtraction, most

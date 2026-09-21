@@ -14,8 +14,9 @@ corresponding operation exists or verifies.
 ### Current state
 
 Reduced-product operations without an interval transfer function use
-`Interval::top()`. General interval-by-interval division and its alarm result
-are absent.
+`Interval::top()`. The shared `DivAlarm` domain and its proved join are
+available, but general interval-by-interval division returning an alarm is
+absent.
 
 ### Gap
 
@@ -38,7 +39,7 @@ unsigned dividend `[a,b]` and divisor `[c,d]`:
 - `c = 0 < d`: return `[a / d, b]` with maybe-error; and
 - `c = d = 0`: return `bottom` with definite-error.
 
-Define alarm meaning by concretization, not by severity alone:
+The alarm domain uses concretization rather than severity:
 
 ```text
 NoError       = {false}
@@ -46,9 +47,9 @@ DefiniteError = {true}
 MaybeError    = {false, true}
 ```
 
-Thus `NoError` and `DefiniteError` are incomparable and their join is
-`MaybeError`. Propagate alarms through reduced-product operations and joins
-according to that concretization.
+Thus `NoError` and `DefiniteError` are incomparable and their proved join is
+`MaybeError`. The remaining work is to propagate alarms through division,
+reduced-product operations, and joins according to that concretization.
 
 ### Acceptance criteria
 
