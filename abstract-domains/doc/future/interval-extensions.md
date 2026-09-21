@@ -3,19 +3,19 @@
 [Current interval contracts](../interval-soundness.md) |
 [Proof status](../proof-status.md)
 
-The shipping interval component is a nonempty, non-wrapping unsigned range with
-proved `add`, `join`, `meet`, and positive-constant division contracts. This
-document specifies extensions that are not implemented on the current branch.
-Nothing here is evidence that the corresponding operation exists or verifies.
+The shipping interval component is a non-wrapping unsigned range with a
+canonical bottom and proved `add`, `join`, `meet`, and positive-constant
+division contracts. This document specifies extensions that are not
+implemented on the current branch. Nothing here is evidence that the
+corresponding operation exists or verifies.
 
 ## 1. Transfer Functions, Division, and Alarms
 
 ### Current state
 
 Reduced-product operations without an interval transfer function use
-`Interval::top()`. General interval-by-interval division is absent. The current
-interval representation also has no bottom value with which to represent an
-operation that has no successful result.
+`Interval::top()`. General interval-by-interval division and its alarm result
+are absent.
 
 ### Gap
 
@@ -35,8 +35,7 @@ unsigned dividend `[a,b]` and divisor `[c,d]`:
 
 - `c > 0`: return `[a / d, b / c]` with no-error;
 - `c = 0 < d`: return `[a / d, b]` with maybe-error; and
-- `c = d = 0`: return no value if bottom is added, or `top` with
-  definite-error under the current nonempty representation.
+- `c = d = 0`: return `bottom` with definite-error.
 
 Define alarm meaning by concretization, not by severity alone:
 
@@ -47,8 +46,7 @@ MaybeError    = {false, true}
 ```
 
 Thus `NoError` and `DefiniteError` are incomparable and their join is
-`MaybeError`. Add an explicit bottom only if unreachable states must be
-represented. Propagate alarms through reduced-product operations and joins
+`MaybeError`. Propagate alarms through reduced-product operations and joins
 according to that concretization.
 
 ### Acceptance criteria
@@ -92,8 +90,7 @@ Add backward transfer functions for true and false branches. For a true
 unsigned `x < y` branch, narrow with checked forms of
 `x.hi <= y.hi - 1` and `y.lo >= x.lo + 1`, detect an infeasible branch, and run
 the ordinary reduced-product reduction afterward. Represent infeasibility with
-an explicit bottom or a `None` result; do not encode it as an ordinary
-well-formed interval.
+the explicit bottom; do not encode it as an ordinary nonempty interval.
 
 ### Acceptance criteria
 

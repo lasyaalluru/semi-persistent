@@ -1209,6 +1209,105 @@ macro_rules! abstract_domain {
                     else { self.lo <= self.hi }
                 }
                 pub open spec fn has(self, x: $uint) -> bool { !self.is_bottom && self.lo <= x && x <= self.hi }
+                pub open spec fn refines(self, t: Interval) -> bool {
+                    forall|x: $uint| self.has(x) ==> t.has(x)
+                }
+                pub open spec fn meet_spec(self, t: Interval) -> Interval {
+                    if self.is_bottom || t.is_bottom {
+                        Interval { is_bottom: true, lo: 0, hi: 0 }
+                    } else {
+                        let lo = if self.lo > t.lo { self.lo } else { t.lo };
+                        let hi = if self.hi < t.hi { self.hi } else { t.hi };
+                        if hi < lo {
+                            Interval { is_bottom: true, lo: 0, hi: 0 }
+                        } else {
+                            Interval { is_bottom: false, lo, hi }
+                        }
+                    }
+                }
+                pub open spec fn join_spec(self, t: Interval) -> Interval {
+                    if self.is_bottom {
+                        t
+                    } else if t.is_bottom {
+                        self
+                    } else {
+                        Interval {
+                            is_bottom: false,
+                            lo: if self.lo < t.lo { self.lo } else { t.lo },
+                            hi: if self.hi > t.hi { self.hi } else { t.hi },
+                        }
+                    }
+                }
+                pub proof fn meet_idempotent(self)
+                    requires self.wf()
+                    ensures self.meet_spec(self) == self
+                {}
+                pub proof fn meet_commutative(self, t: Interval)
+                    requires self.wf(), t.wf()
+                    ensures self.meet_spec(t) == t.meet_spec(self)
+                {}
+                pub proof fn meet_associative(self, t: Interval, u: Interval)
+                    requires self.wf(), t.wf(), u.wf()
+                    ensures self.meet_spec(t).meet_spec(u) == self.meet_spec(t.meet_spec(u))
+                {}
+                pub proof fn meet_top_identity(self)
+                    requires self.wf()
+                    ensures self.meet_spec(Interval {
+                        is_bottom: false,
+                        lo: 0,
+                        hi: !(0 as $uint),
+                    }) == self
+                {
+                    let hi = self.hi;
+                    assert(!(0 as $uint) >= hi) by(bit_vector);
+                }
+                pub proof fn meet_bottom_absorbing(self)
+                    requires self.wf()
+                    ensures self.meet_spec(Interval {
+                        is_bottom: true,
+                        lo: 0,
+                        hi: 0,
+                    }) == (Interval {
+                        is_bottom: true,
+                        lo: 0,
+                        hi: 0,
+                    })
+                {}
+                pub proof fn join_idempotent(self)
+                    requires self.wf()
+                    ensures self.join_spec(self) == self
+                {}
+                pub proof fn join_commutative(self, t: Interval)
+                    requires self.wf(), t.wf()
+                    ensures self.join_spec(t) == t.join_spec(self)
+                {}
+                pub proof fn join_associative(self, t: Interval, u: Interval)
+                    requires self.wf(), t.wf(), u.wf()
+                    ensures self.join_spec(t).join_spec(u) == self.join_spec(t.join_spec(u))
+                {}
+                pub proof fn join_bottom_identity(self)
+                    requires self.wf()
+                    ensures self.join_spec(Interval {
+                        is_bottom: true,
+                        lo: 0,
+                        hi: 0,
+                    }) == self
+                {}
+                pub proof fn join_top_absorbing(self)
+                    requires self.wf()
+                    ensures self.join_spec(Interval {
+                        is_bottom: false,
+                        lo: 0,
+                        hi: !(0 as $uint),
+                    }) == (Interval {
+                        is_bottom: false,
+                        lo: 0,
+                        hi: !(0 as $uint),
+                    })
+                {
+                    let hi = self.hi;
+                    assert(!(0 as $uint) >= hi) by(bit_vector);
+                }
                 #[inline] pub fn constant(n: $uint) -> (r: Interval)
                     ensures r.wf(), r.has(n)
                 {
@@ -1290,7 +1389,7 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn meet(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
-                    ensures r.wf(),
+                    ensures r.wf(), r == self.meet_spec(*t),
                         forall|x: $uint| #![auto] self.has(x) && t.has(x) ==> r.has(x)
                 {
                     if self.is_bottom || t.is_bottom { return Interval::bottom(); }
@@ -1301,7 +1400,7 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn join(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
-                    ensures r.wf(),
+                    ensures r.wf(), r == self.join_spec(*t),
                         forall|x: $uint| #![auto] self.has(x) ==> r.has(x),
                         forall|x: $uint| #![auto] t.has(x) ==> r.has(x)
                 {

@@ -33,6 +33,7 @@ struct ExecAnum {
 }
 #[derive(Clone, Copy, Debug)]
 struct Interval {
+    is_bottom: bool,
     lo: u64,
     hi: u64,
 }
@@ -177,18 +178,43 @@ impl ExecAnum {
 
 impl Interval {
     fn wf(&self) -> bool {
-        self.lo <= self.hi
+        if self.is_bottom {
+            self.lo == 0 && self.hi == 0
+        } else {
+            self.lo <= self.hi
+        }
     }
     fn contains(&self, x: u64) -> bool {
-        self.lo <= x && x <= self.hi
+        !self.is_bottom && self.lo <= x && x <= self.hi
+    }
+    fn bottom() -> Interval {
+        Interval {
+            is_bottom: true,
+            lo: 0,
+            hi: 0,
+        }
+    }
+    fn top() -> Interval {
+        Interval {
+            is_bottom: false,
+            lo: 0,
+            hi: !0,
+        }
     }
     fn add(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            return Interval::bottom();
+        }
         let lo = self.lo.wrapping_add(t.lo);
         let hi = self.hi.wrapping_add(t.hi);
         if lo < self.lo || hi < self.hi || hi < lo {
-            Interval { lo: 0, hi: !0 }
+            Interval::top()
         } else {
-            Interval { lo, hi }
+            Interval {
+                is_bottom: false,
+                lo,
+                hi,
+            }
         }
     }
 }
@@ -211,9 +237,17 @@ fn rand_ean(rng: &mut impl Rng) -> ExecAnum {
 fn rand_interval(rng: &mut impl Rng) -> Interval {
     let (a, b): (u64, u64) = (rng.random(), rng.random());
     if a <= b {
-        Interval { lo: a, hi: b }
+        Interval {
+            is_bottom: false,
+            lo: a,
+            hi: b,
+        }
     } else {
-        Interval { lo: b, hi: a }
+        Interval {
+            is_bottom: false,
+            lo: b,
+            hi: a,
+        }
     }
 }
 fn sample_etn(tn: &ExecTnum, rng: &mut impl Rng) -> u64 {
@@ -1026,6 +1060,70 @@ fn production_interval_bottom_is_empty_and_canonical() {
 
     let disjoint = D8Interval::constant(1).meet(&D8Interval::constant(2));
     assert!(disjoint.is_bottom);
+}
+
+fn d8_interval_eq(a: &D8Interval, b: &D8Interval) -> bool {
+    a.is_bottom == b.is_bottom && a.lo == b.lo && a.hi == b.hi
+}
+
+fn d8_interval_contains(iv: &D8Interval, value: u8) -> bool {
+    !iv.is_bottom && iv.lo <= value && value <= iv.hi
+}
+
+fn small_d8_intervals() -> Vec<D8Interval> {
+    let mut intervals = vec![D8Interval::bottom(), D8Interval::top()];
+    for lo in 0u8..=7 {
+        for hi in lo..=7 {
+            intervals.push(D8Interval {
+                is_bottom: false,
+                lo,
+                hi,
+            });
+        }
+    }
+    intervals
+}
+
+#[test]
+fn production_interval_lattice_laws_small_exhaustive() {
+    let intervals = small_d8_intervals();
+    let bottom = D8Interval::bottom();
+    let top = D8Interval::top();
+
+    for a in &intervals {
+        assert!(d8_interval_eq(&a.meet(a), a));
+        assert!(d8_interval_eq(&a.join(a), a));
+        assert!(d8_interval_eq(&a.meet(&top), a));
+        assert!(d8_interval_eq(&a.join(&bottom), a));
+        assert!(d8_interval_eq(&a.meet(&bottom), &bottom));
+        assert!(d8_interval_eq(&a.join(&top), &top));
+
+        for b in &intervals {
+            let ab_meet = a.meet(b);
+            let ab_join = a.join(b);
+            assert!(d8_interval_eq(&ab_meet, &b.meet(a)));
+            assert!(d8_interval_eq(&ab_join, &b.join(a)));
+
+            for value in u8::MIN..=u8::MAX {
+                assert_eq!(
+                    d8_interval_contains(&ab_meet, value),
+                    d8_interval_contains(a, value) && d8_interval_contains(b, value),
+                );
+                assert!(!d8_interval_contains(a, value) || d8_interval_contains(&ab_join, value));
+                assert!(!d8_interval_contains(b, value) || d8_interval_contains(&ab_join, value));
+            }
+
+            for c in &intervals {
+                let ab_c_meet = ab_meet.meet(c);
+                let a_bc_meet = a.meet(&b.meet(c));
+                assert!(d8_interval_eq(&ab_c_meet, &a_bc_meet));
+
+                let ab_c_join = ab_join.join(c);
+                let a_bc_join = a.join(&b.join(c));
+                assert!(d8_interval_eq(&ab_c_join, &a_bc_join));
+            }
+        }
+    }
 }
 
 #[test]
