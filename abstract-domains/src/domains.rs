@@ -1435,6 +1435,38 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
+                #[inline] pub fn lsh(&self) -> (r: Interval)
+                    requires self.wf()
+                    ensures r.wf(),
+                        forall|x: $uint| #![auto] self.has(x) ==> r.has(x << 1)
+                {
+                    if self.is_bottom { return Interval::bottom(); }
+                    let slo = self.lo; let shi = self.hi;
+                    let max = !(0 as $uint);
+                    if shi > max >> 1 {
+                        let r = Interval::top();
+                        proof {
+                            assert forall|x: $uint| #![auto] self.has(x) implies r.has(x << 1) by {
+                                Self::top_has(x << 1);
+                            };
+                        }
+                        return r;
+                    }
+                    let lo = slo << 1;
+                    let hi = shi << 1;
+                    let r = Interval { is_bottom: false, lo, hi };
+                    proof {
+                        assert(lo <= hi) by(bit_vector)
+                            requires slo <= shi, shi <= max >> 1,
+                                lo == slo << 1, hi == shi << 1;
+                        assert forall|x: $uint| #![auto] self.has(x) implies r.has(x << 1) by {
+                            assert(lo <= x << 1 && x << 1 <= hi) by(bit_vector)
+                                requires slo <= x, x <= shi, shi <= max >> 1,
+                                    lo == slo << 1, hi == shi << 1;
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn div_const(&self, d: $uint) -> (r: Interval)
                     requires self.wf(), d > 0
                     ensures r.wf(),
@@ -1660,7 +1692,7 @@ macro_rules! abstract_domain {
                     ReducedProduct { tnum: self.tnum.rsh(), anum: ExecAnum::top(), interval: self.interval.rsh(), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn lsh(&self) -> (r: ReducedProduct) requires self.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.lsh(), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
+                    ReducedProduct { tnum: self.tnum.lsh(), anum: ExecAnum::top(), interval: self.interval.lsh(), unum: ExecUnum::top() }.reduce()
                 }
                 pub fn join(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
                     ReducedProduct { tnum: self.tnum.join(&t.tnum), anum: ExecAnum::top(), interval: self.interval.join(&t.interval), unum: ExecUnum::top() }.reduce()

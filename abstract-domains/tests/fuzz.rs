@@ -228,6 +228,19 @@ impl Interval {
             }
         }
     }
+    fn lsh(&self) -> Interval {
+        if self.is_bottom {
+            return Interval::bottom();
+        }
+        if self.hi > u64::MAX >> 1 {
+            return Interval::top();
+        }
+        Interval {
+            is_bottom: false,
+            lo: self.lo << 1,
+            hi: self.hi << 1,
+        }
+    }
 }
 
 // ================================================================
@@ -482,6 +495,13 @@ fuzz_unop!(
     sample_interval,
     rsh,
     |x: u64| x >> 1
+);
+fuzz_unop!(
+    fuzz_iv_lsh,
+    rand_interval,
+    sample_interval,
+    lsh,
+    |x: u64| x << 1
 );
 
 // ================================================================
@@ -1169,6 +1189,37 @@ fn production_interval_rsh_small_exhaustive() {
         for value in u8::MIN..=u8::MAX {
             if d8_interval_contains(&interval, value) {
                 assert!(d8_interval_contains(&shifted, value >> 1));
+            }
+        }
+    }
+}
+
+#[test]
+fn production_interval_lsh_u8_exhaustive() {
+    let bottom = D8Interval::bottom().lsh();
+    assert!(bottom.is_bottom);
+    assert_eq!(bottom.lo, 0);
+    assert_eq!(bottom.hi, 0);
+
+    let top = D8Interval::top();
+    for lo in u8::MIN..=u8::MAX {
+        for hi in lo..=u8::MAX {
+            let interval = D8Interval {
+                is_bottom: false,
+                lo,
+                hi,
+            };
+            let shifted = interval.lsh();
+            if hi > u8::MAX >> 1 {
+                assert!(d8_interval_eq(&shifted, &top));
+            } else {
+                assert!(!shifted.is_bottom);
+                assert_eq!(shifted.lo, lo << 1);
+                assert_eq!(shifted.hi, hi << 1);
+            }
+
+            for value in lo..=hi {
+                assert!(d8_interval_contains(&shifted, value << 1));
             }
         }
     }

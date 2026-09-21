@@ -35,6 +35,9 @@ The executable methods carry containment postconditions:
   intersection is empty.
 - `rsh(a)` returns `[a.lo >> 1, a.hi >> 1]` and contains every concrete value
   shifted right by one bit. It propagates `bottom`.
+- `lsh(a)` returns `[a.lo << 1, a.hi << 1]` when the upper endpoint does not
+  overflow and returns `top` otherwise. It propagates `bottom` and contains
+  every concrete value shifted left by one bit.
 - `div_const(a, d)`, with `d > 0`, returns `[a.lo / d, a.hi / d]` and contains
   every concrete quotient. Its proof uses monotonicity of unsigned division.
 
@@ -50,11 +53,11 @@ for join; and that bottom is absorbing for meet and the identity for join.
 
 `ReducedProduct` denotes the intersection of its Tnum, Anum, Interval, and Unum
 components. Its reduction step narrows interval bounds using information from
-the other domains and then rebuilds compatible component values. Right shift
-uses the interval transfer directly. Operations without an interval transfer
-function use `Interval::top()`. This loses interval precision but remains sound
-because `top` contains every machine value and the other components continue to
-constrain the product.
+the other domains and then rebuilds compatible component values. Left and right
+shift use their interval transfers directly. Operations without an interval
+transfer function use `Interval::top()`. This loses interval precision but
+remains sound because `top` contains every machine value and the other
+components continue to constrain the product.
 
 ## Scope
 
