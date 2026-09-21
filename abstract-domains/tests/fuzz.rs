@@ -201,6 +201,27 @@ impl Interval {
             hi: !0,
         }
     }
+    fn bw_or(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            Interval::bottom()
+        } else {
+            Interval::top()
+        }
+    }
+    fn bw_and(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            Interval::bottom()
+        } else {
+            Interval::top()
+        }
+    }
+    fn bw_xor(&self, t: &Interval) -> Interval {
+        if self.is_bottom || t.is_bottom {
+            Interval::bottom()
+        } else {
+            Interval::top()
+        }
+    }
     fn add(&self, t: &Interval) -> Interval {
         if self.is_bottom || t.is_bottom {
             return Interval::bottom();
@@ -529,6 +550,33 @@ fn fuzz_ean_div() {
 }
 
 // Interval
+fuzz_binop!(
+    fuzz_iv_or,
+    Interval,
+    rand_interval,
+    sample_interval,
+    contains,
+    bw_or,
+    |x: u64, y: u64| x | y
+);
+fuzz_binop!(
+    fuzz_iv_and,
+    Interval,
+    rand_interval,
+    sample_interval,
+    contains,
+    bw_and,
+    |x: u64, y: u64| x & y
+);
+fuzz_binop!(
+    fuzz_iv_xor,
+    Interval,
+    rand_interval,
+    sample_interval,
+    contains,
+    bw_xor,
+    |x: u64, y: u64| x ^ y
+);
 fuzz_binop!(
     fuzz_iv_plus,
     Interval,
@@ -1323,6 +1371,38 @@ fn arithmetic_d8_intervals() -> Vec<D8Interval> {
         D8Interval::constant(u8::MAX),
     ]);
     intervals
+}
+
+#[test]
+fn production_interval_bitwise_small_exhaustive() {
+    let intervals = arithmetic_d8_intervals();
+    let bottom = D8Interval::bottom();
+    let top = D8Interval::top();
+
+    for left in &intervals {
+        for right in &intervals {
+            let or_result = left.bw_or(right);
+            let and_result = left.bw_and(right);
+            let xor_result = left.bw_xor(right);
+            if left.is_bottom || right.is_bottom {
+                assert!(d8_interval_eq(&or_result, &bottom));
+                assert!(d8_interval_eq(&and_result, &bottom));
+                assert!(d8_interval_eq(&xor_result, &bottom));
+                continue;
+            }
+
+            assert!(d8_interval_eq(&or_result, &top));
+            assert!(d8_interval_eq(&and_result, &top));
+            assert!(d8_interval_eq(&xor_result, &top));
+            for x in left.lo..=left.hi {
+                for y in right.lo..=right.hi {
+                    assert!(d8_interval_contains(&or_result, x | y));
+                    assert!(d8_interval_contains(&and_result, x & y));
+                    assert!(d8_interval_contains(&xor_result, x ^ y));
+                }
+            }
+        }
+    }
 }
 
 #[test]

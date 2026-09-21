@@ -19,17 +19,17 @@ are absent.
 
 ### Gap
 
-The interval component cannot contribute precision for bitwise operations, and
-it cannot distinguish division that is safe, may divide by zero, or must divide
-by zero. Subtraction, multiplication, negation, and both one-bit shifts have
-proved endpoint transfers; operations conservatively return `top` when their
-results cross the unsigned wrap boundary.
+The interval component has explicit, proved bitwise transfers, but they
+deliberately return `top` for non-bottom operands and therefore contribute no
+bitwise precision. It also cannot distinguish division that is safe, may divide
+by zero, or must divide by zero. Subtraction, multiplication, negation, and both
+one-bit shifts have proved endpoint transfers; operations conservatively return
+`top` when their results cross the unsigned wrap boundary.
 
 ### Task
 
-Give every remaining reduced-product operation an explicit interval transfer
-contract. A conservative implementation may return `top` when no more precise
-ordinary interval is justified.
+The remaining transfer task is interval-by-interval division with an explicit
+alarm result.
 
 Add interval division with a value result and a may-error abstraction. For
 unsigned dividend `[a,b]` and divisor `[c,d]`:

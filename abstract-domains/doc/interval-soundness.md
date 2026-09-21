@@ -26,6 +26,9 @@ disjoint ranges.
 
 The executable methods carry containment postconditions:
 
+- `bw_or(a, b)`, `bw_and(a, b)`, and `bw_xor(a, b)` propagate `bottom` and
+  conservatively return `top` for non-bottom operands. This intentionally gives
+  up interval precision while retaining universal containment.
 - `add(a, b)` contains every machine-width wrapping sum of one value from each
   operand. If endpoint arithmetic can wrap or invert the range, it returns
   `top`; otherwise monotonicity gives `[a.lo + b.lo, a.hi + b.hi]`.
@@ -64,9 +67,9 @@ for join; and that bottom is absorbing for meet and the identity for join.
 components. Its reduction step narrows interval bounds using information from
 the other domains and then rebuilds compatible component values. Subtraction,
 multiplication, negation, and both shifts use their interval transfers directly.
-Operations without an interval transfer function use `Interval::top()`. This
-loses interval precision but remains sound because `top` contains every machine
-value and the other components continue to constrain the product.
+Bitwise operations use explicit conservative transfers that return `top` for
+non-bottom operands. This loses interval precision but remains sound because
+the Tnum component continues to constrain the result.
 
 ## Scope
 

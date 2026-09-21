@@ -1337,6 +1337,54 @@ macro_rules! abstract_domain {
                 {
                     assert(!(0 as $uint) >= x) by(bit_vector);
                 }
+                #[inline] pub fn bw_or(&self, t: &Interval) -> (r: Interval)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(),
+                        forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) ==> r.has(c1 | c2)
+                {
+                    if self.is_bottom || t.is_bottom { return Interval::bottom(); }
+                    let r = Interval::top();
+                    proof {
+                        assert forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) implies r.has(c1 | c2) by {
+                            Self::top_has(c1 | c2);
+                        };
+                    }
+                    r
+                }
+                #[inline] pub fn bw_and(&self, t: &Interval) -> (r: Interval)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(),
+                        forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) ==> r.has(c1 & c2)
+                {
+                    if self.is_bottom || t.is_bottom { return Interval::bottom(); }
+                    let r = Interval::top();
+                    proof {
+                        assert forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) implies r.has(c1 & c2) by {
+                            Self::top_has(c1 & c2);
+                        };
+                    }
+                    r
+                }
+                #[inline] pub fn bw_xor(&self, t: &Interval) -> (r: Interval)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(),
+                        forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) ==> r.has(c1 ^ c2)
+                {
+                    if self.is_bottom || t.is_bottom { return Interval::bottom(); }
+                    let r = Interval::top();
+                    proof {
+                        assert forall|c1: $uint, c2: $uint| #![auto]
+                            self.has(c1) && t.has(c2) implies r.has(c1 ^ c2) by {
+                            Self::top_has(c1 ^ c2);
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn add(&self, t: &Interval) -> (r: Interval)
                     requires self.wf(), t.wf()
                     ensures r.wf(),
@@ -1818,13 +1866,13 @@ macro_rules! abstract_domain {
                     }
                 }
                 #[inline] pub fn bw_or(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.bw_or(&t.tnum), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
+                    ReducedProduct { tnum: self.tnum.bw_or(&t.tnum), anum: ExecAnum::top(), interval: self.interval.bw_or(&t.interval), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn bw_and(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.bw_and(&t.tnum), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
+                    ReducedProduct { tnum: self.tnum.bw_and(&t.tnum), anum: ExecAnum::top(), interval: self.interval.bw_and(&t.interval), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn bw_xor(&self, t: &ReducedProduct) -> (r: ReducedProduct) requires self.wf(), t.wf() ensures r.wf() {
-                    ReducedProduct { tnum: self.tnum.bw_xor(&t.tnum), anum: ExecAnum::top(), interval: Interval::top(), unum: ExecUnum::top() }.reduce()
+                    ReducedProduct { tnum: self.tnum.bw_xor(&t.tnum), anum: ExecAnum::top(), interval: self.interval.bw_xor(&t.interval), unum: ExecUnum::top() }.reduce()
                 }
                 #[inline] pub fn add(&self, t: &ReducedProduct) -> (r: ReducedProduct)
                     requires self.wf(), t.wf()
