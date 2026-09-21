@@ -90,6 +90,7 @@ macro_rules! abstract_domain {
     ($mod_name:ident, $uint:ty, $bits:expr, $max_val:expr) => {
         pub mod $mod_name {
             use vstd::prelude::*;
+            use super::DivAlarm;
             use crate::bools::Bit;
             use crate::nats::*;
             use crate::tnum::Tnum;
@@ -1274,6 +1275,11 @@ macro_rules! abstract_domain {
                 pub lo: $uint,
                 pub hi: $uint,
             }
+            #[derive(Clone, Copy)]
+            pub struct IntervalDivResult {
+                pub value: Interval,
+                pub alarm: DivAlarm,
+            }
             impl Interval {
                 pub open spec fn wf(self) -> bool {
                     if self.is_bottom { self.lo == 0 && self.hi == 0 }
@@ -1769,6 +1775,119 @@ macro_rules! abstract_domain {
                         };
                     }
                     Interval { is_bottom: false, lo: self.lo / d, hi: self.hi / d }
+                }
+                pub fn div(&self, divisor: &Interval) -> (r: IntervalDivResult)
+                    requires self.wf(), divisor.wf()
+                    ensures r.value.wf(),
+                        forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y) && y != 0
+                                ==> r.value.has(x / y),
+                        forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y)
+                                ==> r.alarm.has_spec(y == 0)
+                {
+                    if self.is_bottom || divisor.is_bottom {
+                        return IntervalDivResult {
+                            value: Interval::bottom(),
+                            alarm: DivAlarm::NoError,
+                        };
+                    }
+                    let slo = self.lo; let shi = self.hi;
+                    let dlo = divisor.lo; let dhi = divisor.hi;
+                    if dhi == 0 {
+                        let r = IntervalDivResult {
+                            value: Interval::bottom(),
+                            alarm: DivAlarm::DefiniteError,
+                        };
+                        proof {
+                            assert forall|x: $uint, y: $uint| #![auto]
+                                self.has(x) && divisor.has(y)
+                                implies r.alarm.has_spec(y == 0) by {
+                                assert(y == 0);
+                            };
+                        }
+                        return r;
+                    }
+                    if dlo == 0 {
+                        let lo = slo / dhi;
+                        let hi = shi;
+                        let r = IntervalDivResult {
+                            value: Interval { is_bottom: false, lo, hi },
+                            alarm: DivAlarm::MaybeError,
+                        };
+                        proof {
+                            vstd::arithmetic::div_mod::lemma_div_nonincreasing(
+                                slo as int,
+                                dhi as int,
+                            );
+                            assert(lo <= hi);
+                            assert forall|x: $uint, y: $uint| #![auto]
+                                self.has(x) && divisor.has(y) && y != 0
+                                implies r.value.has(x / y) by {
+                                vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                                    slo as int,
+                                    x as int,
+                                    dhi as int,
+                                );
+                                vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(
+                                    x as int,
+                                    y as int,
+                                    dhi as int,
+                                );
+                                vstd::arithmetic::div_mod::lemma_div_nonincreasing(
+                                    x as int,
+                                    y as int,
+                                );
+                                assert(lo <= x / y && x / y <= hi);
+                            };
+                        }
+                        return r;
+                    }
+                    let lo = slo / dhi;
+                    let hi = shi / dlo;
+                    let r = IntervalDivResult {
+                        value: Interval { is_bottom: false, lo, hi },
+                        alarm: DivAlarm::NoError,
+                    };
+                    proof {
+                        vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                            slo as int,
+                            shi as int,
+                            dhi as int,
+                        );
+                        vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(
+                            shi as int,
+                            dlo as int,
+                            dhi as int,
+                        );
+                        assert(lo <= hi);
+                        assert forall|x: $uint, y: $uint| #![auto]
+                            self.has(x) && divisor.has(y) && y != 0
+                            implies r.value.has(x / y) by {
+                            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                                slo as int,
+                                x as int,
+                                dhi as int,
+                            );
+                            vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(
+                                x as int,
+                                y as int,
+                                dhi as int,
+                            );
+                            vstd::arithmetic::div_mod::lemma_div_is_ordered(
+                                x as int,
+                                shi as int,
+                                y as int,
+                            );
+                            vstd::arithmetic::div_mod::lemma_div_is_ordered_by_denominator(
+                                shi as int,
+                                dlo as int,
+                                y as int,
+                            );
+                            assert(lo <= x / y && x / y <= hi);
+                        };
+                    }
+                    r
                 }
             }
 

@@ -52,6 +52,10 @@ The executable methods carry containment postconditions:
   every concrete value shifted left by one bit.
 - `div_const(a, d)`, with `d > 0`, returns `[a.lo / d, a.hi / d]` and contains
   every concrete quotient. Its proof uses monotonicity of unsigned division.
+- `div(a, b)` returns both a value interval and `DivAlarm`. A positive divisor
+  yields `[a.lo / b.hi, a.hi / b.lo]` with `NoError`; a divisor containing zero
+  and positive values yields `[a.lo / b.hi, a.hi]` with `MaybeError`; and the
+  zero singleton yields `bottom` with `DefiniteError`.
 
 Each result is also proved well formed. These are universal Verus
 postconditions, not conclusions inferred from the Rust property tests.
@@ -74,12 +78,13 @@ the Tnum component continues to constrain the result.
 ## Scope
 
 The shared `DivAlarm` domain represents no-error, definite-error, and
-maybe-error outcomes with a proved join, but the generated interval API does
-not yet provide interval-by-interval division returning that alarm. It also
-does not provide abstract booleans, backward assumptions, wrapped intervals,
-or strided intervals. The standalone `exec_tnum.rs` experiment has a broader
-Rust surface, but it is not the contract inventory described here. No claim in
-this document applies to the disabled `u128` instantiation.
+maybe-error outcomes with a proved join. `Interval::div` returns this alarm and
+proves both nonzero quotient containment and alarm membership. General division
+has not yet been composed through `ReducedProduct`. The generated API also does
+not provide abstract booleans, backward assumptions, wrapped intervals, or
+strided intervals. The standalone `exec_tnum.rs` experiment has a broader Rust
+surface, but it is not the contract inventory described here. No claim in this
+document applies to the disabled `u128` instantiation.
 
 The maintained designs and proof obligations for those extensions are in
 [`future/interval-extensions.md`](future/interval-extensions.md).

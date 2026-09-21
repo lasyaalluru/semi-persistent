@@ -13,10 +13,9 @@ corresponding operation exists or verifies.
 
 ### Current state
 
-Reduced-product operations without an interval transfer function use
-`Interval::top()`. The shared `DivAlarm` domain and its proved join are
-available, but general interval-by-interval division returning an alarm is
-absent.
+`Interval::div` returns a value interval and the shared `DivAlarm`, with proved
+nonzero quotient containment and alarm membership. General division has not yet
+been composed through the reduced product.
 
 ### Gap
 
@@ -29,11 +28,11 @@ one-bit shifts have proved endpoint transfers; operations conservatively return
 
 ### Task
 
-The remaining transfer task is interval-by-interval division with an explicit
-alarm result.
+The remaining transfer task is to compose interval-by-interval division and its
+alarm through the reduced product.
 
-Add interval division with a value result and a may-error abstraction. For
-unsigned dividend `[a,b]` and divisor `[c,d]`:
+The interval division transfer uses the following cases for unsigned dividend
+`[a,b]` and divisor `[c,d]`:
 
 - `c > 0`: return `[a / d, b / c]` with no-error;
 - `c = 0 < d`: return `[a / d, b]` with maybe-error; and
@@ -48,8 +47,8 @@ MaybeError    = {false, true}
 ```
 
 Thus `NoError` and `DefiniteError` are incomparable and their proved join is
-`MaybeError`. The remaining work is to propagate alarms through division,
-reduced-product operations, and joins according to that concretization.
+`MaybeError`. The remaining work is to propagate alarms through reduced-product
+division and joins according to that concretization.
 
 ### Acceptance criteria
 

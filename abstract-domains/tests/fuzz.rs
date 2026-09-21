@@ -1438,6 +1438,88 @@ fn production_interval_bitwise_small_exhaustive() {
 }
 
 #[test]
+fn production_interval_division_cases() {
+    use DivAlarm::{DefiniteError, MaybeError, NoError};
+
+    let dividend = D8Interval {
+        is_bottom: false,
+        lo: 10,
+        hi: 20,
+    };
+
+    let safe = dividend.div(&D8Interval {
+        is_bottom: false,
+        lo: 2,
+        hi: 5,
+    });
+    assert!(!safe.value.is_bottom);
+    assert_eq!(safe.value.lo, 2);
+    assert_eq!(safe.value.hi, 10);
+    assert!(safe.alarm == NoError);
+
+    let mixed = dividend.div(&D8Interval {
+        is_bottom: false,
+        lo: 0,
+        hi: 5,
+    });
+    assert!(!mixed.value.is_bottom);
+    assert_eq!(mixed.value.lo, 2);
+    assert_eq!(mixed.value.hi, 20);
+    assert!(mixed.alarm == MaybeError);
+
+    let zero_only = dividend.div(&D8Interval::constant(0));
+    assert!(zero_only.value.is_bottom);
+    assert!(zero_only.alarm == DefiniteError);
+
+    let unreachable = D8Interval::bottom().div(&D8Interval::constant(0));
+    assert!(unreachable.value.is_bottom);
+    assert!(unreachable.alarm == NoError);
+}
+
+#[test]
+fn production_interval_division_small_exhaustive() {
+    use DivAlarm::{DefiniteError, MaybeError, NoError};
+
+    let intervals = arithmetic_d8_intervals();
+    let bottom = D8Interval::bottom();
+
+    for dividend in &intervals {
+        for divisor in &intervals {
+            let result = dividend.div(divisor);
+            if dividend.is_bottom || divisor.is_bottom {
+                assert!(d8_interval_eq(&result.value, &bottom));
+                assert!(result.alarm == NoError);
+                continue;
+            }
+
+            if divisor.hi == 0 {
+                assert!(d8_interval_eq(&result.value, &bottom));
+                assert!(result.alarm == DefiniteError);
+            } else if divisor.lo == 0 {
+                assert!(!result.value.is_bottom);
+                assert_eq!(result.value.lo, dividend.lo / divisor.hi);
+                assert_eq!(result.value.hi, dividend.hi);
+                assert!(result.alarm == MaybeError);
+            } else {
+                assert!(!result.value.is_bottom);
+                assert_eq!(result.value.lo, dividend.lo / divisor.hi);
+                assert_eq!(result.value.hi, dividend.hi / divisor.lo);
+                assert!(result.alarm == NoError);
+            }
+
+            for x in dividend.lo..=dividend.hi {
+                for y in divisor.lo..=divisor.hi {
+                    assert!(result.alarm.has(y == 0));
+                    if y != 0 {
+                        assert!(d8_interval_contains(&result.value, x / y));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn production_interval_sub_small_exhaustive() {
     let intervals = arithmetic_d8_intervals();
     let bottom = D8Interval::bottom();
