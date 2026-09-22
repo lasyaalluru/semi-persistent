@@ -21,17 +21,24 @@ For the verified core API of each `TRACK`-parameterized container:
 
 2. **Tracked correctness (`TRACK = true`).**
    An internal ghost stack `snapshots: Seq<Spec>` records the deep copy of
-   `view()` at each `mark()`. After `restore(token)`:
-   `view() == snapshots[token.frame_idx]`.
+   `view()` at each `mark()`. `restore(token)` resets to that checkpoint
+   and keeps its frame open (design doc 08 §1): afterwards
+   `view() == snapshots[token.depth]`, the depth is `token.depth + 1`, and
+   `snapshots` is the old prefix of length `token.depth + 1`. `pop_scope()`
+   drops the open top frame; `restore_and_pop(t)` is the two fused on one
+   pop core (the SMT-LIB `pop`, and exactly what the legacy restore always
+   was, at the same cost).
 
 3. **Branch-cut safety.**
-   Each token carries a container id, branch id, depth, and frame index.
-   Restore appends a `(parent_branch_id, fork_depth)` origin and starts a new
-   branch. Token validity means that its branch is on the current branch's
-   parent chain and its depth does not exceed that branch's path-specific
-   bound; the frame index must also still be in range. `restore(t)` has
-   `requires is_valid(t)`, so tokens beyond a branch cut are statically
-   rejected. An exec `is_token_valid` method computes the same predicate.
+   Each token carries the id of the manager that minted it, a generation
+   stamp and a depth (`GroupToken`; every container owns a manager, a
+   synced group shares one). A token is valid iff it names this manager and
+   the stamp at its depth is live: a restore cuts every stamp above the
+   checkpoint, a pop cuts the popped depth, and stamps are never reused, so
+   a cut token never comes back and a foreign token is refused whatever its
+   numbers. `restore`/`pop_scope` are total (refuse on a bad token or an
+   empty stack); `try_restore`/`try_pop_scope` return `Result`; the exec
+   `is_valid_token` computes the same predicate the contracts use.
 
 The aggregate structures add their own joint invariants on top; the largest is
 the class layer's `eg_model_wf` (invariants W1..W7, defined in the
@@ -56,8 +63,12 @@ method's preconditions; an ordinary Rust caller does not, and the erased
 wrap. The overflow/capacity preconditions are therefore also enforced at
 runtime: such a call panics with a descriptive message instead of corrupting
 the container. The fork-history headroom is queryable via
-`restores_remaining()`. The remaining public functions whose `requires` have
-no runtime check are enumerated in `partial-api-allowlist.txt`.
+`restores_remaining()`. Every public function is total: the only
+precondition it may state is the container's own well-formedness, which every
+constructor and operation upholds; anything else is either checked at runtime
+(a `Result` for operational refusal, a documented panic for a contract
+violation) or stated as a conditional postcondition. `partial-api-allowlist.txt`
+is empty and `tools/check_partial_api.py` keeps it so.
 
 ## Architecture
 

@@ -62,6 +62,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let n = eg.len();
     // Per-op cost and extractability, indexed by op id: the fixpoint below revisits every
@@ -143,6 +144,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let class = repr.to_usize();
     let mut ops: Vec<String> = Vec::new();
@@ -178,6 +180,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let id = best_node[repr.to_usize()];
     let name = eg.node_op_name(id).to_string();

@@ -26,10 +26,11 @@ The engine synthesizes ideas from several lines of work into a single
 coherent execution engine:
 
 - Semi-persistent data structures (Conchon and Filliâtre, 2008)
-  provide memory-cheap snapshots (a sparse diff, not a copy). For `b`
-  fork-history links, `k` replayed entries, `r` regrown cells, `p`
-  surviving-parent entries, and `w` materialized bitmap words, vector restore
-  is O(b+k+r+p) with inline capture and O(b+k+r+p+w) with parallel capture.
+  provide memory-cheap snapshots (a sparse diff, not a copy). Token validation is
+  O(1) — one generation-stamp read against the single `History` the e-graph owns.
+  For `k` replayed entries, `r` regrown cells, `p` surviving-parent entries, and
+  `w` materialized bitmap words, vector restore is O(k+r+p) with inline capture
+  and O(k+r+p+w) with parallel capture.
   This vector bound excludes higher-level transient cache repair. The protocol
   enables backtracking and supplies change boundaries for semi-naive
   evaluation. Future stratified negation also needs a queryable frozen
@@ -62,8 +63,9 @@ remain future work.
 
 The entire e-graph state (nodes, e-classes, union-find, hash-cons
 caches, literal store, registries) can be snapshotted with `(push)`
-and restored with `(pop)`. A snapshot is a single frame push across all
-containers; its *memory* cost is only the cells subsequently modified
+and restored with `(pop)`. A snapshot is one stamp from the e-graph's single
+`History` plus one frame push across all nine members, fanned out over a
+`rayon::scope` above a live-node threshold; its *memory* cost is only the cells subsequently modified
 (a sparse diff), never a copy of the e-graph: that is the decisive
 saving. The push also resets capture state: inline storage clears the slots
 named by the prior frame's diff, and parallel storage clears every

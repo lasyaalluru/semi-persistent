@@ -9,12 +9,12 @@ use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
 use crate::literal::LitVal;
 
-use super::actions::{ActionCache, ActionCacheToken};
+use super::actions::ActionCache;
 use super::egraph_api::{AuSnapshot, ClassOf};
 use super::mcgs::{self, AndSelector, HybridStats, McgsConfig};
-use super::results::{BestResults, BestResultsToken};
-use super::space::{CycleMode, SearchSpace, SpaceToken};
-use super::terms::{TermOp, TermPool, TermPoolToken};
+use super::results::BestResults;
+use super::space::{CycleMode, SearchSpace};
+use super::terms::{TermOp, TermPool};
 use crate::config::AuIds;
 
 /// Term id projected from a config's AU family.
@@ -298,6 +298,7 @@ pub fn anti_unify<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Result<AuResult<Cfg>, super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let l = snap
         .class_of(left)
@@ -390,6 +391,7 @@ pub fn compression_ratio<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
 ) -> f64
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let best_l = snap.best_size(left) as f64;
     let best_r = snap.best_size(right) as f64;
@@ -407,15 +409,11 @@ where
 
 /// Opaque token capturing the entire search state at one point in time.
 /// Created by `SearchSession::mark()`; consumed by `SearchSession::restore()`.
-/// Component tokens are private; callers cannot restore individual layers.
-#[derive(Debug)]
-pub struct SearchToken {
-    space: SpaceToken,
-    terms: TermPoolToken,
-    results: BestResultsToken,
-    actions: ActionCacheToken,
-    mcgs: super::mcgs::McgsToken,
-}
+/// One token for every layer at once: it is the session history's own stamp,
+/// so no layer can be rolled back on its own, and validity is one question
+/// rather than one per column.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchToken(crate::containers::history::GroupToken);
 
 /// A search session owns the search-space layer, term pool, best-result table,
 /// action cache, and the MCGS statistics overlay. It provides one coherent
@@ -425,6 +423,7 @@ pub struct SearchToken {
 pub struct SearchSession<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     pub(crate) snap: &'eg AuSnapshot<'eg, Cfg, L, T, P>,
     pub(crate) space: SearchSpace<Cfg::Au>,
@@ -432,12 +431,16 @@ where
     pub(crate) results: BestResults<Cfg::Au>,
     pub(crate) action_cache: ActionCache<Cfg::O, Cfg::Au, Cfg::M>,
     pub(crate) mcgs: super::mcgs::McgsState<Cfg::Au, Cfg::O>,
+    /// The session's external history: the only token authority over the five
+    /// layers above (design doc 10). They carry no tokens of their own.
+    pub(crate) history: crate::containers::history::History,
 }
 
 impl<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
     SearchSession<'eg, Cfg, L, T, P>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     /// Create a new session from a snapshot. The snapshot must outlive the session.
     pub fn new(snap: &'eg AuSnapshot<'eg, Cfg, L, T, P>, cycle_mode: CycleMode) -> Self {
@@ -449,55 +452,49 @@ where
             // MCGS uses transport-AND-nodes for AC/ACI (no matrix actions).
             action_cache: ActionCache::without_ac_actions(usize::MAX),
             mcgs: super::mcgs::McgsState::new(),
+            history: crate::containers::history::History::new(),
         }
     }
 
-    /// Snapshot the entire search state. Returns one opaque token; component
-    /// tokens are not accessible. Layers are marked in dependency order.
+    /// Snapshot the entire search state: one frame on every layer, one stamp
+    /// from the session history. Layers move in dependency order.
     pub fn mark(&mut self) -> SearchToken {
-        SearchToken {
-            space: self.space.mark(),
-            terms: self.pool.mark(),
-            results: self.results.mark(),
-            actions: self.action_cache.mark(),
-            mcgs: self.mcgs.mark(),
-        }
+        let mut members = super::group_members::AuMembers {
+            space: &mut self.space,
+            pool: &mut self.pool,
+            results: &mut self.results,
+            actions: &mut self.action_cache,
+            mcgs: &mut self.mcgs,
+        };
+        let t = self
+            .history
+            .mark_member(&mut members, crate::containers::ShrinkPolicy::Never)
+            .expect("mark: depth bounded by the search driver, layers in lockstep");
+        SearchToken(t)
     }
 
-    /// Restore the entire search state to a previous mark. Two-phase: every
-    /// component token is validated against its container and branch genealogy
-    /// BEFORE any layer is mutated, so a foreign or abandoned token cannot
-    /// cause a partial restore. Then restores in reverse dependency order
-    /// (statistics first, then results/terms, then structure).
+    /// Restore the entire search state to a previous mark. The group validates
+    /// the token and the layers' lockstep before it moves anything, so a
+    /// foreign or abandoned token cannot cause a partial restore; the
+    /// checkpoint stays valid afterwards and can be restored to again
+    /// (semantics B). Layers move back in reverse dependency order.
     pub fn restore(&mut self, token: SearchToken) {
-        // Phase 1: validate all (no mutation). If any check fails the panic
-        // leaves all layers intact.
+        let mut members = super::group_members::AuMembers {
+            space: &mut self.space,
+            pool: &mut self.pool,
+            results: &mut self.results,
+            actions: &mut self.action_cache,
+            mcgs: &mut self.mcgs,
+        };
         assert!(
-            self.mcgs.is_valid_token(&token.mcgs),
-            "SearchSession: mcgs token is invalid (foreign or abandoned)"
+            self.history.restore_member(&mut members, token.0),
+            "SearchSession: token is invalid (foreign, abandoned or popped)"
         );
-        assert!(
-            self.action_cache.is_valid_token(&token.actions),
-            "SearchSession: action_cache token is invalid (foreign or abandoned)"
-        );
-        assert!(
-            self.results.is_valid_token(&token.results),
-            "SearchSession: results token is invalid (foreign or abandoned)"
-        );
-        assert!(
-            self.pool.is_valid_token(&token.terms),
-            "SearchSession: term pool token is invalid (foreign or abandoned)"
-        );
-        assert!(
-            self.space.is_valid_token(&token.space),
-            "SearchSession: space token is invalid (foreign or abandoned)"
-        );
-        // Phase 2: restore all (all validated, cannot fail).
-        self.mcgs.restore(token.mcgs);
-        self.action_cache.restore(token.actions);
-        self.results.restore(token.results);
-        self.pool.restore(token.terms);
-        self.space.restore(token.space);
+    }
+
+    /// Is this token restorable right now?
+    pub fn is_valid_token(&self, token: &SearchToken) -> bool {
+        self.history.is_valid(token.0)
     }
 
     /// Exact solve of the root pair on this session's persistent layers:
@@ -1044,5 +1041,53 @@ mod tests {
             Some(t1),
             "failed validation must not truncate current best results"
         );
+    }
+
+    /// Provenance now lives on the session's own history, so a token minted by
+    /// one session is foreign to another whatever its depth. (This replaces the
+    /// per-layer foreign-token tests: the layers have no tokens to be foreign.)
+    #[test]
+    fn search_session_rejects_a_foreign_sessions_token() {
+        use crate::au::space::OrId;
+
+        let mut eg = EGraph31::<NiraLitVal, false, false>::new();
+        let sort = eg.intern_sort("E");
+        let a_op = eg.register_op0("a", sort);
+        let a = eg.add(a_op, &[]);
+        eg.rebuild();
+
+        let snap = AuSnapshot::new(&eg).unwrap();
+        let ac = snap.class_of(a).unwrap();
+        let or0 = OrId::from_usize(0);
+        let t0 = TermId::from_usize(0);
+
+        let mut source = SearchSession::new(&snap, CycleMode::AncestorOnly);
+        let foreign = source.mark();
+
+        let mut target = SearchSession::new(&snap, CycleMode::AncestorOnly);
+        let own = target.mark();
+        target.action_cache.insert(ac, ac, Vec::new());
+        target.results.offer(or0, t0, (2, 2));
+
+        assert!(
+            !target.is_valid_token(&foreign),
+            "a token is bound to the history that minted it"
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            target.restore(foreign);
+        }));
+        assert!(outcome.is_err(), "a foreign token must be rejected");
+        assert!(
+            target.action_cache.get(ac, ac).is_some(),
+            "a rejected restore must not move the current branch"
+        );
+        assert_eq!(target.results.best_term(or0), Some(t0));
+
+        // The session's own token still works, and stays valid after use
+        // (semantics B).
+        assert!(target.is_valid_token(&own));
+        target.restore(own);
+        assert!(target.action_cache.get(ac, ac).is_none());
+        assert!(target.is_valid_token(&own));
     }
 }

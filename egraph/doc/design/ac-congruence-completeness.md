@@ -1355,7 +1355,8 @@ candidate nodes into reusable buffers, and retains the `monomial_cmp`-smaller
 candidate. Its cost is `O(number of completion columns + monomial elements compared)`,
 not `O(1)`.
 
-The pool is part of `EClassesToken`, so mark/restore rolls its logical contents back
+The pool is one of the e-classes' semi-persistent components, so a group
+mark/restore rolls its logical contents back
 without a separate field in `EGraphToken`. That does not make rollback free: the
 container's normal diff replay, capture-flag maintenance, and any transient-index
 reconstruction still apply.

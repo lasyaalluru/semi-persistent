@@ -157,17 +157,32 @@ never snapshotted.
 
 ```rust
 mark(shrink):
-    self.rebuild()                    // ensure clean state
-    // mark all sub-containers:
-    nodes.mark(), classes.mark(), lits.mark(), ops.mark(), sorts.mark()
+    self.rebuild()                       // ensure clean state
+    // one stamp for the whole member set, one frame pushed on each member:
+    let members = EGraphMembers { nodes, classes, lits, ops, sorts,
+                                  rules, axioms, unit_node, inverse_op, par }
+    let group = self.history.mark_member(&mut members, shrink)?
+    EGraphToken { group, completion_outcome: self.completion_outcome }
 
 restore(token):
-    classes.restore(); nodes.restore()
-    sorts.restore(); ops.restore(); rules.restore(); axioms.restore()
-    lits.restore(); unit_node.restore(); inverse_op.restore()
-    completion_outcome = token.completion_outcome
+    // one validity question, asked of the history; refuses without moving
+    // anything if the token is foreign, cut or popped, or if a member drifted
+    self.history.restore_member(&mut members, token.group)
+    self.completion_outcome = token.completion_outcome
     clear worklist, collisions, and touched log
 ```
+
+The e-graph owns one `History` (containers' `group` module) and its nine
+synchronized members carry no tokens: `EGraphMembers` is a borrowed forwarding
+view implementing `Member`, and above a live-node threshold its exec parts fan the
+structural operation out over a `rayon::scope` on disjoint `&mut` borrows.
+Before 2026-09-18 each member kept its own depth-indexed token stack — nine of
+them, plus the choreography to push and truncate them together — and a mark
+minted one token per column. Now a scope costs one stamp, and `restore_with`,
+`restore_and_pop_with` and `pop_scope` are each one call into the history plus
+the e-graph's own bookkeeping. The measured effect: an empty-store push/pop trace
+dropped to 0.79–0.80× of the token-era cost, other store traces 0.97–1.00×, and
+saturation at parity.
 
 All source-of-truth sub-containers participate in the semi-persistent
 protocol. Each cache restore either repairs or reconstructs its transient

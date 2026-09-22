@@ -63,6 +63,7 @@ pub fn monomials_of<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Vec<Monomial<ClassOf<Cfg>>>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let eg = snap.egraph();
     let kind = eg.ops().info(op).canon_class();
@@ -141,6 +142,7 @@ pub fn pad_pair<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Option<PaddedPair<ClassOf<Cfg>>>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let lt = total(left);
     let rt = total(right);
@@ -180,6 +182,7 @@ pub fn representation_pairs<Cfg: EGraphConfig, L: LitVal, const T: bool, const P
 ) -> Vec<PaddedPair<ClassOf<Cfg>>>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let l_reprs = monomials_of(snap, l, op);
     let r_reprs = monomials_of(snap, r, op);
@@ -217,6 +220,7 @@ pub fn common_ac_ops<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 ) -> Vec<Cfg::O>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let eg = snap.egraph();
     let mut ops: Vec<Cfg::O> = Vec::new();

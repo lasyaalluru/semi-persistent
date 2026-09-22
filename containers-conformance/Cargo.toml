@@ -19,6 +19,7 @@ vstd = "=0.0.0-2026-08-02-0125"
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+rayon = { workspace = true }
 
 [lib]
 # Shared trace-runner / RNG helpers for the tests and benches.
@@ -33,6 +34,30 @@ name = "tracked_vec_bench"
 harness = false
 
 [[bench]]
+name = "diff_compress_bench"
+harness = false
+
+[[bench]]
+name = "two_stack_bench"
+harness = false
+
+[[bench]]
+name = "reorder_bench"
+harness = false
+
+[[bench]]
+name = "scheme_comparison_bench"
+harness = false
+
+[[bench]]
+name = "parallel_frame_bench"
+harness = false
+
+[[bench]]
+name = "eager_write_bench"
+harness = false
+
+[[bench]]
 name = "nested_mark_bench"
 harness = false
 
@@ -42,4 +67,20 @@ harness = false
 
 [[bench]]
 name = "eclasses_bench"
+harness = false
+
+[[bench]]
+name = "normalize_bench"
+harness = false
+
+[[bench]]
+name = "three_tier_bench"
+harness = false
+
+[[bench]]
+name = "spmap_discipline_bench"
+harness = false
+
+[[bench]]
+name = "aov_phases_bench"
 harness = false

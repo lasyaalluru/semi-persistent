@@ -3,8 +3,12 @@
 //! Semi-persistent sparse set with stable IDs, composed from three verified
 //! `Vec`s:
 //!   - `dense`:   packed values `[0, n)`, no gaps   (`Vec<T, Idx, S>`)
-//!   - `sparse`:  id → position                      (`Vec<Idx, Idx, Inline>`)
-//!   - `indices`: position → id                      (`Vec<Idx, Idx, Inline>`)
+//!   - `sparse`:  id → position                      (`Vec<Idx, Idx, P::Store>`)
+//!   - `indices`: position → id                      (`Vec<Idx, Idx, P::Store>`)
+//!
+//! The two index columns take their store from the policy parameter `P`
+//! (`crate::store_policy`; the default `HotFirst` gives `InlineStore`, as
+//! before). The proofs use only the `Vec` contract, so every policy fits.
 //!
 //! ## The real invariant (`wf`)
 //! Let `cap = sparse.len() = indices.len()`, `n = dense.len() <= cap`.
@@ -34,51 +38,32 @@ use vstd::prelude::*;
 
 use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
 verus! {
 
-/// Token bundling one `VecToken` per inner vector.
-#[derive(Copy, Clone)]
-pub struct SparseSetToken {
-    pub(crate) dense: VecToken,
-    pub(crate) sparse: VecToken,
-    pub(crate) indices: VecToken,
-}
-
-impl SparseSetToken {
-    pub open(crate) spec fn dense_frame_idx_spec(self) -> nat {
-        self.dense.frame_idx as nat
-    }
-
-    pub open(crate) spec fn sparse_frame_idx_spec(self) -> nat {
-        self.sparse.frame_idx as nat
-    }
-
-    pub open(crate) spec fn indices_frame_idx_spec(self) -> nat {
-        self.indices.frame_idx as nat
-    }
-}
-
 /// Semi-persistent sparse set with stable IDs.
-pub struct SparseSet<T, Idx, S, const TRACK: bool = true>
+pub struct SparseSet<T, Idx, S, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression, P = HotFirst>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    VC: crate::value_compressor::ValueCompressor<T>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
-    pub(crate) dense: SpVec<T, Idx, S, TRACK>,
-    pub(crate) sparse: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
-    pub(crate) indices: SpVec<Idx, Idx, InlineStore<Idx, Idx>, TRACK>,
+    pub(crate) dense: SpVec<T, Idx, S, TRACK, VC>,
+    pub(crate) sparse: SpVec<Idx, Idx, <P as TaggedFamily<Idx, Idx, TRACK>>::Store, TRACK>,
+    pub(crate) indices: SpVec<Idx, Idx, <P as TaggedFamily<Idx, Idx, TRACK>>::Store, TRACK>,
 }
 
-impl<T, Idx, S, const TRACK: bool> SparseSet<T, Idx, S, TRACK>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, S, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// The packed values currently in the set, in dense order.
     pub open(crate) spec fn dense_view(&self) -> Seq<T> {
@@ -106,22 +91,23 @@ where
         self.dense.depth_spec()
     }
 
+    pub open(crate) spec fn sparse_depth_spec(&self) -> nat {
+        self.sparse.depth_spec()
+    }
+
+    pub open(crate) spec fn indices_depth_spec(&self) -> nat {
+        self.indices.depth_spec()
+    }
+
     pub open(crate) spec fn sparse_view(&self) -> Seq<Idx> {
         self.sparse.view()
     }
 
     /// Dense-column reference (spec counterpart, for `data()`'s ensures).
-    pub open(crate) spec fn dense_ref(&self) -> &SpVec<T, Idx, S, TRACK> {
+    pub open(crate) spec fn dense_ref(&self) -> &SpVec<T, Idx, S, TRACK, VC> {
         &self.dense
     }
 
-    /// Per-component restorability of the composite token — the atomic
-    /// prevalidation predicate `is_valid_token` answers.
-    pub open(crate) spec fn is_restorable_spec(&self, token: SparseSetToken) -> bool {
-        &&& self.dense.is_restorable_spec(token.dense)
-        &&& self.sparse.is_restorable_spec(token.sparse)
-        &&& self.indices.is_restorable_spec(token.indices)
-    }
 
     /// Composite mark preconditions (headrooms on all three columns).
     pub open(crate) spec fn can_mark_spec(&self) -> bool {
@@ -133,31 +119,7 @@ where
         &&& self.indices.depth_spec() < u32::MAX
     }
 
-    /// Composite restore preconditions: per-component validity + structural
-    /// coordinates + headrooms (everything in `restore`'s requires except
-    /// the snapshot-wf clause, which quantifies over the actual snapshots).
-    pub open(crate) spec fn restore_pre_spec(&self, token: SparseSetToken) -> bool {
-        &&& self.dense.is_token_valid_spec(token.dense)
-        &&& token.dense_frame_idx_spec() < self.dense.depth_spec()
-        &&& self.dense.depth_spec() < u32::MAX
-        &&& self.dense.fork_count_spec() + 1 <= u32::MAX
-        &&& self.sparse.is_token_valid_spec(token.sparse)
-        &&& token.sparse_frame_idx_spec() < self.sparse.depth_spec()
-        &&& self.sparse.depth_spec() < u32::MAX
-        &&& self.sparse.fork_count_spec() + 1 <= u32::MAX
-        &&& self.indices.is_token_valid_spec(token.indices)
-        &&& token.indices_frame_idx_spec() < self.indices.depth_spec()
-        &&& self.indices.depth_spec() < u32::MAX
-        &&& self.indices.fork_count_spec() + 1 <= u32::MAX
-    }
 
-    /// The three column snapshots a token names (spec counterpart for restore's
-    /// contract).
-    pub open(crate) spec fn snap_at(&self, token: SparseSetToken) -> (Seq<T>, Seq<Idx>, Seq<Idx>) {
-        (self.dense.snapshots_view()[token.dense_frame_idx_spec() as int],
-         self.sparse.snapshots_view()[token.sparse_frame_idx_spec() as int],
-         self.indices.snapshots_view()[token.indices_frame_idx_spec() as int])
-    }
 
     /// Dense snapshot stack (spec counterpart).
     pub open(crate) spec fn dense_snapshots_view(&self) -> Seq<Seq<T>> {
@@ -185,6 +147,15 @@ where
         &&& self.dense.wf()
         &&& self.sparse.wf()
         &&& self.indices.wf()
+        // Archive (total `restore`): the three snapshot stacks move in lockstep
+        // and every archived triple is itself a valid sparse-set state, so a
+        // restore needs only per-column token validity plus equal frame
+        // indices — both runtime-checkable — to land in a `wf` state.
+        &&& self.sparse.snapshots_view().len() == self.dense.snapshots_view().len()
+        &&& self.indices.snapshots_view().len() == self.dense.snapshots_view().len()
+        &&& (forall|k: int| 0 <= k < self.dense.snapshots_view().len() ==>
+                sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                    self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]))
         &&& indices.len() == cap
         &&& n <= cap
         // (1a) indices in range [0, cap)
@@ -942,7 +913,7 @@ where
 
     /// Read-only access to the dense value vector (production `data()`
     /// parity: exposes the packed live values for iteration).
-    pub fn data(&self) -> (r: &SpVec<T, Idx, S, TRACK>)
+    pub fn data(&self) -> (r: &SpVec<T, Idx, S, TRACK, VC>)
         ensures r == self.dense_ref(),
     {
         &self.dense
@@ -950,40 +921,46 @@ where
 
     // ---- semi-persistence: delegate to the three inner vectors ----
 
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: SparseSetToken)
+
+    /// Archive step shared by `mark` and `push_frames`: pushing the live triple
+    /// onto three lockstep stacks keeps every archived triple `snap_wf` (the
+    /// old entries are untouched, the new one is the old live state, which is
+    /// `snap_wf` by the old `wf`).
+    proof fn lemma_archive_after_push(&self, pre: &Self)
         requires
-            old(self).wf(),
-            TRACK,
-            old(self).can_mark_spec(),
+            pre.wf(),
+            self.dense.snapshots_view() == pre.dense.snapshots_view().push(pre.dense_view()),
+            self.sparse.snapshots_view() == pre.sparse.snapshots_view().push(pre.sparse_view()),
+            self.indices.snapshots_view() == pre.indices.snapshots_view().push(pre.indices_view()),
         ensures
-            final(self).wf(),
-            final(self).dense_view() == old(self).dense_view(),
-            final(self).sparse_view() == old(self).sparse_view(),
-            final(self).indices_view() == old(self).indices_view(),
-            final(self).dense_snapshots_view()
-                == old(self).dense_snapshots_view().push(old(self).dense_view()),
-            final(self).sparse_snapshots_view()
-                == old(self).sparse_snapshots_view().push(old(self).sparse_view()),
-            final(self).indices_snapshots_view()
-                == old(self).indices_snapshots_view().push(old(self).indices_view()),
-            token.dense_frame_idx_spec() == old(self).dense_depth_spec(),
-            token.sparse_frame_idx_spec() == old(self).sparse.depth_spec(),
-            token.indices_frame_idx_spec() == old(self).indices.depth_spec(),
-            final(self).dense_depth_spec() == old(self).dense_depth_spec() + 1,
+            self.sparse.snapshots_view().len() == self.dense.snapshots_view().len(),
+            self.indices.snapshots_view().len() == self.dense.snapshots_view().len(),
+            forall|k: int| 0 <= k < self.dense.snapshots_view().len() ==>
+                sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                    self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]),
     {
-        let dense = self.dense.mark(shrink);
-        let sparse = self.sparse.mark(shrink);
-        let indices = self.indices.mark(shrink);
-        SparseSetToken { dense, sparse, indices }
+        let od = pre.dense.snapshots_view();
+        assert forall|k: int| 0 <= k < self.dense.snapshots_view().len() implies
+            sparse_set_snap_wf(#[trigger] self.dense.snapshots_view()[k],
+                self.sparse.snapshots_view()[k], self.indices.snapshots_view()[k]) by {
+            if k < od.len() {
+                assert(self.dense.snapshots_view()[k] == od[k]);
+                assert(self.sparse.snapshots_view()[k] == pre.sparse.snapshots_view()[k]);
+                assert(self.indices.snapshots_view()[k] == pre.indices.snapshots_view()[k]);
+            } else {
+                assert(self.dense.snapshots_view()[k] == pre.dense_view());
+                assert(self.sparse.snapshots_view()[k] == pre.sparse_view());
+                assert(self.indices.snapshots_view()[k] == pre.indices_view());
+                assert(sparse_set_snap_wf(pre.dense_view(), pre.sparse_view(), pre.indices_view()));
+            }
+        }
     }
 
     // ------------------------------------------------------------------
-    // Total-operation shell. `try_restore` is deliberately
-    // absent: `restore` carries a snapshot-wellformedness precondition that
-    // `is_valid_token` does not answer (it quantifies over archived snapshot
-    // contents). The structural fix is archiving snapshot-wf in `wf` the way
-    // `ListArena` archives `arena_model_wf`; without that archive a total
-    // restore would need an O(cap) runtime permutation check.
+    // Total-operation shell. `restore` itself is total (panic guard, below):
+    // the archive clauses of `wf` guarantee that the triple a valid token names
+    // is a valid sparse-set state, so the guard checks only what
+    // `is_valid_token` answers plus the agreement of the three frame indices.
     // ------------------------------------------------------------------
 
     /// Exec counterpart of `add`'s three-column capacity precondition.
@@ -1049,86 +1026,121 @@ where
         }
     }
 
-    /// Total mark: TRACK first, then the six column headrooms as one answer.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<SparseSetToken, crate::error::ContainerError>)
-        requires old(self).wf(),
+
+
+
+
+    // --------------------------------------------------------------------
+    // Shared-history variants (doc 10): the same three-member fan-out driven by
+    // ONE external `History` via the genealogy-free `push_frame`/`restore_frame`
+    // primitives, so the branch genealogy lives once instead of once per member
+    // vector. Additive — the `mark`/`restore` above and their theorems are
+    // untouched; a caller opts into sharing by using these and never the per-vec
+    // genealogy path, leaving each member's own `forks` empty. The synced-depth
+    // precondition (all members and the history at one depth) is the group
+    // invariant, carried explicitly since `wf` does not track a history.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).can_mark_spec(),
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
         ensures
             final(self).wf(),
-            r is Err ==> final(self).id_set() == old(self).id_set(),
-            r matches Ok(token) ==> {
-                &&& final(self).dense_view() == old(self).dense_view()
-                &&& final(self).sparse_view() == old(self).sparse_view()
-                &&& final(self).indices_view() == old(self).indices_view()
-                &&& final(self).dense_snapshots_view()
-                    == old(self).dense_snapshots_view().push(old(self).dense_view())
-                &&& final(self).sparse_snapshots_view()
-                    == old(self).sparse_snapshots_view().push(old(self).sparse_view())
-                &&& final(self).indices_snapshots_view()
-                    == old(self).indices_snapshots_view().push(old(self).indices_view())
-                &&& token.dense_frame_idx_spec()
-                    == final(self).dense_snapshots_view().len() - 1
-                &&& token.sparse_frame_idx_spec()
-                    == final(self).sparse_snapshots_view().len() - 1
-                &&& token.indices_frame_idx_spec()
-                    == final(self).indices_snapshots_view().len() - 1
-            },
+            final(self).dense_view() == old(self).dense_view(),
+            final(self).sparse_view() == old(self).sparse_view(),
+            final(self).indices_view() == old(self).indices_view(),
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().push(old(self).dense_view()),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().push(old(self).sparse_view()),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().push(old(self).indices_view()),
+            final(self).dense.depth_spec() == old(self).dense.depth_spec() + 1,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
     {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if self.dense.can_mark() && self.sparse.can_mark() && self.indices.can_mark() {
-            Ok(self.mark(shrink))
-        } else {
-            Err(crate::error::ContainerError::DepthLimit)
-        }
+        self.dense.push_frame(shrink);
+        self.sparse.push_frame(shrink);
+        self.indices.push_frame(shrink);
+        proof { self.lemma_archive_after_push(old(self)); }
     }
 
-    /// Whether the composite token is restorable now. Every constituent must
-    /// be restorable, which is the validation half of aggregate atomicity.
-    pub fn is_valid_token(&self, token: &SparseSetToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.dense.is_valid_token(&token.dense)
-            && self.sparse.is_valid_token(&token.sparse)
-            && self.indices.is_valid_token(&token.indices)
-    }
 
-    pub fn restore(&mut self, token: SparseSetToken)
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
         where T: core::default::Default, Idx: core::default::Default
         requires
             old(self).wf(),
             TRACK,
-            old(self).restore_pre_spec(token),
-            // the snapshots being restored form a valid sparse-set state
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
+            (target as nat) < old(self).dense.depth_spec(),
             sparse_set_snap_wf(
-                old(self).snap_at(token).0,
-                old(self).snap_at(token).1,
-                old(self).snap_at(token).2),
+                old(self).dense.snapshots_view()[target as int],
+                old(self).sparse.snapshots_view()[target as int],
+                old(self).indices.snapshots_view()[target as int]),
         ensures
             final(self).wf(),
-            final(self).dense_view() == old(self).snap_at(token).0,
-            final(self).sparse_view() == old(self).snap_at(token).1,
-            final(self).indices_view() == old(self).snap_at(token).2,
-            final(self).dense_snapshots_view() == old(self).dense_snapshots_view()
-                .subrange(0, token.dense_frame_idx_spec() as int),
-            final(self).sparse_snapshots_view() == old(self).sparse_snapshots_view()
-                .subrange(0, token.sparse_frame_idx_spec() as int),
-            final(self).indices_snapshots_view() == old(self).indices_snapshots_view()
-                .subrange(0, token.indices_frame_idx_spec() as int),
+            final(self).dense_view() == old(self).dense.snapshots_view()[target as int],
+            final(self).sparse_view() == old(self).sparse.snapshots_view()[target as int],
+            final(self).indices_view() == old(self).indices.snapshots_view()[target as int],
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().subrange(0, target as int),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().subrange(0, target as int),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().subrange(0, target as int),
+            final(self).dense.depth_spec() == target as nat,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
     {
-        // Prevalidate all constituent tokens before restoring any of them:
-        // a partially restored sparse set
-        // (dense rolled back, sparse/indices not) violates the permutation
-        // invariant unrecoverably. Provably-true no-op for verified callers.
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "SparseSet::restore: invalid, foreign, stale, consumed, or abandoned token component",
-        );
-        self.dense.restore(token.dense);
-        self.sparse.restore(token.sparse);
-        self.indices.restore(token.indices);
+        self.dense.restore_frame(target);
+        self.sparse.restore_frame(target);
+        self.indices.restore_frame(target);
+    }
+
+    /// Semantics B, token-free (what a typed group drives): reset the three
+    /// columns to their snapshot at `target` and keep frame `target` open. The
+    /// archive clause of `wf` at `target` is the restored triple's validity.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        where T: core::default::Default, Idx: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).dense.depth_spec() == old(self).sparse.depth_spec(),
+            old(self).dense.depth_spec() == old(self).indices.depth_spec(),
+            (target as nat) < old(self).dense.depth_spec(),
+            old(self).dense.depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).dense_view() == old(self).dense.snapshots_view()[target as int],
+            final(self).sparse_view() == old(self).sparse.snapshots_view()[target as int],
+            final(self).indices_view() == old(self).indices.snapshots_view()[target as int],
+            final(self).dense_snapshots_view()
+                == old(self).dense_snapshots_view().subrange(0, target as int + 1),
+            final(self).sparse_snapshots_view()
+                == old(self).sparse_snapshots_view().subrange(0, target as int + 1),
+            final(self).indices_snapshots_view()
+                == old(self).indices_snapshots_view().subrange(0, target as int + 1),
+            final(self).dense.depth_spec() == target as nat + 1,
+            final(self).dense.depth_spec() == final(self).sparse.depth_spec(),
+            final(self).dense.depth_spec() == final(self).indices.depth_spec(),
+    {
+        proof {
+            self.dense.lemma_partition_counts();
+            self.sparse.lemma_partition_counts();
+            self.indices.lemma_partition_counts();
+            assert(sparse_set_snap_wf(
+                self.dense.snapshots_view()[target as int],
+                self.sparse.snapshots_view()[target as int],
+                self.indices.snapshots_view()[target as int]));
+        }
+        self.dense.reset_frame(target);
+        self.sparse.reset_frame(target);
+        self.indices.reset_frame(target);
     }
 }
 
@@ -1278,16 +1290,16 @@ pub(crate) proof fn lemma_transposition_injective<Idx: IndexLike>(
     }
 }
 
-/// Value equality via `PartialEq`, usable from verified code without
-/// threading vstd's `obeys_eq_spec` plumbing: `external_body` with NO ensures
-/// — the result is an unconstrained bool as far as proofs are concerned, so
-/// nothing unsound can be derived from it; `remove_value`'s contract
-/// consequently promises which STRUCTURAL change happened (an element left),
-/// not which value matched. The scan behavior is pinned by the ported
-/// production proptests. Trust ledger: group E.
-#[verifier::external_body]
+/// Value equality via `PartialEq`, verified through vstd's external trait
+/// specification. Nothing is trusted here: that specification's `eq` promises
+/// `obeys_eq_spec() ==> r == eq_spec(..)`, and this crate never establishes
+/// `obeys_eq_spec` for a caller's `T`, so the result is an unconstrained bool as
+/// far as proofs are concerned — which is exactly what the scan needs.
+/// `remove_value`'s contract consequently promises which STRUCTURAL change
+/// happened (an element left), not which value matched, and the scan behaviour
+/// is pinned by the ported production proptests.
 fn values_equal<T: PartialEq>(a: &T, b: &T) -> bool {
-    a == b
+    PartialEq::eq(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,11 +1308,12 @@ fn values_equal<T: PartialEq>(a: &T, b: &T) -> bool {
 // empty `wf` (the permutation invariant is vacuous at cap == n == 0).
 // ---------------------------------------------------------------------------
 
-impl<T, Idx, S, const TRACK: bool> SparseSet<T, Idx, S, TRACK>
+impl<T, Idx, S, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, S, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
     S: DiffStore<T, Idx, TRACK>,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over a caller-supplied (empty, well-formed) dense
     /// store. Production `with_store` parity.
@@ -1318,8 +1331,8 @@ where
     {
         let s = SparseSet {
             dense: SpVec::with_store(store),
-            sparse: SpVec::<Idx, Idx, InlineStore<Idx, Idx>, TRACK>::new(),
-            indices: SpVec::<Idx, Idx, InlineStore<Idx, Idx>, TRACK>::new(),
+            sparse: SpVec::with_store(<P as TaggedFamily<Idx, Idx, TRACK>>::empty()),
+            indices: SpVec::with_store(<P as TaggedFamily<Idx, Idx, TRACK>>::empty()),
         };
         proof {
             // Empty everything: every wf clause quantifies over [0, 0).
@@ -1330,10 +1343,11 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK, VC, P>
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over a `ParallelStore` (any `T: Copy`; production
     /// `SparseSet::new` parity).
@@ -1344,10 +1358,11 @@ where
     }
 }
 
-impl<T, Idx, const TRACK: bool> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, VC: crate::value_compressor::ValueCompressor<T>, P> SparseSet<T, Idx, crate::inline_store::InlineStore<T, Idx>, TRACK, VC, P>
 where
     T: Tagged + Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     /// Empty sparse set over an `InlineStore` (`T: Tagged`; production
     /// `SparseSet::new_inline` parity).
@@ -1363,24 +1378,20 @@ where
 
 } // verus!
 
-// prod-parity: production derives `Debug` on `SparseSetToken`; manual here
-// (composes three `VecToken`s, now `Debug`).
-impl core::fmt::Debug for SparseSetToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("SparseSetToken")
-            .field("dense", &self.dense)
-            .field("sparse", &self.sparse)
-            .field("indices", &self.indices)
-            .finish()
-    }
-}
-
 // Production-surface parity (production ships Default on this variant).
-impl<T, Idx, const TRACK: bool> Default
-    for SparseSet<T, Idx, crate::parallel_store::ParallelStore<T, Idx>, TRACK>
+impl<T, Idx, const TRACK: bool, P> Default
+    for SparseSet<
+        T,
+        Idx,
+        crate::parallel_store::ParallelStore<T, Idx>,
+        TRACK,
+        crate::value_compressor::NoValueCompression,
+        P,
+    >
 where
     T: Sized + Copy,
     Idx: IndexLike + Tagged,
+    P: TaggedFamily<Idx, Idx, TRACK>,
 {
     fn default() -> Self {
         Self::new()

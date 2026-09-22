@@ -7,24 +7,73 @@ verified port.
 
 ## 1. What `restore(t)` does to the frame stack
 
-`mark()` at frame-stack depth `d` creates frame index `d` and returns a token
-with `frame_idx == d`. With no outstanding mark, the first token therefore
-has frame index 0. `restore(t)`:
+The token manager is a `history::Genealogy`: a `ContainerId` naming the manager
+plus one generation stamp per live depth (`GenStamps`: a live length and a
+counter that hands out each stamp once). A `History` pairs it with the group
+depth, and it is **always provided from outside** the containers (doc 10): a
+standalone `Vec` or `AppendOnlyVec` is a group of one,
+`group::ForkHistory::new(Vec::new())`, and a synchronized member set is one
+history over one forwarding member. Containers themselves have neither a manager
+nor a token API — that changed on 2026-09-18, and this chapter's operations are
+the group's. The token type is the same on both paths:
 
-1. assert same container;
-2. assert `t.frame_idx < frames.len()` (the frame is still live);
-3. assert counter headroom and `forks.is_valid(t, frames.len())`;
-4. resize the store to `frames[t.frame_idx].saved_len`, then replay the diff;
-5. `diff_log.truncate(diff_start)`; **`frames.truncate(t.frame_idx)`**;
-6. `finish_restore(parent_stratum_diffs, …)` recomputes tags (§2);
-7. `forks.fork(t, frames.len())` records the branch cut.
+```rust
+pub struct GroupToken { history: ContainerId, generation: u64, depth: u32 }
+pub type VecToken = GroupToken;
+```
 
-Step 5 removes frame `t.frame_idx` *itself*. If the index is nonzero, the
-surviving top is `t.frame_idx - 1`, the parent. If it is zero, the frame stack
-becomes empty. Thus `restore(t)` undoes everything since `t` was created,
-including that mark. The view equals `snapshots[t.frame_idx]` (the mark and
-the instant before it share a view), while subsequent mutations belong to the
-surviving parent frame, if any.
+`mark()` at frame-stack depth `d` pushes frame `d` and then mints
+`GroupToken { history: <this manager>, generation: <fresh stamp>, depth: d }`.
+With no outstanding mark, the first token therefore has depth 0.
+
+**`restore(t)` is a reset to the checkpoint** (semantics B, the user's
+ruling of 2026-09-17):
+
+1. **provenance**: `genealogy.is_valid(&t)` — `t.history` names this
+   manager and the live stamp at `t.depth` is `t.generation`; otherwise
+   refuse (`"token is foreign, stale or consumed"`) without mutating;
+2. assert `t.depth < frames.len()` (the frame is still live) and depth
+   headroom;
+3. resize the store to `frames[t.depth].saved_len`, then replay the diff
+   strata `t.depth..` (undoing them);
+4. drop frames `t.depth..` and **reopen frame `t.depth` empty**: the
+   writable frame is the token's own again (the tiered `Vec` does this as
+   its pop core followed by a structural frame push with a *deferred*
+   rollover — a header push that converts no history, so the parent
+   stratum the pop core just made writable is not re-migrated on every
+   restore; the next `mark` applies the tier policy once, as it always
+   did. The snapshot at `t.depth` is unchanged, so the snapshot stack is
+   the old prefix of length `t.depth + 1`);
+5. `finish_restore(…)` recomputes the capture tags (§2);
+6. **the cut**: `genealogy.cut_from(t.depth + 1)` sets the live length to
+   `t.depth + 1`, so `t` stays valid and every token minted after it is dead
+   for good.
+
+Afterwards the depth is `t.depth + 1`, the view equals `snapshots[t.depth]`,
+later writes accumulate in frame `t.depth`'s stratum again, and `restore(t)`
+can be repeated: each time it undoes exactly what happened since the
+checkpoint.
+
+**`pop_scope()` drops the open top frame**: undo its stratum, remove it,
+make the parent writable again, and cut the genealogy at the popped depth
+(that frame's token dies). `try_pop_scope` reports `Untracked` or
+`NoOpenFrame` instead of refusing.
+
+**`restore_and_pop(t)` is `restore(t)` then `pop_scope()`, fused**: the
+contents are the snapshot at `t`, the depth is `t.depth`, `t` and every
+later token die. This is the SMT-LIB `pop` to the level below `t`, what the
+interpreter's `(pop)` does, and exactly what the legacy `containers/`
+restore always was — and it runs on the one pop core the legacy restore
+used, so it costs the same. Spelled as two calls it costs more: the
+restore's pop core promotes the parent stratum and recomputes its capture
+tags, the reopen seals it again (clearing the tags over it), and the pop
+reopens it once more — two extra walks over the parent stratum per pop,
+which the benchmarks of 2026-09-18 showed as 1.4–2.1× on one-frame cases
+and 1.5× on the SMT store traces. Every group operation is total, so
+`restore_and_pop` returns `false` on a dead or foreign token rather than
+trapping.
+The SAT core's backjump is the bare `restore(t)`: it stays in the
+checkpoint's scope and asserts there.
 
 ## 2. How the capture tags are reconstructed (not stored)
 
@@ -60,71 +109,98 @@ must not re-log. `prepare_mark` had cleared them to 0 while the child was
 alive, so the correct value (1) must be restored; leaving them at 0 would
 double-capture. `finish_restore` does exactly this.
 
-The one case where "all tags zero" is correct is `t.frame_idx == 0`
+The one case where "all tags zero" is correct is `t.depth == 0`
 (restoring to the very first frame pops the whole stack): there is no parent,
 the diff log truncates to empty, `finish_restore([])` sets nothing, and the
 bridge invariant is vacuous (gated on `frames.len() > 0`). This is the
 degenerate end of the general rule.
 
-## 3. Why reusing a token is rejected
+## 3. Which tokens a container accepts
 
-Restoring to a token `t` invalidates it because truncation removes its own
-frame. The verified crate's public `is_valid_token` means "restorable now": it
-checks tracking, container identity, frame liveness, branch genealogy, and
-counter headroom. It therefore returns `false` for a consumed token, and
-`try_restore` rejects that token without mutation. Direct `restore` retains the
-panic-shaped compatibility contract.
+`group.is_valid(t)` means "restorable now": provenance and generation (the
+manager's answer), then frame liveness. It is the group's question, not a
+container's — since 2026-09-18 no container has a token API of its own, and the
+history a group owns is the only authority. Under semantics B:
 
-The retained unverified reference implementation's `is_valid_token` is
-genealogy-only and can still answer `true` for a consumed token whose frame is
-gone; its direct `restore` catches reuse with the separate frame-bound assert.
-That is a documented API difference, not a difference in accepted restores.
+- **the restored checkpoint stays valid**: `restore(t)` leaves the stamp at
+  `t.depth` live, so `t` restores again and again;
+- **everything above it dies**: a restore to `t` sets the live length to
+  `t.depth + 1`, so a token minted after `t` (deeper, or later at the same
+  depth after a pop) fails the liveness half or holds a stamp the table no
+  longer shows;
+- **a popped frame's token dies**: `pop_scope` cuts at the popped depth;
+- **a re-mark never revives a dead token**: stamps come from a counter that
+  only grows, so a token's stamp is forever below the counter and any later
+  stamp at its depth is at or above it (`GenStamps::mint_at`'s
+  postcondition);
+- **a foreign token is refused** whatever its numbers: it names another
+  manager.
 
 ```rust
-let mut v: VecI<Id,u32,true> = VecI::new();
-v.push(10); v.push(20);
-let parent = v.mark(Never);     // frame index 0
-v.set(1, 21);                   // parent-frame diff
-let child = v.mark(Never);      // frame index 1
-v.set(0, 99);                   // child-frame diff
-v.restore(child);               // → [10,21], lands in parent frame 0
-assert!(!v.is_valid_token(&child));
-assert!(v.is_valid_token(&parent));
+// A standalone column is a group of one: the history comes from outside.
+let mut g = ForkHistory::new(VecI::<Id, u32, true>::new());
+g.member.push(10); g.member.push(20);
+let parent = g.mark(Never).expect("headroom");  // frame 0
+g.member.set(1, 21);                            // parent-frame diff
+let child = g.mark(Never).expect("headroom");   // frame 1
+g.member.set(0, 99);                            // child-frame diff
+assert!(g.restore(child));      // → [10,21], frame 1 open again, depth 2
+assert!(g.is_valid(child));
+g.member.set(0, 7);
+assert!(g.restore(child));      // → [10,21] again
+assert!(g.pop_scope());         // drop frame 1: depth 1, back in frame 0
+assert!(!g.is_valid(child));
+assert!(g.is_valid(parent));
 ```
 
-The two guards are complementary, not redundant:
+Element operations read as before because `ForkHistory` derefs to its member;
+`g.member` is the explicit spelling. Every group operation is total: `mark`
+returns `None` and the rest return `false` rather than trapping, so a refusal is
+a value to check.
 
-- The **frame-liveness** guard catches reuse and stale indices on the same vec:
-  after truncation `t.frame_idx` is at or past the new end.
-- The **fork-history** guard catches the cross-branch "abandoned future" case:
-  restore to `t1`, then try to restore to `t2` that lived in the now-cut
-  branch; `t2`'s `frame_idx` might still be in range, so only the branch-cut
-  check rejects it.
+**The retained unverified reference** (legacy `containers/`) validates on a
+branch model with the same inclusive rule (a token at the fork depth stays
+valid) but its restore pops the frame, so a later mark at that depth
+aliases the old token. The verified crate's restore keeps the frame, so
+there is nothing to alias. The conformance harnesses pair the two by
+asserting, after every verified restore, that the checkpoint is still valid
+and then popping the verified side, which is exactly the legacy operation.
 
-So "is `t` still restorable?" is the conjunction of liveness, identity,
-headroom, and genealogy in the verified public API.
+## 4. Tokens are values, not capabilities
 
-## 4. Runtime rather than affine token consumption
+`GroupToken: Copy`. Under semantics B a token is valid for exactly as long
+as its frame exists, which the stamp table tracks, so there is nothing an
+affine (by-move) token would add: reusing a token is the intended way to
+retry from a checkpoint, and a token whose frame was popped is refused at
+runtime — `restore` returns `false` and moves nothing.
 
-`restore(self, token: VecToken)` takes the token by value, but `VecToken: Copy`,
-so the caller keeps a usable copy. Reuse returns an error through `try_restore`
-or panics through direct `restore`; it is not a compile error. Dropping `Copy`
-from `VecToken` and taking it by move would make the direct API affine. The
-caveat is that legitimate "restore to an ancestor later"
-patterns keep *different* tokens around (proptest restores to shallower marks
-via cloned tokens); those still typecheck, only reusing the *same* token
-breaks, which is the goal. Adopting that API requires checking all e-graph and
-property-test token retention sites.
+## 5. What the real consumers do
 
-## 5. What the real consumer needs (LIFO Push/Pop)
+The e-graph interpreter is strict LIFO: `(push)` marks and stacks the
+token, `(pop)` is `restore(t)` followed by `pop_scope()` — back to the
+checkpoint, then the scope is dropped and the token dies. The SAT core's
+backjump is `restore(t)` alone: the level's frame stays open and the solver
+continues in it, minting the next level with a fresh `mark`. A retry loop
+(try, fail, go back) restores the same token each time and never re-marks.
+Nothing in the consumers re-marks after a restore, and nothing pops without
+restoring first.
 
-The e-graph interpreter is the only top-level driver, and it is strict LIFO:
-`Push` marks and stacks the token, `Pop` restores and discards it. It never
-re-restores a token and never mutates-then-re-restores. So the current "restore
-consumes the mark" semantics exactly matches the consumer; nothing in
-production wants token reuse today.
+## 6. The two semantics, and why B is the primitive
 
-## 6. The alternative: "restore-without-pop" (reusable checkpoint)
+Two coherent readings of "restore to `t`" exist. **A, pop**: reconstruct the
+state at `t` and remove frame `t.depth`; the writable frame becomes the
+parent and `t` is dead (the legacy structure, and the verified crate until
+2026-09-17). **B, reset to checkpoint**: reconstruct the state at `t`, keep
+frame `t.depth` open and empty, cut everything above; `t` stays valid (what
+ships). B is the primitive because A is B followed by dropping an empty top
+frame (`pop_scope`), and because B's restore never touches the parent
+frame: reopening a sealed parent (the `restore_hot`/`restore_cold`
+survivor re-materialisation) is paid only by `pop_scope`. Consumers spell
+SMT-LIB `pop` as `restore(t); pop_scope()`, a backjump as `restore(t)`
+alone, and retry loops reuse one token.
+
+The original sketch of this alternative, kept for the record:
+
 
 `restore(t)` could instead keep frame `t` live with an empty stratum and all its
 capture bits zero (re-enter the marked frame fresh), so the *same* `t` can be
@@ -136,8 +212,10 @@ current "pop the scope" semantics.
 
 It would take:
 
-1. `restore` truncates to `t.frame_idx + 1` (keep frame `t`), not
-   `t.frame_idx`; its stratum becomes empty.
+1. `restore` truncates to `t.depth + 1` (keep frame `t`), not
+   `t.depth`; its stratum becomes empty — and the genealogy cut starts at
+   `t.depth + 1` too, so `t` stays valid (under the shipped rule the cut
+   starts *at* `t.depth` and `t` is consumed; see §1 step 6).
 2. A `prepare_mark`-style tag clear over `[0, saved_len)` so frame `t` starts
    with zero capture bits (the bridge then holds with an empty top stratum,
    `captured()[j] ⟺ false`).

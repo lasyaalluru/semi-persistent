@@ -805,6 +805,8 @@ impl<'a, Cfg: EGraphConfig> MatchView<Cfg> for MatchRow<'a, Cfg> {
 
 /// Adapter that wraps `MatchIterator` and yields owned `Match<Cfg>` clones.
 pub struct ClonedMatchIter<'a, Cfg: EGraphConfig, L: LitVal, S: Copy, const T: bool, const P: bool>
+where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     inner: MatchIterator<'a, Cfg, L, S, T, P>,
 }
@@ -815,6 +817,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     type Item = Match<Cfg>;
     fn next(&mut self) -> Option<Match<Cfg>> {
@@ -845,6 +848,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let mut pool = MatchPool::new();
     run_query_into(plan, eg, index, globals, &mut pool);
@@ -880,6 +884,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     match index.full.round_repr(id) {
         Some(r) => r,
@@ -901,6 +906,7 @@ pub fn run_query_into<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pool.reshape(&plan.shape);
     pool.steps = 0;
@@ -930,6 +936,7 @@ pub fn run_query_scheduled_into<Cfg, L, S: Copy, const TRACK: bool, const PROOFS
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     if !runtime_scheduling() || !Adaptive::<Cfg, L, S>::fits(rq) {
         run_query_into(plan, eg, index, globals, pool);
@@ -959,6 +966,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let mut pool = MatchPool::new();
     run_query_scheduled_into(rq, plan, eg, index, globals, &mut pool);
@@ -1217,6 +1225,7 @@ fn advance<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let eager = ad.segment(EAGER, exec.bound, exec.used);
     if !eager.steps.is_empty() {
@@ -1276,6 +1285,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let candidates = ad.costed & !exec.used;
     // One candidate is its own minimum. Worth the branch because it is the
@@ -1341,6 +1351,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     // Every atom phase B costs lowers to a `Join` first; the ones that do not
     // are the equalities, which are filtered out before this is called.
@@ -1373,6 +1384,7 @@ fn run_step<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     if step_idx >= exec.steps.len() {
         // End of the step sequence. Statically scheduled, that is the whole
@@ -1552,6 +1564,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let v = eval_pred_expr(&guard.expr, eg, env)?;
     Ok((guard.truthy)(&v))
@@ -1566,6 +1579,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     use crate::resolve::RPredExpr;
     match expr {
@@ -1604,6 +1618,7 @@ fn run_expand_a<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let nfixed = children.len();
     match (pre, suf) {
@@ -1690,6 +1705,7 @@ fn bind_fixed_and_continue<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: boo
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let mut bound: BoundHere = BoundHere::new();
     for (i, &cv) in children.iter().enumerate() {
@@ -1789,6 +1805,7 @@ fn run_decompose_ac<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     decompose_ac_elem(
         exec, step_idx, elems, 0, rest, residual, eg, index, globals, env, results,
@@ -1811,6 +1828,7 @@ fn decompose_ac_elem<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let zero = Cfg::M::ZERO;
     if ei >= elems.len() {
@@ -1939,6 +1957,7 @@ fn run_decompose_aci<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let mut used = crate::containers::bitset::BitSet::new(residual.len());
     decompose_aci_elem(
@@ -1963,6 +1982,7 @@ fn decompose_aci_elem<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     if ei >= elems.len() {
         if let Some(rv) = rest {
@@ -2191,6 +2211,7 @@ fn run_join<Cfg, L, S: Copy, const TRACK: bool, const PROOFS: bool>(
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     if lookups.is_empty() {
         // No constraints — preserve original behavior (no match emitted).
@@ -2316,6 +2337,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     match l {
         IndexLookup::ByOp { op } => store.nodes_by_op(*op),
@@ -2349,6 +2371,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     cursor_of(bucket_in(store, index, l, eg, globals, env))
 }
@@ -2375,6 +2398,7 @@ fn leapfrog_join<Cfg, L, S: Copy, C, const TRACK: bool, const PROOFS: bool>(
     L: LitVal,
     C: SortedCursor<Key = Cfg::G>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     // `target` may already be bound: the bound-node re-join (`ByRepr ∩ ByOp`, emitted by
     // `emit_variadic_join`/`try_schedule_bound` when a variadic atom's node was bound by an
@@ -2412,6 +2436,7 @@ fn resolve_lookup<'a, Cfg: EGraphConfig, L: LitVal, S: Copy, const T: bool, cons
 ) -> &'a [Cfg::G]
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     match l {
         IndexLookup::ByOp { op } => index.full.nodes_by_op(*op),
@@ -2473,7 +2498,10 @@ struct Frame<'a, Cfg: EGraphConfig> {
     step_idx: usize,
 }
 
-pub struct MatchIterator<'a, Cfg: EGraphConfig, L: LitVal, S: Copy, const T: bool, const P: bool> {
+pub struct MatchIterator<'a, Cfg: EGraphConfig, L: LitVal, S: Copy, const T: bool, const P: bool>
+where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
     plan: &'a QueryPlan<Cfg::O, Cfg::Index, L>,
     eg: &'a EGraph<Cfg, L, T, P>,
     index: &'a VariantIndex<'a, Cfg>,
@@ -2494,6 +2522,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     pub fn new(
         plan: &'a QueryPlan<Cfg::O, Cfg::Index, L>,
@@ -3504,6 +3533,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let empty: crate::resolve::GlobalCtx<(), Cfg::G> = crate::resolve::GlobalCtx::new();
     let mut it = MatchIterator::new(plan, eg, index, &empty);

@@ -202,9 +202,43 @@ deep child grouping.
 For a more detailed proof, `explain_deep` expands congruence steps: if two
 nodes were merged by congruence, it explains why each pair of children is
 equal. The implementation iterates by index through the growing
-`ProofBuf.steps` vector, so it does not recurse on the Rust call stack. It does
-not maintain a separate visited set for deep expansions; `ProofBuf.seen` is
-scratch for the shallow LCA walk.
+`ProofBuf.steps` vector, so it does not recurse on the Rust call stack.
+`ProofBuf.seen` is scratch for the shallow LCA walk only.
+
+The expansion is memoized with two order-normalized pair sets, and the
+memoization is what makes the walk terminate, not just what makes it fast:
+
+- `expanded` holds the `(node_a, node_b)` pairs of congruence steps whose
+  child pairs have already been walked. A congruence step whose pair is
+  already in the set is skipped.
+- `explained` holds the child pairs whose forest path is already in
+  `steps`. A child pair already in the set is not explained again.
+
+Two sets because the guards protect different work. A congruence pair must
+not seed `explained`: its forest path can be longer than the one recorded
+congruence edge. The initial pair `(a, b)` seeds `explained` but not
+`expanded`: its own congruence step still needs its children walked.
+
+Two failure modes without the sets, both observed:
+
+1. **Exponential re-expansion.** A child pair shared by several paths of a
+   diamond-shaped explanation is expanded once per path, so nested diamonds
+   double the work per level. A two-assertion Boolean-congruence input took
+   over 15 seconds; with the sets it takes 0.08 seconds.
+2. **Non-termination.** A congruence step's premises are the two nodes'
+   *original* children, which predate recanonization. Their present equality
+   can route through the very congruence edge the hash-consing collision
+   produced. The walk then explains the child pair, re-emits that edge,
+   expands it again, and never ends. The SMT regression
+   `edge_cases/boolean_backtracking.smt2` (a Boolean child oscillating across
+   backtracks) grew past 2 million steps and 16 GB before being killed.
+
+With the sets, every congruence pair is expanded at most once and every
+pair's path is appended at most once, so `steps` is bounded by the number of
+distinct pairs times the longest forest path, whatever the forest's shape.
+Skipping a repeat loses nothing: a repeat appends no steps, and consumers
+collect leaf justifications as a set. `deep_proof_diamond_is_linear` in
+`egraph_proof_test.rs` pins the linear bound on a nested diamond.
 
 ## Semi-Persistence
 

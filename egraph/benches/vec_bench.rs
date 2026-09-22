@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use semi_persistent_containers::group::ForkHistory;
 use semi_persistent_containers::{ShrinkPolicy, VecI, VecP};
 use std::hint::black_box;
 
@@ -49,38 +50,39 @@ fn bench_mark(c: &mut Criterion) {
         let k = n / 2;
 
         group.bench_with_input(BenchmarkId::new("bitset", n), &n, |b, &n| {
-            let mut v = VecP::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecP::<u32, usize>::new());
             fill_p(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
 
         group.bench_with_input(BenchmarkId::new("epoch", n), &n, |b, &n| {
-            let mut v = VecP::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecP::<u32, usize>::new());
             fill_p(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
 
         group.bench_with_input(BenchmarkId::new("marked", n), &n, |b, &n| {
-            let mut v = VecI::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecI::<u32, usize>::new());
             fill_i(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_i(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
     }
@@ -97,45 +99,45 @@ fn bench_set(c: &mut Criterion) {
     let k: usize = 1_000;
 
     group.bench_function("bitset", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         let t = v
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
         b.iter(|| {
             for i in 0..k {
                 v.set(i, black_box(42));
             }
         });
-        v.try_restore(t).expect("restore: own token");
+        assert!(v.restore_and_pop(t), "restore: own token");
     });
 
     group.bench_function("epoch", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         let t = v
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
         b.iter(|| {
             for i in 0..k {
                 v.set(i, black_box(42));
             }
         });
-        v.try_restore(t).expect("restore: own token");
+        assert!(v.restore_and_pop(t), "restore: own token");
     });
 
     group.bench_function("marked", |b| {
-        let mut v = VecI::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecI::<u32, usize>::new());
         fill_i(&mut v, n);
         let t = v
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
         b.iter(|| {
             for i in 0..k {
                 v.set(i, black_box(42));
             }
         });
-        v.try_restore(t).expect("restore: own token");
+        assert!(v.restore_and_pop(t), "restore: own token");
     });
 
     group.finish();
@@ -150,7 +152,7 @@ fn bench_get(c: &mut Criterion) {
     let n = 100_000;
 
     group.bench_function("bitset", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         b.iter(|| {
             let mut sum = 0u32;
@@ -162,7 +164,7 @@ fn bench_get(c: &mut Criterion) {
     });
 
     group.bench_function("epoch", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         b.iter(|| {
             let mut sum = 0u32;
@@ -174,7 +176,7 @@ fn bench_get(c: &mut Criterion) {
     });
 
     group.bench_function("marked", |b| {
-        let mut v = VecI::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecI::<u32, usize>::new());
         fill_i(&mut v, n);
         b.iter(|| {
             let mut sum = 0u32;
@@ -198,38 +200,38 @@ fn bench_backtrack(c: &mut Criterion) {
 
     for k in [100, 1_000, 10_000, 50_000] {
         group.bench_with_input(BenchmarkId::new("bitset", k), &k, |b, &k| {
-            let mut v = VecP::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecP::<u32, usize>::new());
             fill_p(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
 
         group.bench_with_input(BenchmarkId::new("epoch", k), &k, |b, &k| {
-            let mut v = VecP::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecP::<u32, usize>::new());
             fill_p(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_p(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
 
         group.bench_with_input(BenchmarkId::new("marked", k), &k, |b, &k| {
-            let mut v = VecI::<u32, usize>::new();
+            let mut v = ForkHistory::new(VecI::<u32, usize>::new());
             fill_i(&mut v, n);
             b.iter(|| {
                 let t = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 mutate_i(&mut v, n, k);
-                v.try_restore(t).expect("restore: own token");
+                assert!(v.restore_and_pop(t), "restore: own token");
             });
         });
     }
@@ -247,13 +249,13 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
     let depth = 10; // nesting depth
 
     group.bench_function("bitset", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         b.iter(|| {
             let mut tokens = Vec::with_capacity(depth);
             for d in 0..depth {
                 tokens.push(
-                    v.try_mark(ShrinkPolicy::Never)
+                    v.mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 );
                 mutate_p(&mut v, n, k);
@@ -264,18 +266,18 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
                 }
             }
             // Backtrack all the way to the first mark.
-            v.try_restore(tokens[0]).expect("restore: own token");
+            assert!(v.restore_and_pop(tokens[0]), "restore: own token");
         });
     });
 
     group.bench_function("epoch", |b| {
-        let mut v = VecP::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecP::<u32, usize>::new());
         fill_p(&mut v, n);
         b.iter(|| {
             let mut tokens = Vec::with_capacity(depth);
             for d in 0..depth {
                 tokens.push(
-                    v.try_mark(ShrinkPolicy::Never)
+                    v.mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 );
                 mutate_p(&mut v, n, k);
@@ -284,18 +286,18 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
                         .expect("push: within index word");
                 }
             }
-            v.try_restore(tokens[0]).expect("restore: own token");
+            assert!(v.restore_and_pop(tokens[0]), "restore: own token");
         });
     });
 
     group.bench_function("marked", |b| {
-        let mut v = VecI::<u32, usize>::new();
+        let mut v = ForkHistory::new(VecI::<u32, usize>::new());
         fill_i(&mut v, n);
         b.iter(|| {
             let mut tokens = Vec::with_capacity(depth);
             for d in 0..depth {
                 tokens.push(
-                    v.try_mark(ShrinkPolicy::Never)
+                    v.mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 );
                 mutate_i(&mut v, n, k);
@@ -304,7 +306,7 @@ fn bench_nested_mark_backtrack(c: &mut Criterion) {
                         .expect("push: within index word");
                 }
             }
-            v.try_restore(tokens[0]).expect("restore: own token");
+            assert!(v.restore_and_pop(tokens[0]), "restore: own token");
         });
     });
 

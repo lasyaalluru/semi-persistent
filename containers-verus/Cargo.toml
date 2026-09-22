@@ -20,6 +20,9 @@ vstd = "=0.0.0-2026-08-02-0125"
 # conformance-only shim — at the cost of one axiom mirroring vstd's own shipped
 # axiom_random_state_builds_valid_hashers (see src/external_specs.rs).
 foldhash = { workspace = true }
+# Parallel compress/restore across a composite's disjoint columns (external_body
+# dispatch only; the per-column ops stay verified). Trust ledger group B.
+rayon = { workspace = true }
 # Literal key types for SpMap (trust ledger group D; feature `literal-types`).
 # num-bigint: keyed directly (structural-eq axiom). num-rational: NOT keyed
 # directly (its BigRational axiom was WITHDRAWN as false against vstd's

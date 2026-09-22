@@ -6,9 +6,15 @@ engine runs on. The unverified reference implementation is
 
 ## Semi-persistence
 
-Each container is semi-persistent: it supports `mark()` and `restore(token)`,
-where `mark` records the current state and `restore` returns the container to a
-previously marked state, discarding all states marked after it. The
+Each container is semi-persistent: a version is marked and restored through an
+externally provided history — `group::ForkHistory<M>` owns one `History` and one
+typed member, and a standalone container is a group of one
+(`ForkHistory::new(Vec::new())`). A mark records the current state and a restore
+returns the member to a previously marked state, discarding the states marked
+after it while keeping the checkpoint's own frame open, so its token can be
+restored to again (semantics B; `restore_and_pop` is the SMT-LIB `pop`). No
+container carries a token API, a token type or a genealogy of its own: doc 10 is
+the shipped shape, doc 08 the token rules. The
 externally-observable specification is a stack of deep copies: `mark` is `push`
 (deep-copy the current contents onto the stack), `restore` is `pop` to the marked
 level (discarding the entries above it). Maintaining that specification by
@@ -23,12 +29,13 @@ recorded old values in reverse, restoring each first-written cell to its
 mark-time value; untouched cells were never logged. No deep copy is ever
 materialized: a marked state is represented implicitly as the current contents
 plus O(1) frame metadata and the diffs recorded since. Runtime memory also
-includes the live value store, diff/frame capacities, container identity, and
-fork history, which grows by O(1) per restore. If `b` fork-history links are
-walked during token validation, `k` entries are replayed, `r` cells are
-regrown, `p` entries belong to the surviving parent frame, and `w`
-parallel-bitmap words are materialized, restore is O(b+k+r+p) for inline
-capture and O(b+k+r+p+w) for parallel capture.
+includes the live value store, diff/frame capacities and the history's stamp
+table, which is O(deepest depth ever reached) rather than O(restores).
+
+Token validation is O(1): one generation-stamp read, not a walk. If `k` entries
+are replayed, `r` cells are regrown, `p` entries belong to the surviving parent
+frame, and `w` parallel-bitmap words are materialized, a restore is O(k+r+p) for
+inline capture and O(k+r+p+w) for parallel capture.
 
 ## What is verified
 
@@ -43,16 +50,16 @@ not the ghost deep copies. The headline
 theorem is the equivalence between the diff engine and the deep-copy
 specification:
 
-> after `restore(token)`, `view() == snapshots[token.frame_idx]`
+> after `restore(token)`, `view() == snapshots[token.depth]`
 
 This holds per cell, at arbitrary mark-nesting depth, under any interleaving of
 `push`, `set`, and `pop`. A companion result constrains which tokens `restore`
 will accept: each `mark` opens a branch in a fork history, each `restore` cuts the
 branches it discards, and a token naming a discarded state is rejected. The
 development uses no `admit`s or `assume`s; run `cargo verus verify` for the
-per-module tally. (That does not mean nothing is trusted; the trust boundary is
-27 `external_body` items in the default build, 32 with `literal-types`,
-enumerated in [Chapter 2](02-trust-boundary.md).)
+per-module tally. (That does not mean nothing is trusted; the current
+execution-first branch has 85 default-build `external_body` markers, 90 with
+`literal-types`, enumerated in [Chapter 2](02-trust-boundary.md).)
 
 ## Reference: what is in the crate
 
@@ -81,6 +88,19 @@ listing's order.
     over chapter 15: a base generation, one delta generation, per-key
     invalidation, and the cross-generation sortedness lemma with the caller
     obligation it rests on. Verified; the engine does not enable it.
+17. **[The Three-Tier Frame Grid](17-three-tier-frame-grid.md)**: the geometric
+    proof model for non-monotone saved lengths, Trail duplicate columns, Hot
+    unique captures, Cold runs, cross-tier replay, and the inductive lemmas
+    suggested by horizontal, vertical, and representation changes.
+18. **[Store Policy for the Composite Containers](18-store-policy.md)**: the
+    policy type parameter every composite takes, the two column families it is
+    consulted through, `HotFirst` (the default) versus `TrailFirst`, and the
+    two facts the abstract store made explicit in the proofs.
+19. **[Verified Node Caches](19-verified-node-caches.md)**: design sketch. The
+    hint index as a lower bound: the completeness invariant, the hash-consing
+    theorem in the presence of collisions, restore with no index work, the
+    two droppability rules, and the public contracts of the three e-graph
+    caches derived by bi-abduction. Not yet implemented beyond `hinted_arena`.
 
 ## The class layer
 
@@ -111,7 +131,8 @@ the reading sequence above):
 07. **[Default Impls & `Tagged` Niche Safety](07-default-impls.md)**: why a
     fabricated `Default` filler is never observable, and the niche-bit recipe.
 08. **[Token Reuse & Restore Semantics](08-token-reuse-and-restore.md)**: what
-    `restore` does to the frame stack and why a reused token is trapped.
+    `restore` does to the frame stack (it resets to the checkpoint and keeps
+    its frame open; `pop_scope` drops it), which tokens stay valid, and why.
 
 ## Future work
 

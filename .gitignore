@@ -42,3 +42,6 @@ liblib.rlib
 
 # mdbook output for the user-facing book (doc/book/book.toml build-dir)
 /doc/book/book/
+
+# Scratch verification dumps at the repository root: never commit these.
+/*.txt

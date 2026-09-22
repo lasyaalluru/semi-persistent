@@ -2,44 +2,77 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Literal value interning.
 
+use crate::containers::group::Member;
 use std::fmt;
 use std::hash::Hash;
 
-use num_bigint::BigInt;
+use num_bigint::{BigInt, BigUint};
 use num_rational::BigRational;
 use num_traits::Zero;
+use ordered_float::OrderedFloat;
 
-use crate::containers::DenseId;
+use crate::containers::{CanonicalF64, CanonicalRational, DenseId};
 
-/// Marker trait for literal value types.
-pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display {}
-
-/// Opaque token for [`LitValStore::mark`] / [`LitValStore::restore`].
+/// Canonical hash-key form of a literal component.
 ///
-/// Carries the log length at the mark alongside the container's own token:
-/// restore reads it to find the suffix of values interned since, which is
-/// exactly the set of lookup entries it has to drop. The length is not a
-/// second branch-history encoding: branch validity lives entirely in the
-/// `VecToken`, which restore asserts valid before touching the index, and
-/// the length only tells it which suffix values to read from the log while
-/// they are still live (after the log restore they are gone).
-#[derive(Clone, Copy, Debug)]
-pub struct LitValStoreToken(crate::containers::VecToken, usize);
+/// The verified map asks one thing of a key type (its key model): two keys
+/// are `==` exactly when they are the same representation, and `Hash` and
+/// `Clone` respect that. Types whose bit patterns and values disagree get a
+/// canonical wrapper: floats through [`CanonicalF64`] (NaNs and signed zeros
+/// folded onto one representative, everything else injective — the identity
+/// the interner has always used through `OrderedFloat`), rationals through
+/// [`CanonicalRational`] (reduced, positive denominator). Everything else is
+/// canonical by construction and is its own key.
+pub trait CanonicalKey {
+    type Key: Clone + Eq + Hash + Send + fmt::Debug;
+    fn canonical_key(&self) -> Self::Key;
+}
 
-/// Append-only intern table for literals.
+macro_rules! identity_key {
+    ($($t:ty),* $(,)?) => { $(
+        impl CanonicalKey for $t {
+            type Key = $t;
+            fn canonical_key(&self) -> $t {
+                self.clone()
+            }
+        }
+    )* };
+}
+identity_key!(bool, i64, u64, usize, String, BigInt, BigUint);
+
+impl CanonicalKey for OrderedFloat<f64> {
+    type Key = CanonicalF64;
+    fn canonical_key(&self) -> CanonicalF64 {
+        CanonicalF64::new(self.into_inner())
+    }
+}
+
+impl CanonicalKey for BigRational {
+    type Key = CanonicalRational;
+    fn canonical_key(&self) -> CanonicalRational {
+        CanonicalRational::from_rational(self)
+    }
+}
+
+/// Literal value types. A literal carries its own canonical hash key (see
+/// [`CanonicalKey`]); the literal store interns by that key.
+pub trait LitVal: Clone + Eq + Hash + fmt::Debug + fmt::Display + Send {
+    type Key: Clone + Eq + Hash + Send + fmt::Debug;
+    fn key(&self) -> Self::Key;
+}
+
+/// Append-only intern table for literals, on the verified [`SpMap`]: the log
+/// of `(canonical key, value)` pairs is the source of truth (positions are the
+/// literal ids), the map's index answers lookups, and `restore` is the map's
+/// verified restore, which unwinds the index over the discarded suffix through
+/// the previous-occurrence column (rebuild only as its own fallback). Keys are
+/// the literals' canonical forms ([`LitVal::Key`]), so the map's key model
+/// holds for float and rational literals too.
 ///
-/// The log is the source of truth and a hash index accelerates lookup, which is
-/// what [`crate::containers::SpMap`] provides, but that map rebuilds its index
-/// from the surviving log on every restore, cloning every live key. Interning is
-/// append-only (a value is pushed once, never overwritten and never mutated),
-/// so restore instead deletes the entries for the log suffix it truncates, which
-/// costs one hash removal per value interned since the mark rather than one key
-/// clone per value in the table. `restore` keeps the rebuild as a fallback on the
-/// same terms as the node caches: see `crate::caches::REBUILD_RATIO`.
+/// [`SpMap`]: crate::containers::SpMap
 pub struct LitValStore<L: LitVal, V: DenseId, const TRACK: bool> {
     /// Positions in this log ARE literal-value ids, so the log's index word is `V`'s.
-    log: crate::containers::AppendOnlyVec<L, V::Index, TRACK>,
-    index: hashbrown::HashMap<L, V::Index>,
+    map: crate::containers::SpUniqueMap<L::Key, L, V::Index, TRACK>,
 }
 
 impl<L: LitVal, V: DenseId, const TRACK: bool> Default for LitValStore<L, V, TRACK> {
@@ -59,90 +92,59 @@ impl<L: LitVal, V: DenseId, const TRACK: bool> fmt::Debug for LitValStore<L, V, 
 impl<L: LitVal, V: DenseId, const TRACK: bool> LitValStore<L, V, TRACK> {
     pub fn new() -> Self {
         Self {
-            log: crate::containers::AppendOnlyVec::new(),
-            index: hashbrown::HashMap::new(),
+            map: crate::containers::SpUniqueMap::new(),
         }
     }
 
     pub fn intern(&mut self, value: L) -> V {
-        if let Some(&id) = self.index.get(&value) {
-            return crate::id::id_at_index::<V>(id);
-        }
-        let id = self
-            .log
-            .try_push(value.clone())
+        // One hash of the canonical key on both paths (see `SpMap::try_intern`).
+        let key = value.key();
+        let (id, _fresh) = self
+            .map
+            .try_intern(key, value)
             .expect("literal interner exhausted the id index word");
-        self.index.insert(value, id);
         crate::id::id_at_index::<V>(id)
     }
 
     pub fn get(&self, id: V) -> &L {
-        self.log.get(id.to_index())
+        self.map.get_val(id.to_index())
     }
 
     /// Try to look up a value without interning it.
     pub fn try_lookup(&self, value: &L) -> Option<V> {
-        self.index
-            .get(value)
-            .map(|&i| crate::id::id_at_index::<V>(i))
+        self.map
+            .id_of(&value.key())
+            .map(|i| crate::id::id_at_index::<V>(i))
     }
 
     pub fn len(&self) -> usize {
-        use crate::containers::IndexLike;
-        self.log.len().as_usize()
+        self.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.log.is_empty()
+        self.map.is_empty()
     }
 
-    pub fn mark(&mut self, shrink: crate::containers::ShrinkPolicy) -> LitValStoreToken {
-        LitValStoreToken(
-            self.log
-                .try_mark(shrink)
-                .expect("literal mark: depth bounded by the saturation driver"),
-            self.len(),
-        )
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: crate::containers::ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
     }
 
-    pub fn restore(&mut self, token: LitValStoreToken) {
-        use crate::containers::IndexLike;
-        // Validate the log token BEFORE touching the index: the removals
-        // below are not undoable, so an invalid token must refuse while the
-        // store is still consistent (index and log in step).
-        assert!(
-            self.log.is_valid_token(&token.0),
-            "literal restore: token is not restorable"
-        );
-        let saved_len = token.1;
-        let live_len = self.len();
-        let incremental = crate::caches::restore_incrementally(live_len - saved_len, 0, saved_len);
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
 
-        if incremental {
-            for i in saved_len..live_len {
-                let idx = <V::Index as IndexLike>::try_from_usize(i)
-                    .expect("log position: below a length the log already holds");
-                self.index.remove(self.log.get(idx));
-            }
-        }
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
 
-        self.log
-            .try_restore(token.0)
-            .expect("literal restore: token minted by this container's own mark");
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
 
-        if !incremental {
-            self.index.clear();
-            for (i, value) in self.log.iter().enumerate() {
-                let idx = <V::Index as IndexLike>::try_from_usize(i)
-                    .expect("log position: below a length the log already holds");
-                self.index.insert(value.clone(), idx);
-            }
-        }
-        debug_assert_eq!(
-            self.index.len(),
-            self.len(),
-            "restore left the literal index out of step with the log"
-        );
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 
@@ -192,7 +194,24 @@ pub enum NiraLitVal {
     Rat(BigRational),
 }
 
-impl LitVal for NiraLitVal {}
+/// Canonical hash key of [`NiraLitVal`]: rationals in reduced form.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum NiraLitKey {
+    Bool(bool),
+    Int(BigInt),
+    Rat(CanonicalRational),
+}
+
+impl LitVal for NiraLitVal {
+    type Key = NiraLitKey;
+    fn key(&self) -> NiraLitKey {
+        match self {
+            NiraLitVal::Bool(b) => NiraLitKey::Bool(*b),
+            NiraLitVal::Int(n) => NiraLitKey::Int(n.clone()),
+            NiraLitVal::Rat(r) => NiraLitKey::Rat(CanonicalRational::from_rational(r)),
+        }
+    }
+}
 
 impl fmt::Debug for NiraLitVal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -65,8 +65,12 @@ fn tour_pos<T: DenseId>(pos: usize) -> T::Index {
 /// **is** a reachable position: at full 31-bit capacity the largest position is
 /// `2 * 2^31 == u32::MAX + 1`, so a tour long enough would have written the marker value
 /// into `first` and `lca` would have reported "no such node" for a node that has one.
-fn euler_tour<T: DenseId, const TRACK: bool>(
-    pp: &crate::containers::VecI<T, T::Index, TRACK>,
+fn euler_tour<
+    T: DenseId,
+    S: crate::containers::DiffStore<T, T::Index, TRACK>,
+    const TRACK: bool,
+>(
+    pp: &crate::containers::vec::Vec<T, T::Index, S, TRACK>,
     n: usize,
 ) -> (Vec<T>, Vec<usize>, Vec<T::Index>, Vec<T::Index>) {
     let vroot = n;
@@ -283,8 +287,8 @@ pub struct LcaTable<T: DenseId> {
 }
 
 impl<T: DenseId> LcaTable<T> {
-    pub fn build<const TRACK: bool>(
-        pp: &crate::containers::VecI<T, T::Index, TRACK>,
+    pub fn build<S: crate::containers::DiffStore<T, T::Index, TRACK>, const TRACK: bool>(
+        pp: &crate::containers::vec::Vec<T, T::Index, S, TRACK>,
         n: usize,
     ) -> Self {
         if n == 0 {
@@ -424,8 +428,8 @@ pub struct LcaTableCompact<T: DenseId> {
 }
 
 impl<T: DenseId> LcaTableCompact<T> {
-    pub fn build<const TRACK: bool>(
-        pp: &crate::containers::VecI<T, T::Index, TRACK>,
+    pub fn build<S: crate::containers::DiffStore<T, T::Index, TRACK>, const TRACK: bool>(
+        pp: &crate::containers::vec::Vec<T, T::Index, S, TRACK>,
         n: usize,
     ) -> Self {
         if n == 0 {

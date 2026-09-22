@@ -361,7 +361,10 @@ where
     /// use [`build_with`](Self::build_with) and keep one.
     pub fn build<L: LitVal, const TRACK: bool, const PROOFS: bool>(
         eg: &EGraph<Cfg, L, TRACK, PROOFS>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         Self::build_with(eg, &mut IndexScratch::new())
     }
 
@@ -369,7 +372,10 @@ where
     pub fn build_with<L: LitVal, const TRACK: bool, const PROOFS: bool>(
         eg: &EGraph<Cfg, L, TRACK, PROOFS>,
         scratch: &mut IndexScratch<Cfg>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         // `node_ids`, not a bare `from_usize` scan: the bound argument (every
         // routing entry was minted through `TypedRouting::reserve`'s checked
         // path) lives with `node_ids`; an inline scan here would restate the
@@ -388,7 +394,10 @@ where
     pub fn build_delta<L: LitVal, const TRACK: bool, const PROOFS: bool>(
         eg: &EGraph<Cfg, L, TRACK, PROOFS>,
         touched: &[Cfg::G],
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         Self::build_delta_with(eg, touched, &mut IndexScratch::new())
     }
 
@@ -397,7 +406,10 @@ where
         eg: &EGraph<Cfg, L, TRACK, PROOFS>,
         touched: &[Cfg::G],
         scratch: &mut IndexScratch<Cfg>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         let ids: Vec<Cfg::G> = {
             let _t = crate::phase_timing::Timer::start(crate::phase_timing::DELTA_DEDUP);
             let mut ids: Vec<Cfg::G> = touched.to_vec();
@@ -444,7 +456,10 @@ where
         ids: impl Iterator<Item = Cfg::G>,
         full: bool,
         scratch: &mut IndexScratch<Cfg>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         scratch.clear();
         // Stride of the `by_child_pos` composite key. Read before the walk,
         // because the key must be computable as each child is visited.
@@ -490,6 +505,14 @@ where
                 op_tab.push(op);
             }
             if eg.node_flags(gid) & crate::node_types::FLAG_SUBSUMED != 0 {
+                continue;
+            }
+            // Class-level e-matching shield (the `matchable` bit): skip every node
+            // of a shielded class, exactly as `FLAG_SUBSUMED` skips one node, so a
+            // shielded class contributes to none of the matcher indexes and the
+            // leapfrog join never enumerates it. `repr` is the class root already
+            // resolved above, so this is a sparse-set lookup + bit read per node.
+            if !eg.is_repr_matchable(repr) {
                 continue;
             }
 
@@ -943,7 +966,10 @@ const PROBE_SCAN_CAP: usize = 256;
 /// cardinality, and applying it again to the probe would charge it twice.
 ///
 /// [`CrossSampler`]: crate::schedule::CrossSampler
-pub struct IndexSampler<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool> {
+pub struct IndexSampler<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
+where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
     eg: &'a EGraph<Cfg, L, TRACK, PROOFS>,
     index: VariantIndex<'a, Cfg>,
 }
@@ -952,6 +978,7 @@ impl<'a, Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     IndexSampler<'a, Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pub fn new(eg: &'a EGraph<Cfg, L, TRACK, PROOFS>, index: VariantIndex<'a, Cfg>) -> Self {
         Self { eg, index }
@@ -988,6 +1015,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     crate::schedule::CrossSampler<Cfg::O> for IndexSampler<'_, Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     fn driver_sample(&self, atom_id: usize, op: Cfg::O, k: usize, out: &mut Vec<usize>) {
         out.clear();

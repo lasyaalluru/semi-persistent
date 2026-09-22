@@ -5,7 +5,8 @@
 //! (oracle keys are the returned ids) and the per-op invariant sweep.
 //! Gated on `compat-composites`; includes the `new()` constructor.
 use proptest::prelude::*;
-use semi_persistent_containers_verus::sparse_set::{SparseSet, SparseSetToken};
+use semi_persistent_containers_verus::history::GroupToken;
+use semi_persistent_containers_verus::sparse_set::SparseSet;
 use semi_persistent_containers_verus::{IndexLike, ParallelStore, ShrinkPolicy};
 use std::collections::HashMap;
 
@@ -29,10 +30,15 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut ss = SparseSet::<u32, u32, ParallelStore<u32, u32>, true>::new();
+    let mut ss = semi_persistent_containers_verus::group::ForkHistory::new(SparseSet::<
+        u32,
+        u32,
+        ParallelStore<u32, u32>,
+        true,
+    >::new());
     // oracle: id → value
     let mut oracle: HashMap<u32, u32> = HashMap::new();
-    let mut snapshots: Vec<(SparseSetToken, HashMap<u32, u32>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, HashMap<u32, u32>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -66,7 +72,7 @@ fn run_ops(ops: Vec<Op>) {
                     continue;
                 }
                 let token = ss
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone()));
             }
@@ -76,7 +82,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                ss.restore(token);
+                assert!(ss.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }

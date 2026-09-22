@@ -3,6 +3,7 @@ members = [
     "semi-persistent",
     "containers",
     "egraph",
+    "satcore",
     "traversals",
     "traversals/compile-tests",
     "traversals/derive",
@@ -29,6 +30,7 @@ hashbrown = { version = "0.17", features = ["raw-entry"] }
 foldhash = "0.2"
 ordered-float = "5"
 rapidhash = "4"
+rayon = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 # Release profile: applies to `cargo build --release`, `cargo bench`, and every

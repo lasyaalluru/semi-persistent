@@ -355,6 +355,9 @@ impl crate::tagged::Tagged for DenseUsize {
 // ListArena id — must impl it. Mirrors the primitive `usize` impl
 // (`index_like.rs`): full-range, `as_nat` is the raw value, no bit-stealing.
 impl crate::index_like::IndexLike for DenseUsize {
+    proof fn lemma_obeys_key_model() {
+        broadcast use axiom_key_model_dense_usize;
+    }
     open spec fn as_nat(self) -> nat { self.raw_spec() }
     open spec fn max_nat() -> nat { usize::MAX as nat + 1 }
     // `closed`: constructs `DenseUsize` (opaque outside the crate via its
@@ -382,6 +385,10 @@ impl crate::index_like::IndexLike for DenseUsize {
     fn lt(self, other: Self) -> bool { self.raw < other.raw }
     fn le(self, other: Self) -> bool { self.raw <= other.raw }
 }
+
+/// ASSUMED (trust ledger group D shape): `DenseUsize`'s `==`/`Hash` are structural
+/// over `raw`, so equal ids are identical values and hashing is deterministic.
+pub broadcast axiom fn axiom_key_model_dense_usize() ensures #[trigger] vstd::std_specs::hash::obeys_key_model::<DenseUsize>();
 
 impl DenseId for DenseUsize {
     type Index = usize;

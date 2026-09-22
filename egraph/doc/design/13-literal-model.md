@@ -45,15 +45,34 @@ operations (+, -, *, <, etc.) with their evaluation functions.
 
 ```rust
 pub struct LitValStore<L, V, const TRACK: bool> {
-    log: AppendOnlyVec<L, V::Index, TRACK>,
-    index: HashMap<L, V::Index>,
+    map: SpUniqueMap<L::Key, L, V::Index, TRACK>,
 }
 ```
 
-The append-only log is the source of truth and its positions are literal ids.
-The hash map is a derived lookup index. Restore normally removes only the
-entries for the truncated suffix; for a sufficiently large suffix it clears
-and rebuilds the index from the surviving log.
+The store is a verified semi-persistent map in its unique-keys discipline
+(`SpUniqueMap`; the key types come from the container crate's `literal-types`
+feature): its append-only value log is the source of truth and the log
+positions are the literal ids; its index is the map's own, maintained through
+the verified insert/restore transitions (restore unwinds the discarded suffix,
+no hand-rolled rebuild heuristic). Interning is `try_intern`: one hash of the
+canonical key decides membership and appends on a miss, and the discipline
+guarantees the log never holds a shadowed literal. Mark and restore go through
+the session's history.
+
+Keys are **canonical**, not bit-compared values. `LitVal` carries an
+associated `Key` type and `key()`, produced from each payload type by the
+`CanonicalKey` trait, which maps a value to the representation under which
+value equality is key equality (the map's key-model requirement):
+
+| payload | key | why |
+|---|---|---|
+| `bool`, `i64`, `u64`, `usize`, `String`, `BigInt`, `BigUint` | itself | structural `Eq`/`Hash` is value identity |
+| `OrderedFloat<f64>` | `CanonicalF64` | the fold `OrderedFloat` already applies (±0.0 and all NaNs identified), pinned by the container crate's compliance tests, so interning keeps the identity the e-graph had; the bit-exact `BitsF64` is the documented alternative |
+| `BigRational` | `CanonicalRational` | gcd-reduced, sign-normalized pair; `Ratio::new_raw` can reach `2/4`, which `BigRational::eq` conflates with `1/2` while its hash may not |
+
+`define_litval!` takes the key enum's name and generates it from the
+variants' canonical keys (`MachineLitKey`, `BignumLitKey`, `AllLitKey`);
+`NiraLitVal` has `NiraLitKey` by hand.
 
 | Method | Mutates? | Used in |
 |--------|----------|---------|

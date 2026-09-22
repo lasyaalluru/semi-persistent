@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Semi-persistent union-find with optional proof tracking.
 
-use crate::containers::Tagged;
+use crate::containers::{DenseId, Tagged};
 
 /// Why two e-nodes were unified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Justification<G: Copy> {
+pub enum Justification<G: DenseId> {
     /// No-op filler used to default-initialize slots (e.g. as the
     /// `resize_default` filler during restore, and the initial entry from
     /// `make_set`). Never carries proof information; never observed as a real
@@ -54,9 +54,20 @@ pub enum Justification<G: Copy> {
         node_a: G,
         node_b: G,
     },
+    /// External assumption: a companion solver (the `satcore` crate's EUF
+    /// layer) asserted an equality atom true, and this merge is that
+    /// assertion. The payload is an opaque word of the configuration's index
+    /// width, so it is capacity-coupled to the id family like every scaling
+    /// id (see `config.rs`); the client crate owns the encoding and maps the
+    /// word back to its own literal type when proof extraction surfaces it
+    /// as a leaf antecedent. That crossing is what lets conflict analysis
+    /// move from an e-graph explanation into the client's Boolean domain.
+    Assumption {
+        lit: <G as DenseId>::Index,
+    },
 }
 
-impl<G: Copy + Clone + core::fmt::Debug + PartialEq + Eq> Tagged for Justification<G> {
+impl<G: DenseId> Tagged for Justification<G> {
     type Repr = crate::containers::BoolTagged<Justification<G>>;
 
     fn into_repr(self) -> Self::Repr {
@@ -84,9 +95,6 @@ impl<G: Copy + Clone + core::fmt::Debug + PartialEq + Eq> Tagged for Justificati
 /// machine-checked (`containers-verus/doc/design/egraph-class-layer.md`).
 pub type UnionFind<T, const TRACK: bool = true, const PROOFS: bool = false> =
     crate::containers::union_find::UnionFind<T, Justification<T>, TRACK, PROOFS>;
-
-/// Opaque token for [`UnionFind::mark`] / [`UnionFind::restore`].
-pub type UnionFindToken = crate::containers::union_find::UnionFindToken;
 
 /// Reusable scratch buffers for proof extraction (the kernel's, with this
 /// crate's justification payload).

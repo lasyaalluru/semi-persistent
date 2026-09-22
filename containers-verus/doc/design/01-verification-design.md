@@ -10,10 +10,13 @@ production [`semi-persistent-containers`](../../../containers) crate.*
 The crate verifies a core semi-persistent data structure in depth and then reuses
 it to implement other semi-persistent data structures.
 
-**The semi-persistent vector.** A vector supporting `mark()` and
-`restore(token)`. Its externally-observable specification is a stack of deep
-copies: `mark` deep-copies the current contents onto the stack, `restore(token)`
-pops back to the marked level, discarding the entries above it. The
+**The semi-persistent vector.** A vector whose versions are marked and restored
+through an externally provided history — a group of one for a standalone column
+(`group::ForkHistory::new(Vec::new())`); the container itself exposes only the
+structural frame protocol. Its externally-observable specification is a stack of
+deep copies: a mark deep-copies the current contents onto the stack, and a
+restore to a token returns to the marked level, discarding the entries above it
+while keeping the checkpoint's frame open (semantics B, doc 08 §1). The
 implementation does not store those copies; it keeps a **sparse negative diff**:
 the first write to a cell after a mark logs that cell's old value, and later
 writes to the same cell do not create diff entries. `restore` truncates the log
@@ -63,8 +66,10 @@ separation, and shape are proved as predicates over those ids
 
 The whole development carries no `admit`s or `assume`s; run `cargo verus verify` for
 the per-module tally. ("No `admit`s/`assume`s" does not mean nothing is trusted:
-the trust boundary is 27 default-build `external_body` items, or 32 with
-`literal-types`, enumerated and justified in
+the trust boundary is 12 default-build `external_body` items, or 17 with
+`literal-types` (2026-09-18; it was 27 and 32 when this chapter was written, then
+grew with the three-tier work before the audit cut it back), enumerated and
+justified in
 [Chapter 2](02-trust-boundary.md). Read it to know exactly what is guaranteed.)
 
 The rest of this document is the machinery: the layered architecture (§2), the
@@ -247,8 +252,8 @@ struct Vec<T, I, S, const TRACK: bool> {
     diff_log: std::vec::Vec<(T,I)>,  // (old_value, index) entries, all frames
     frames:   std::vec::Vec<Frame<I>>,
     active_saved_len: I,             // cached saved_len of the top frame
-    forks: ForkHistory,              // branch-cut token validity
-    id: ContainerId,                 // cross-container token check
+    // (the `forks`/`id` fields shown in earlier revisions are gone: the token
+    // manager is external, held by the group that drives this column)
     phantom: PhantomData<(T,I)>,
     snapshots: Ghost<Seq<Seq<T>>>,   // GHOST: deep copy per frame
 }
@@ -637,9 +642,11 @@ The payoff is the guarantees the borrow checker can no longer give, as theorems:
 the list arena's `prepend`/`append`/`splice` each refine the obvious sequence
 operation while preserving disjointness of all other lists; given nodes in
 distinct rings, the circular class list's pointer-swap `splice` merges them
-into one ring whose node set is their union. The release pointer work is
-constant (and allocation-free); debug builds first validate distinctness by
-walking one ring, O(ring size). The sparse set is a genuine bijection between
+into one ring whose node set is their union. The pointer work is constant
+(and allocation-free); the public `splice` first establishes distinctness by
+a verified walk of the absorbed ring, O(ring size), and refuses otherwise,
+while the e-graph's merge calls the crate-private core, where distinctness
+is a theorem. The sparse set is a genuine bijection between
 its dense and sparse halves. [Chapter 9](09-arena-aliasing-dynamic-frames.md)
 develops the dynamic-frames connection and the frame/anti-frame mechanics in full;
 the B+tree, the one recursive case, is [Chapter 10](10-bplus-tree.md).

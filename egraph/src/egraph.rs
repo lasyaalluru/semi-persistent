@@ -8,13 +8,11 @@ use crate::config::EGraphConfig;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
-use crate::literal::{LitVal, LitValStore, LitValStoreToken};
+use crate::containers::error::ContainerError;
+use crate::literal::{LitVal, LitValStore};
 use crate::multiplicity::MultiplicityLike;
-use crate::node_store::{Added, NodeStore, NodeStoreToken};
-use crate::registry::{
-    AxiomRegistry, AxiomRegistryToken, OpKind, OpRegistry, OpRegistryToken, RuleRegistry,
-    RuleRegistryToken, SortRegistry, SortRegistryToken,
-};
+use crate::node_store::{Added, NodeStore};
+use crate::registry::{AxiomRegistry, OpKind, OpRegistry, RuleRegistry, SortRegistry};
 use crate::typed_routing::NodeRef;
 use crate::union_find::{Justification, ProofBuf};
 
@@ -32,19 +30,113 @@ pub(crate) enum CompletionClamp {
 
 #[derive(Clone, Copy, Debug)]
 pub struct EGraphToken {
-    classes: crate::classes::EClassesToken,
-    nodes: NodeStoreToken,
-    sorts: SortRegistryToken,
-    ops: OpRegistryToken,
-    rules: RuleRegistryToken,
-    axioms: AxiomRegistryToken,
-    lits: LitValStoreToken,
-    unit_node: crate::containers::MapToken,
-    inverse_op: crate::containers::MapToken,
+    /// One `GroupToken` names the whole synchronized member set's version; the
+    /// e-graph's `History` is the single validity authority (doc 10). The
+    /// per-member token structs live in the e-graph's internal depth-indexed
+    /// stacks, not here.
+    group: crate::containers::history::GroupToken,
     /// The completion outcome at mark time. `mark()` rebuilds first, so this value
     /// describes exactly the state being snapshotted; `restore` puts it back so a caller
     /// can never observe an outcome from a discarded scope.
     completion_outcome: Option<CompletionOutcome>,
+}
+
+/// Live-node threshold under which mark/restore stay sequential (see
+/// [`EGraph::fanout_enabled`]): below it the scope dispatch costs more than the
+/// members' mark/restore work.
+pub const PAR_NODE_MIN: usize = 1 << 14;
+
+/// Fan-out observability: total spawned member closures and a bitset of the
+/// rayon worker indices they ran on. The differential test reads these to
+/// assert the parallel path actually spawned rather than degenerating to the
+/// caller's thread; a saturating bitset (indices past 63 fold into bit 63)
+/// still distinguishes one worker from several.
+static FANOUT_SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FANOUT_WORKERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn fanout_witness() {
+    use std::sync::atomic::Ordering;
+    FANOUT_SPAWNS.fetch_add(1, Ordering::Relaxed);
+    let idx = rayon::current_thread_index().unwrap_or(0).min(63);
+    FANOUT_WORKERS.fetch_or(1u64 << idx, Ordering::Relaxed);
+}
+
+/// Read and reset the fan-out witness: `(spawned closures, distinct workers)`.
+pub fn take_fanout_witness() -> (usize, u32) {
+    use std::sync::atomic::Ordering;
+    let spawns = FANOUT_SPAWNS.swap(0, Ordering::Relaxed);
+    let workers = FANOUT_WORKERS.swap(0, Ordering::Relaxed).count_ones();
+    (spawns, workers)
+}
+
+/// Mark/restore wall-clock accounting, on only under `SEMPER_PROF` so the
+/// live path pays nothing beyond one static bool read. Drives the profile
+/// that decides whether corpus-level parallel gains are reachable: if
+/// mark+restore is a small fraction of solve time, a neutral corpus wall is
+/// the expected outcome, not a defect.
+static PROF_ON: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("SEMPER_PROF").is_some());
+static MARK_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static MARK_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESTORE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RESTORE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn prof_record(
+    ns: &std::sync::atomic::AtomicU64,
+    calls: &std::sync::atomic::AtomicU64,
+    t: std::time::Instant,
+) {
+    use std::sync::atomic::Ordering;
+    ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    calls.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Read and reset the profile: `(mark ns, mark calls, restore ns, restore calls)`.
+/// All zeros unless `SEMPER_PROF` is set.
+pub fn take_markrestore_profile() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering;
+    (
+        MARK_NS.swap(0, Ordering::Relaxed),
+        MARK_CALLS.swap(0, Ordering::Relaxed),
+        RESTORE_NS.swap(0, Ordering::Relaxed),
+        RESTORE_CALLS.swap(0, Ordering::Relaxed),
+    )
+}
+
+/// Per-member restore accounting (SEMPER_RESTORE_PROF): which member inside
+/// one `restore` the time goes to. Sequential path only (the fan-out
+/// interleaves members, so per-member walls would not add up).
+static RESTORE_PROF_ON: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os("SEMPER_RESTORE_PROF").is_some());
+pub const RESTORE_PROF_MEMBERS: [&str; 8] = [
+    "classes", "nodes", "sorts", "ops", "rules", "axioms", "lits", "maps",
+];
+static RESTORE_MEMBER_NS: [std::sync::atomic::AtomicU64; 8] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn restore_prof_record(member: usize, t: std::time::Instant) {
+    RESTORE_MEMBER_NS[member].fetch_add(
+        t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Read and reset the per-member restore nanoseconds, indexed as
+/// [`RESTORE_PROF_MEMBERS`]. All zeros unless `SEMPER_RESTORE_PROF` is set.
+pub fn take_restore_member_profile() -> [u64; 8] {
+    let mut out = [0u64; 8];
+    for (i, c) in RESTORE_MEMBER_NS.iter().enumerate() {
+        out[i] = c.swap(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    out
 }
 
 pub struct EGraph<
@@ -52,14 +144,20 @@ pub struct EGraph<
     L: LitVal,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+> where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
     sorts: SortRegistry<Cfg::S, TRACK>,
     ops: OpRegistry<Cfg::O, Cfg::S, TRACK>,
     rules: RuleRegistry<TRACK>,
     axioms: AxiomRegistry<Cfg::G, TRACK>,
     lits: LitValStore<L, Cfg::V, TRACK>,
-    classes: EClasses<Cfg::G, Cfg::ClassKey, Cfg::UL, Cfg::UN, TRACK, PROOFS>,
-    nodes: NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS>,
+    classes: EClasses<Cfg::G, Cfg::ClassKey, Cfg::UL, Cfg::UN, TRACK, PROOFS, Cfg::Policy>,
+    nodes: NodeStore<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK, PROOFS, Cfg::Policy>,
+    /// The ONE genealogy for the whole synchronized member set (doc 10): a
+    /// group token's validity and the branch cuts are recorded here once,
+    /// instead of once per member vector. Sole authority for restore validity.
+    history: crate::containers::history::History,
     worklist: Vec<(Cfg::UL, Cfg::G)>,
     collisions: Vec<(Cfg::G, Cfg::G)>,
     /// Reusable scratch for a node's child ids as bare `G` (the canonical-children buffer for
@@ -116,13 +214,13 @@ pub struct EGraph<
     /// here rather than on `OpKind<S>` because a node id is `Cfg::G`, which `OpKind<S>` cannot
     /// carry. Semi-persistent (its own token), so it rolls back with the op declarations that
     /// created the units. Absent key = the op has no declared identity.
-    unit_node: crate::containers::SpMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
+    unit_node: crate::containers::SpUniqueMap<Cfg::O, Cfg::G, <Cfg::O as DenseId>::Index, TRACK>,
     /// Per-op group inverse operator, for AC ops declared with `:inverse neg`
     /// (`x ∘ neg(x) = e`). Resolved to a real op id at registration (sortcheck validates
     /// the unary signature). Same persistence story as `unit_node`. Absent key = no
     /// declared inverse. NOTE: gate-level group support — inverse-PAIR cancellation only,
     /// not Kapur §5.4's full Abelian-group completion (no Gaussian elimination).
-    inverse_op: crate::containers::SpMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
+    inverse_op: crate::containers::SpUniqueMap<Cfg::O, Cfg::O, <Cfg::O as DenseId>::Index, TRACK>,
     /// Outcome of the most recent `rebuild` when `cc` is enabled. Lets callers distinguish
     /// convergence from a growth-budget abort. `None` if completion hasn't run yet.
     completion_outcome: Option<CompletionOutcome>,
@@ -231,6 +329,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool> Defaul
     for EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     fn default() -> Self {
         Self::new()
@@ -241,6 +340,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pub fn new() -> Self {
         Self {
@@ -251,6 +351,7 @@ where
             lits: LitValStore::new(),
             classes: EClasses::new(),
             nodes: NodeStore::new(),
+            history: crate::containers::history::History::new(),
             worklist: Vec::new(),
             collisions: Vec::new(),
             g_buf: Vec::new(),
@@ -265,8 +366,8 @@ where
             cmp_buf_a: Vec::new(),
             cmp_buf_b: Vec::new(),
             flatten_buf: Vec::new(),
-            unit_node: crate::containers::SpMap::new(),
-            inverse_op: crate::containers::SpMap::new(),
+            unit_node: crate::containers::SpUniqueMap::new(),
+            inverse_op: crate::containers::SpUniqueMap::new(),
             completion_outcome: None,
             completion_node_budget: DEFAULT_COMPLETION_NODE_BUDGET,
             repair_state: None,
@@ -489,18 +590,24 @@ where
     /// Record `op`'s identity (unit) element node (`x ∘ e = x`; the unit drops from monomials).
     /// Called by the resolver in `sortcheck` after it builds the `:identity` term to a node.
     pub fn set_unit_node(&mut self, op: Cfg::O, unit: Cfg::G) {
-        self.unit_node
-            .try_insert(op, unit)
-            .expect("unit/inverse-op map exhausted its index word");
+        // Unique-keyed: an operator declares its identity once, in its own
+        // declaration, so a second unit for the same op is a caller error.
+        match self.unit_node.try_insert(op, unit) {
+            Ok(_) => {}
+            Err(ContainerError::DuplicateKey) => panic!("operator already has a unit node"),
+            Err(_) => panic!("unit/inverse-op map exhausted its index word"),
+        }
     }
     /// The identity (unit) element node of `op`, or `None` if `op` has no declared identity.
     pub fn unit_node(&self, op: Cfg::O) -> Option<Cfg::G> {
         self.unit_node.get_by_key(&op).copied()
     }
     pub fn set_inverse_op(&mut self, op: Cfg::O, inv: Cfg::O) {
-        self.inverse_op
-            .try_insert(op, inv)
-            .expect("unit/inverse-op map exhausted its index word");
+        match self.inverse_op.try_insert(op, inv) {
+            Ok(_) => {}
+            Err(ContainerError::DuplicateKey) => panic!("operator already has an inverse op"),
+            Err(_) => panic!("unit/inverse-op map exhausted its index word"),
+        }
     }
     /// The group inverse operator of `op` (`:inverse neg`), or `None` if none declared.
     pub fn inverse_op(&self, op: Cfg::O) -> Option<Cfg::O> {
@@ -1518,6 +1625,9 @@ where
                 node_a.to_usize(),
                 node_b.to_usize()
             ),
+            Justification::Assumption { lit } => {
+                write!(out, "assumption lit={}", lit.as_usize())
+            }
             Justification::InverseCancel { node_a, node_b } => write!(
                 out,
                 "inverse-cancel nodes={},{}",
@@ -1538,10 +1648,45 @@ where
             return false;
         }
 
+        // The expansion walks a DAG of pair dependencies. Without
+        // memoization a pair shared by several paths is re-expanded once per
+        // path, which is exponential on diamond-shaped explanation structure
+        // (a two-assertion Boolean-congruence input ran for over 15 seconds
+        // before these sets were added). Worse than exponential: it can fail
+        // to terminate. A congruence step's premises are the two nodes'
+        // ORIGINAL children, which predate recanonization, and their present
+        // equality can route through the very congruence edge the collision
+        // produced. Without a record of expanded pairs the walk re-emits that
+        // edge, expands it again, and loops forever (measured past 2 million
+        // steps and 16 GB on the SMT regression
+        // `edge_cases/boolean_backtracking.smt2`, a Boolean child oscillating
+        // across backtracks). With the sets every congruence pair is expanded
+        // at most once and every pair's forest path is appended at most once,
+        // so the step list is bounded by the number of distinct pairs times
+        // the longest forest path, whatever shape the forest has.
+        // Two sets, because the two guards
+        // protect different work: `expanded` marks congruence steps whose
+        // child pairs have been walked; `explained` marks pairs whose forest
+        // path is already in `buf.steps`. A congruence pair must not seed
+        // `explained` (its path can be longer than the one recorded edge),
+        // and the initial pair must not seed `expanded` (its own congruence
+        // step still needs its children walked). Repeats append no steps,
+        // and consumers collect leaf justifications as a set, so skipping
+        // them loses nothing.
+        let mut expanded: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        let mut explained: std::collections::HashSet<(usize, usize)> =
+            std::collections::HashSet::new();
+        explained.insert(Self::pair_key(a, b));
+
         let mut ac_scratch: Vec<Cfg::C> = Vec::new();
         let mut i = 0;
         while i < buf.steps.len() {
             if let Justification::Congruence { node_a, node_b } = buf.steps[i].2 {
+                if !expanded.insert(Self::pair_key(node_a, node_b)) {
+                    i += 1;
+                    continue;
+                }
                 buf.children_a.clear();
                 buf.children_b.clear();
                 self.collect_original_children(node_a, &mut buf.children_a, &mut ac_scratch);
@@ -1561,12 +1706,15 @@ where
                     for j in 0..n {
                         let ca = buf.children_a[j];
                         let cb = buf.children_b[j];
-                        if ca != cb && self.classes.find_const(ca) == self.classes.find_const(cb) {
+                        if ca != cb
+                            && self.classes.find_const(ca) == self.classes.find_const(cb)
+                            && explained.insert(Self::pair_key(ca, cb))
+                        {
                             self.classes.explain(ca, cb, buf);
                         }
                     }
                 } else {
-                    self.explain_grouped(buf);
+                    self.explain_grouped(buf, &mut explained);
                 }
             }
             i += 1;
@@ -1574,7 +1722,18 @@ where
         true
     }
 
-    fn explain_grouped(&self, buf: &mut ProofBuf<Cfg::G>) {
+    /// Order-normalized key for the explain-once set: `(a, b)` and `(b, a)`
+    /// name the same explanation.
+    fn pair_key(a: Cfg::G, b: Cfg::G) -> (usize, usize) {
+        let (x, y) = (a.to_usize(), b.to_usize());
+        if x <= y { (x, y) } else { (y, x) }
+    }
+
+    fn explain_grouped(
+        &self,
+        buf: &mut ProofBuf<Cfg::G>,
+        explained: &mut std::collections::HashSet<(usize, usize)>,
+    ) {
         buf.group_a.clear();
         buf.group_a.extend_from_slice(&buf.children_a);
         buf.group_a
@@ -1611,7 +1770,9 @@ where
         while k < buf.children_a.len() {
             let ca = buf.children_a[k];
             let cb = buf.children_a[k + 1];
-            self.classes.explain(ca, cb, buf);
+            if explained.insert(Self::pair_key(ca, cb)) {
+                self.classes.explain(ca, cb, buf);
+            }
             k += 2;
         }
     }
@@ -1910,15 +2071,14 @@ where
             // mode did). Sweep the full spliced use list; parents that are already
             // canonical early-return inside recanonize. Rare path (a class becomes a unit
             // class at most once per op), so the scratch collection is acceptable.
+            // Iterate the unit-node map's own entries: its population is the
+            // number of declared `:identity` elements (zero for EUF), where
+            // the op-registry chain scanned every mset and set op per merge.
             let merged_is_unit = {
-                let units = &self.unit_node;
                 let classes = &self.classes;
-                self.ops.mset_ops().chain(self.ops.set_ops()).any(|op| {
-                    units
-                        .get_by_key(&op)
-                        .copied()
-                        .is_some_and(|u| classes.find_const(u) == current_surv)
-                })
+                self.unit_node
+                    .iter()
+                    .any(|(_, u)| classes.find_const(*u) == current_surv)
             };
             if merged_is_unit {
                 let parents: Vec<Cfg::G> = self.classes.uses().iter(surv_list).collect();
@@ -2175,9 +2335,12 @@ where
     /// node and needs no cap. MSet only, mirroring the build path (`add`'s Set arm does not
     /// cancel). Free for a graph with no `:inverse` op.
     fn inverse_cancel_repair(&mut self) -> bool {
-        // O(#ops) precheck, so a program with no group operator pays nothing.
-        let any_inverse = self.ops.mset_ops().any(|op| self.inverse_op(op).is_some());
-        if !any_inverse {
+        // O(1) precheck: the inverse-op map is populated only by `:inverse`
+        // declarations, so a program with no group operator pays two loads.
+        // (This was an O(#ops) registry scan per repair round; measured at
+        // the top of the QF_UF forward-path profile, where rounds run per
+        // rebuild per assertion and no instance declares an inverse.)
+        if self.inverse_op.is_empty() {
             return false;
         }
         // Collect first, apply second: `add`/`merge` below mutate the node store that
@@ -2963,42 +3126,127 @@ where
         changed
     }
 
+    /// Always sequential: a mark is a per-member frame push, and the fan-out
+    /// loses at every measured size (0.03x at 12k nodes, 0.30x at 200k, 0.68x
+    /// at 1.6M; `par_fanout_bench`). The parallel twin stays reachable through
+    /// [`Self::mark_with`] for re-measurement.
     pub fn mark(&mut self, shrink: ShrinkPolicy) -> EGraphToken {
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            let tok = self.mark_with(shrink, false);
+            prof_record(&MARK_NS, &MARK_CALLS, t);
+            return tok;
+        }
+        self.mark_with(shrink, false)
+    }
+
+    pub fn restore(&mut self, token: EGraphToken) {
+        let par = self.fanout_enabled();
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            self.restore_with(token, par);
+            prof_record(&RESTORE_NS, &RESTORE_CALLS, t);
+            return;
+        }
+        self.restore_with(token, par);
+    }
+
+    /// `restore(t)` then `pop_scope()`, fused: the SMT-LIB `pop` to the level
+    /// below `t`, at the legacy restore's cost (one pop core per column).
+    pub fn restore_and_pop(&mut self, token: EGraphToken) {
+        let par = self.fanout_enabled();
+        if *PROF_ON {
+            let t = std::time::Instant::now();
+            self.restore_and_pop_with(token, par);
+            prof_record(&RESTORE_NS, &RESTORE_CALLS, t);
+            return;
+        }
+        self.restore_and_pop_with(token, par);
+    }
+
+    /// Heap bytes of the ONE shared genealogy (H4b.3 measurement): the
+    /// counterfactual per-member duplication is this times the number of
+    /// semi-persistent columns the members hold (each carried its own
+    /// `GenStamps` before H2).
+    pub fn fork_history_bytes(&self) -> usize {
+        self.history.heap_bytes()
+    }
+
+    /// Whether restore fans the member composites out over a `rayon` scope.
+    /// `SEMPER_PAR=on` forces the fan-out, `SEMPER_PAR=off` forces sequential;
+    /// otherwise the fan-out runs only at or above [`PAR_NODE_MIN`] live nodes,
+    /// because on a small graph the dispatch costs more than the members' work
+    /// (0.73x at 12k nodes vs 1.62x at 200k; `par_fanout_bench`).
+    fn fanout_enabled(&self) -> bool {
+        match std::env::var_os("SEMPER_PAR") {
+            Some(v) if v == "on" => true,
+            Some(v) if v == "off" => false,
+            _ => self.node_count() >= PAR_NODE_MIN,
+        }
+    }
+
+    /// Mark every member composite, sequentially or fanned out over a
+    /// `rayon::scope` on disjoint `&mut` field borrows. Each member owns its
+    /// stores, logs, and frames, so the fan-out closures touch no shared
+    /// state; the rebuild and the tiny map marks run strictly outside it.
+    pub fn mark_with(&mut self, shrink: ShrinkPolicy, par: bool) -> EGraphToken {
         self.rebuild();
+        assert!(
+            self.history.depth() < u32::MAX,
+            "mark: frame depth is bounded by the saturation driver"
+        );
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let group = self
+            .history
+            .mark_member(&mut members, shrink)
+            .expect("mark: every member has headroom and the members are in step");
         EGraphToken {
-            classes: self.classes.mark(shrink),
-            nodes: self.nodes.mark(shrink),
-            sorts: self.sorts.mark(shrink),
-            ops: self.ops.mark(shrink),
-            rules: self.rules.mark(shrink),
-            axioms: self.axioms.mark(shrink),
-            lits: self.lits.mark(shrink),
-            unit_node: self
-                .unit_node
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            inverse_op: self
-                .inverse_op
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
+            group,
             completion_outcome: self.completion_outcome,
         }
     }
 
-    pub fn restore(&mut self, token: EGraphToken) {
-        self.classes.restore(token.classes);
-        self.nodes.restore(token.nodes);
-        self.sorts.restore(token.sorts);
-        self.ops.restore(token.ops);
-        self.rules.restore(token.rules);
-        self.axioms.restore(token.axioms);
-        self.lits.restore(token.lits);
-        self.unit_node
-            .try_restore(token.unit_node)
-            .expect("restore: token minted by this container's own mark");
-        self.inverse_op
-            .try_restore(token.inverse_op)
-            .expect("restore: token minted by this container's own mark");
+    /// Restore every member composite, sequentially or fanned out over a
+    /// `rayon::scope` on disjoint `&mut` field borrows (same soundness
+    /// argument as [`Self::mark_with`]). The shared bookkeeping (outcome,
+    /// worklists, repair watermark) runs strictly after the fan-out joins.
+    pub fn restore_with(&mut self, token: EGraphToken, par: bool) {
+        // The ONE validity check for the whole member set: the group's
+        // `History` validates the token and records the cut once; the members
+        // reset structurally to the token's depth (semantics B: the
+        // checkpoint's frame stays open).
+        let t = std::time::Instant::now();
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self.history.restore_member(&mut members, token.group);
+        assert!(
+            ok,
+            "restore: token minted by this container's own mark, and not already spent"
+        );
+        if *RESTORE_PROF_ON {
+            restore_prof_record(0, t);
+        }
         // Roll the outcome back with the graph: the mark-time value describes exactly the
         // restored state (mark() rebuilds first), so a post-restore reader never sees an
         // outcome computed for the discarded scope.
@@ -3009,6 +3257,68 @@ where
         // The repair watermark is a pair of counters over the *pre-restore* graph, and
         // restore moves both (touched cleared, classes regrown). Drop it so the next
         // `rebuild` rescans rather than trusting a comparison against a discarded state.
+        self.repair_state = None;
+    }
+
+    /// `restore_with` then `pop_scope`, fused (design doc 08 §1): every member
+    /// runs its own fused pop-restore (one pop core per column), the checkpoint's
+    /// member tokens leave the stacks, and `history` cuts at the token's depth.
+    pub fn restore_and_pop_with(&mut self, token: EGraphToken, par: bool) {
+        // `restore_with` then `pop_scope`, fused: the SMT-LIB pop to the level
+        // below `t`, on one pop core per column.
+        let t = std::time::Instant::now();
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self
+            .history
+            .restore_and_pop_member(&mut members, token.group);
+        assert!(
+            ok,
+            "restore_and_pop: token minted by this container's own mark, and not already spent"
+        );
+        if *RESTORE_PROF_ON {
+            restore_prof_record(0, t);
+        }
+        self.completion_outcome = token.completion_outcome;
+        self.worklist.clear();
+        self.collisions.clear();
+        self.touched.clear();
+        self.repair_state = None;
+    }
+
+    /// Drop the open top scope (the SMT-LIB `pop`): every member undoes and
+    /// drops its top frame and the scope's token dies. Panics on an empty
+    /// scope stack (the interpreter refuses a pop without push before this).
+    pub fn pop_scope(&mut self) {
+        assert!(self.history.depth() >= 1, "pop_scope: no open scope");
+        let par = self.fanout_enabled();
+        let mut members = crate::group_members::EGraphMembers::<Cfg, L, TRACK, PROOFS> {
+            sorts: &mut self.sorts,
+            ops: &mut self.ops,
+            rules: &mut self.rules,
+            axioms: &mut self.axioms,
+            lits: &mut self.lits,
+            classes: &mut self.classes,
+            nodes: &mut self.nodes,
+            unit_node: &mut self.unit_node,
+            inverse_op: &mut self.inverse_op,
+            par,
+        };
+        let ok = self.history.pop_member(&mut members);
+        assert!(ok, "pop_scope: the members are in step with the history");
+        self.worklist.clear();
+        self.collisions.clear();
+        self.touched.clear();
         self.repair_state = None;
     }
 
@@ -3061,6 +3371,18 @@ where
 
     pub fn class_repr(&self, id: Cfg::G) -> Cfg::G {
         self.classes.find_const(id)
+    }
+
+    /// Whether the class whose root is `root` participates in e-matching. Takes
+    /// an already-resolved class root (from [`class_repr`](Self::class_repr)) so
+    /// the matcher's index build avoids a second `find_const` per node. Defaults
+    /// to `true` (matchable) when `root` names no live class. See
+    /// [`set_class_matchable`](Self::set_class_matchable).
+    pub(crate) fn is_repr_matchable(&self, root: Cfg::G) -> bool {
+        match self.classes.repr_id(root) {
+            Some(key) => self.classes.matchable(key),
+            None => true,
+        }
     }
 
     /// The minimum-monomial node stored for `id`'s class in `id`'s op column (the completion
@@ -3177,6 +3499,30 @@ where
     /// indices skip `FLAG_SUBSUMED`). Distinct from AC-collapse — see `FLAG_AC_COLLAPSED`.
     pub fn subsume(&mut self, id: Cfg::G) {
         self.set_node_flag(id, crate::node_types::FLAG_SUBSUMED);
+    }
+
+    /// Whether `id`'s e-class participates in e-matching (the generic e-matching
+    /// shield; `true` by default). `None` if `id` has no class. Class-level
+    /// analogue of the node-level [`is_subsumed`](Self::is_subsumed): where
+    /// `subsume` shields one node, this reports whether a whole class is shielded.
+    pub fn is_class_matchable(&self, id: Cfg::G) -> Option<bool> {
+        let repr = self.classes.repr_id(self.classes.find_const(id))?;
+        Some(self.classes.matchable(repr))
+    }
+
+    /// Shield (`false`) or un-shield (`true`) `id`'s whole e-class from
+    /// e-matching. Resolves `id` to its class root and writes the bit through the
+    /// semi-persistent class store, so it is captured and rolls back on
+    /// `restore`. Both directions are supported (unlike `subsume`, which is
+    /// monotone), because a relevancy client un-shields as terms become relevant.
+    /// Shielded classes still participate fully in congruence and merges; only
+    /// matching is affected — the matcher's index build skips a shielded class's
+    /// nodes (`IndexStore::build`). Soundness-free: shielding only removes
+    /// matches. No-op if `id` has no class.
+    pub fn set_class_matchable(&mut self, id: Cfg::G, matchable: bool) {
+        if let Some(repr) = self.classes.repr_id(self.classes.find_const(id)) {
+            self.classes.set_class_matchable(repr, matchable);
+        }
     }
 
     /// AC-completion collapse: retire `id` from the active AC rule set (its child
@@ -4317,6 +4663,9 @@ mod tests {
                 | Justification::InverseCancel { .. } => {
                     panic!("algebraic justification in a non-completion test")
                 }
+                Justification::Assumption { .. } => {
+                    panic!("assumption justification in a non-euf test")
+                }
             }
         }
     }
@@ -4626,6 +4975,7 @@ mod dual_config_tests {
     -> (EGraph<Cfg, NiraLitVal, T, P>, Th<Cfg>)
     where
         MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+        Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
     {
         let mut eg = EGraph::new();
         let int = eg.intern_sort("Int");
@@ -4650,7 +5000,7 @@ mod dual_config_tests {
         ($(fn $name:ident<$Cfg:ident>() $body:block)*) => {$(
             mod $name {
                 use super::*;
-                fn run<$Cfg: EGraphConfig>() where MSetCanon: VarCanon<$Cfg::G, $Cfg::C> $body
+                fn run<$Cfg: EGraphConfig>() where MSetCanon: VarCanon<$Cfg::G, $Cfg::C>, $Cfg::Policy: crate::config::StorePolicy<$Cfg, false>, $Cfg::Policy: crate::config::StorePolicy<$Cfg, true> $body
                 #[test] fn bits31() { run::<crate::nodes::DefaultConfig>(); }
                 #[test] fn bits63() { run::<crate::nodes::Config64>(); }
             }

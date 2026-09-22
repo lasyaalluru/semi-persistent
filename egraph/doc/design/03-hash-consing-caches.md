@@ -88,7 +88,7 @@ During rebuild:
    `(this_global_id, existing_global_id)` to collision list.
 6. Otherwise, insert new entry into index.
 
-### `restore(token)`
+### `reset_frame(depth)` (formerly `restore(token)`)
 
 The `HashMap` index is derived, not semi-persistent, so restoring the
 node arena leaves it stale in two ways: it still holds entries for the
@@ -99,8 +99,13 @@ work is small, and rebuilds it in O(n) expected hash-table operations
 otherwise. Here `dirty` is the recorded pre-mark recanonization segment,
 not the e-graph's semi-naive touched log.
 
-Each `mark` pushes a `CacheFrame { saved_len, dirty_start,
-dirty_overflow }`. `saved_len` splits the arena: ids below it keep
+Each `push_frame` records a `CacheFrame { saved_len, dirty_start,
+dirty_overflow }`. Since 2026-09-18 the caches carry no tokens: the e-graph's
+single `History` owns them, and a cache sees only the structural protocol —
+`push_frame`, `reset_frame(depth)`, `restore_frame(depth)`, `pop_frame`,
+`frame_depth` — driven through the forwarding view `EGraphMembers`. The frame
+record below is unchanged; what used to arrive in a token now arrives as the
+target depth. `saved_len` splits the arena: ids below it keep
 their entries, ids at or above it are the suffix to delete.
 `dirty_start` cuts a shared `dirty` list into per-frame segments;
 `recanonize_node` appends the local id of every pre-mark node whose
@@ -114,10 +119,11 @@ incomplete and incremental repair would leave rewritten keys in the index.
 
 `restore` proceeds in this order:
 
-1. Assert every `Vec` token in the cache token is restorable
-   (`is_valid_token`), before any mutation. The deletions in step 3
-   are not undoable, so an invalid token must refuse while index and
-   arena still agree.
+1. The group has already validated the token and the members' lockstep before
+   any member is touched, and `reset_frame` is called only with a depth below the
+   live one. That ordering is what the old per-cache token assertion bought:
+   the deletions in step 3 are not undoable, so nothing may move until the whole
+   move is known to be legal.
 2. Decide the path: incremental iff `dirty_overflow` is unset and
    `REBUILD_RATIO * (suffix + dirty) <= saved_len`.
 3. Incremental: delete the index entries for the suffix
@@ -126,8 +132,9 @@ incomplete and incremental repair would leave rewritten keys in the index.
    dirty nodes under their restored keys.
    Rebuild: restore the arena, then reconstruct the whole index by
    scanning the surviving nodes.
-4. Truncate `dirty` to `dirty_start` and `frames` to the token's
-   frame, then `debug_assert!(index_matches_rebuild())`.
+4. Truncate `dirty` to `dirty_start` and `frames` to the target depth — plus one
+   under semantics B, since the checkpoint's frame stays open, and exactly to it
+   for the fused `restore_frame` — then `debug_assert!(index_matches_rebuild())`.
 
 `REBUILD_RATIO` is 4. The source comment records the heuristic model:
 deletion and insertion are treated as roughly comparable and dirty entries

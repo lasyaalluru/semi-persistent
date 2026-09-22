@@ -14,6 +14,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     /// Emit GraphViz DOT representation.
     pub fn to_dot(&self) -> String {

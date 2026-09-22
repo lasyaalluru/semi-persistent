@@ -11,6 +11,7 @@
 //! against a stack of oracle snapshots.
 
 use semi_persistent_containers_verus::append_only_vec::AppendOnlyVec;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::vec::{ShrinkPolicy, Vec as SpVec};
 
@@ -104,12 +105,11 @@ fn vec_ops_match_oracle() {
 /// silently worked through the snapshot model.)
 #[test]
 fn vec_mark_untracked_refuses_as_err() {
-    let mut v = SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new();
+    let mut v = ForkHistory::new(SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new());
     v.try_push(1).expect("push: within index word");
-    assert_eq!(
-        v.try_mark(ShrinkPolicy::Never).unwrap_err(),
-        semi_persistent_containers_verus::error::ContainerError::Untracked,
-        "was: panic(mark() called on untracked vec)"
+    assert!(
+        v.mark(ShrinkPolicy::Never).is_none(),
+        "was: panic(mark() called on untracked vec); the group refuses to mark an untracked member"
     );
 }
 
@@ -121,7 +121,7 @@ fn vec_mark_restore_tracked() {
 fn rollback_stress<const TRACK: bool>(seed: u64) {
     // Generic over TRACK so we exercise both the diff-log and the
     // snapshot-copy reconstruction paths through the same script.
-    let mut v = SpVec::<u32, u32, ParallelStore<u32, u32>, TRACK>::new();
+    let mut v = ForkHistory::new(SpVec::<u32, u32, ParallelStore<u32, u32>, TRACK>::new());
     let mut oracle: Vec<u32> = Vec::new();
     let mut rng = Lcg::new(seed);
 
@@ -137,7 +137,7 @@ fn rollback_stress<const TRACK: bool>(seed: u64) {
         }
         // Mark: snapshot the oracle alongside the token.
         let token = v
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
         frames.push((token, oracle.clone()));
 
@@ -167,7 +167,7 @@ fn rollback_stress<const TRACK: bool>(seed: u64) {
         // Occasionally unwind some frames and verify each rollback.
         if rng.below(2) == 0 {
             while let Some((tok, snap)) = frames.pop() {
-                v.try_restore(tok).expect("restore: own token");
+                assert!(v.restore(tok), "restore: own token");
                 oracle = snap.clone();
                 let got: Vec<u32> = (0..v.len() as usize).map(|i| v.get(i as u32)).collect();
                 assert_eq!(
@@ -183,7 +183,7 @@ fn rollback_stress<const TRACK: bool>(seed: u64) {
 
     // Final full unwind.
     while let Some((tok, snap)) = frames.pop() {
-        v.try_restore(tok).expect("restore: own token");
+        assert!(v.restore(tok), "restore: own token");
         let got: Vec<u32> = (0..v.len() as usize).map(|i| v.get(i as u32)).collect();
         assert_eq!(got, snap, "TRACK={TRACK}: final unwind mismatch");
     }
@@ -198,7 +198,7 @@ fn rollback_stress<const TRACK: bool>(seed: u64) {
 #[test]
 fn append_only_vec_ops_and_rollback() {
     for seed in 0..12u64 {
-        let mut a = AppendOnlyVec::<u64, usize, true>::new(); // mark/restore requires TRACK
+        let mut a = ForkHistory::new(AppendOnlyVec::<u64, usize, true>::new()); // mark/restore requires TRACK
         let mut oracle: Vec<u64> = Vec::new();
         let mut rng = Lcg::new(seed ^ 0x5151);
         let mut frames: Vec<(_, Vec<u64>)> = Vec::new();
@@ -207,13 +207,13 @@ fn append_only_vec_ops_and_rollback() {
             match rng.below(10) {
                 0 => {
                     let token = a
-                        .try_mark(ShrinkPolicy::Never)
+                        .mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness");
                     frames.push((token, oracle.clone()));
                 }
                 1 if !frames.is_empty() => {
                     let (tok, snap) = frames.pop().unwrap();
-                    a.try_restore(tok).expect("restore: own token");
+                    assert!(a.restore(tok), "restore: own token");
                     oracle = snap;
                 }
                 _ => {

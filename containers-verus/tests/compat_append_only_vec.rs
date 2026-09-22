@@ -3,7 +3,8 @@
 //! Ported production compatibility test:
 //! `containers/tests/append_only_vec_proptest.rs`. Gated on `compat-core`.
 use proptest::prelude::*;
-use semi_persistent_containers_verus::{AppendOnlyVec, ShrinkPolicy, VecToken};
+use semi_persistent_containers_verus::history::GroupToken;
+use semi_persistent_containers_verus::{AppendOnlyVec, ShrinkPolicy};
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -23,9 +24,10 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut v = AppendOnlyVec::<u32>::new();
+    let mut v =
+        semi_persistent_containers_verus::group::ForkHistory::new(AppendOnlyVec::<u32>::new());
     let mut oracle: Vec<u32> = Vec::new();
-    let mut snapshots: Vec<(VecToken, Vec<u32>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Vec<u32>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -45,7 +47,7 @@ fn run_ops(ops: Vec<Op>) {
                     continue;
                 }
                 let token = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone()));
             }
@@ -55,7 +57,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                v.try_restore(token).expect("compat: own live token");
+                assert!(v.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }

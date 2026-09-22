@@ -105,7 +105,20 @@ fn driver_env_var_decimal() {
 fn driver_env_var_hex_equals_decimal() {
     let hex = run_child("child_report_seed", &[(SEED_ENV_VAR, "0xFF")]);
     let dec = run_child("child_report_seed", &[(SEED_ENV_VAR, "255")]);
-    assert_eq!(hex.trim(), dec.trim(), "0xFF and 255 resolved differently");
+    // Compare the reported seed, not the child's whole harness output: that
+    // ends with an elapsed-time line ("finished in 0.01s") which varies run to
+    // run, so comparing it made this test flaky rather than wrong.
+    let seed_line = |s: &str| {
+        s.lines()
+            .find(|l| l.contains("seed="))
+            .map(str::trim)
+            .map(str::to_string)
+    };
+    assert_eq!(
+        seed_line(&hex),
+        seed_line(&dec),
+        "0xFF and 255 resolved differently"
+    );
     assert!(hex.contains("seed=255"), "unexpected child report: {hex:?}");
 }
 

@@ -91,7 +91,7 @@ pub proof fn lemma_preselected_action_is_min(
     let costs = actions.map(|a: Action| action_cost(a));
     assert(costs.contains(action_cost(chosen)));
     assert forall|q: Quality| #[trigger] costs.contains(q) implies crate::objective::leq(action_cost(chosen), q) by {
-        let a = choose|a: Action| actions.contains(a) && action_cost(a) == q;
+        let a = choose|a: Action| actions.contains(a) && (#[trigger] action_cost(a)) == q;
         assert(actions.contains(a));
     }
 }

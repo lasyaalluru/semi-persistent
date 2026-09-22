@@ -34,6 +34,7 @@ pub type SccOf<Cfg> = <<Cfg as EGraphConfig>::Au as AuIds>::Scc;
 pub struct AuSnapshot<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     pub(crate) eg: &'eg EGraph<Cfg, L, T, P>,
     /// Dense representative -> `ClassOf<Cfg>` map (representative global ids only).
@@ -99,6 +100,7 @@ impl<A: AuIds> Reachability<A> {
 impl<'eg, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool> AuSnapshot<'eg, Cfg, L, T, P>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     /// Build a snapshot from the frozen e-graph. The e-graph must not be mutated
     /// while this snapshot is alive (enforced by the shared reference lifetime).

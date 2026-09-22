@@ -17,10 +17,21 @@ use crate::literal::LitVal;
 // ---------------------------------------------------------------------------
 
 macro_rules! define_litval {
-    ($name:ident, [ $( $Var:ident($Ty:ty) => $sort:literal ),* $(,)? ]) => {
+    ($name:ident, $key:ident, [ $( $Var:ident($Ty:ty) => $sort:literal ),* $(,)? ]) => {
         #[derive(Clone, PartialEq, Eq, Hash)]
         pub enum $name { Bool(bool), $( $Var($Ty), )* }
-        impl LitVal for $name {}
+        /// Canonical hash key of the literal (see `literal::CanonicalKey`).
+        #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+        pub enum $key { Bool(bool), $( $Var(<$Ty as crate::literal::CanonicalKey>::Key), )* }
+        impl LitVal for $name {
+            type Key = $key;
+            fn key(&self) -> $key {
+                match self {
+                    Self::Bool(v) => $key::Bool(*v),
+                    $( Self::$Var(v) => $key::$Var(crate::literal::CanonicalKey::canonical_key(v)), )*
+                }
+            }
+        }
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self { Self::Bool(v) => write!(f, "{v}"), $( Self::$Var(v) => write!(f, "{v:?}"), )* }
@@ -40,14 +51,14 @@ macro_rules! define_litval {
     };
 }
 
-define_litval!(MachineLit, [
+define_litval!(MachineLit, MachineLitKey, [
     I64(i64) => "i64", U64(u64) => "u64", F64(OrderedFloat<f64>) => "f64",
     Usize(usize) => "usize", Str(String) => "String",
 ]);
-define_litval!(BignumLit, [
+define_litval!(BignumLit, BignumLitKey, [
     IBig(BigInt) => "IBig", UBig(BigUint) => "UBig", RBig(BigRational) => "RBig",
 ]);
-define_litval!(AllLit, [
+define_litval!(AllLit, AllLitKey, [
     I64(i64) => "i64", U64(u64) => "u64", F64(OrderedFloat<f64>) => "f64",
     Usize(usize) => "usize", Str(String) => "String",
     IBig(BigInt) => "IBig", UBig(BigUint) => "UBig", RBig(BigRational) => "RBig",

@@ -233,6 +233,7 @@ version = "0.3.0"
 dependencies = [
  "criterion",
  "proptest",
+ "rayon",
  "semi-persistent-containers",
  "semi-persistent-containers-verus",
  "vstd",
@@ -906,6 +907,7 @@ dependencies = [
  "num-rational",
  "ordered-float",
  "proptest",
+ "rayon",
  "vstd",
 ]
 
@@ -924,10 +926,20 @@ dependencies = [
  "ordered-float",
  "proptest",
  "rapidhash",
+ "rayon",
  "semi-persistent-containers-verus",
  "smallvec",
  "vstd",
  "winnow",
+]
+
+[[package]]
+name = "semi-persistent-satcore"
+version = "0.3.0"
+dependencies = [
+ "semi-persistent-containers-verus",
+ "semi-persistent-egraph",
+ "vstd",
 ]
 
 [[package]]

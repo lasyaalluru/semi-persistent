@@ -6,6 +6,7 @@
 //! Permanently `#[ignore]`d for per-PR CI; run in
 //! the nightly/stress CI job via `cargo test --features compat-all -- --ignored
 //! --test-threads 1`.
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::{IndexLike, ShrinkPolicy, Tagged, VecI};
 
 semi_persistent_containers_verus::define_id31! {
@@ -22,7 +23,7 @@ fn run_stress<T: Tagged + Clone + Default, I: IndexLike + Tagged>(
     make_val: fn(u32) -> T,
     get_raw: fn(T) -> u32,
 ) {
-    let mut v: VecI<T, I, true> = VecI::new();
+    let mut v: ForkHistory<VecI<T, I, true>> = ForkHistory::new(VecI::new());
     let zero = make_val(0);
     for _ in 0..n {
         v.try_push(zero).expect("compat: within capacity");
@@ -38,7 +39,7 @@ fn run_stress<T: Tagged + Clone + Default, I: IndexLike + Tagged>(
     let mut tokens = Vec::new();
     for frame in 1..=frames {
         tokens.push(
-            v.try_mark(ShrinkPolicy::Never)
+            v.mark(ShrinkPolicy::Never)
                 .expect("compat: depth in bounds"),
         );
         let mut rng = 0xDEAD_BEEF_0000_0000u64 | frame as u64;
@@ -50,7 +51,7 @@ fn run_stress<T: Tagged + Clone + Default, I: IndexLike + Tagged>(
 
     for frame in (1..=frames).rev() {
         let tok = tokens.pop().unwrap();
-        v.try_restore(tok).expect("compat: own live token");
+        assert!(v.restore(tok), "compat: own live token");
         let mut rng = 0xDEAD_BEEF_0000_0000u64 | frame as u64;
         for _ in 0..sprinkle {
             let idx = I::try_from_usize((xorshift(&mut rng) % n as u64) as usize).unwrap();

@@ -124,6 +124,7 @@ fn bench_bplus_from_sorted_scan(c: &mut Criterion) {
         b.iter(|| {
             let t = ProdTree::from_sorted(&pkeys);
             let mut cur = t.cursor();
+            cur.seek_first();
             let mut acc = 0u64;
             while let Some(k) = cur.key() {
                 acc = acc.wrapping_add(k.raw() as u64);
@@ -136,6 +137,55 @@ fn bench_bplus_from_sorted_scan(c: &mut Criterion) {
         b.iter(|| {
             let t = VerusTree::try_from_sorted(&vkeys).expect("bench: sorted input");
             let mut cur = t.cursor();
+            cur.seek_first();
+            let mut acc = 0u64;
+            while let Some(k) = cur.key() {
+                acc = acc.wrapping_add(k.raw() as u64);
+                cur.step();
+            }
+            black_box(acc)
+        })
+    });
+    g.finish();
+}
+
+// Split the combined case above: bulk load alone, and a cursor scan over a
+// tree built once outside the timed loop.
+fn bench_bplus_from_sorted_only(c: &mut Criterion) {
+    let pkeys: Vec<PId> = (0..N).map(PId::new).collect();
+    let vkeys: Vec<VId> = (0..N).map(VId::new).collect();
+    let mut g = c.benchmark_group("bplus/from_sorted_only");
+    g.bench_function("prod", |b| {
+        b.iter(|| black_box(ProdTree::from_sorted(&pkeys)))
+    });
+    g.bench_function("verus", |b| {
+        b.iter(|| black_box(VerusTree::try_from_sorted(&vkeys).expect("bench: sorted input")))
+    });
+    g.finish();
+}
+
+fn bench_bplus_scan_only(c: &mut Criterion) {
+    let pkeys: Vec<PId> = (0..N).map(PId::new).collect();
+    let vkeys: Vec<VId> = (0..N).map(VId::new).collect();
+    let pt = ProdTree::from_sorted(&pkeys);
+    let vt = VerusTree::try_from_sorted(&vkeys).expect("bench: sorted input");
+    let mut g = c.benchmark_group("bplus/scan_only");
+    g.bench_function("prod", |b| {
+        b.iter(|| {
+            let mut cur = pt.cursor();
+            cur.seek_first();
+            let mut acc = 0u64;
+            while let Some(k) = cur.key() {
+                acc = acc.wrapping_add(k.raw() as u64);
+                cur.step();
+            }
+            black_box(acc)
+        })
+    });
+    g.bench_function("verus", |b| {
+        b.iter(|| {
+            let mut cur = vt.cursor();
+            cur.seek_first();
             let mut acc = 0u64;
             while let Some(k) = cur.key() {
                 acc = acc.wrapping_add(k.raw() as u64);
@@ -268,6 +318,8 @@ criterion_group!(
     bench_bplus_insert,
     bench_bplus_seek,
     bench_bplus_from_sorted_scan,
+    bench_bplus_from_sorted_only,
+    bench_bplus_scan_only,
     bench_bplus_insert_branchless,
     bench_bplus_seek_branchless,
     bench_bitset

@@ -70,6 +70,7 @@ pub fn certification_budget<Cfg: EGraphConfig, L: LitVal, const T: bool, const P
 ) -> Result<Census, super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     snap.validate_finite_from(l_root)?;
     snap.validate_finite_from(r_root)?;
@@ -186,6 +187,7 @@ fn child_or<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> <Cfg::Au as AuIds>::Or
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let (child_ctx_l, child_ctx_r) = space.derive_child_contexts(
         parent_or,

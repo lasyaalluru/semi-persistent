@@ -73,8 +73,9 @@
 //! The seed perturbs which BUCKET a key lands in — nothing else. `SpMap`'s
 //! observable behaviour is already seed-independent by construction: the
 //! append-only log is the source of truth, `iter()` walks that log in insertion
-//! order, `rebuild_index` replays the log in insertion order, and the index is
-//! never iterated (lookup-only: `get`/`contains_key`/`insert`/`clear`). So
+//! order, `rebuild_index` replays the log in insertion order, `unwind_index`
+//! walks the discarded suffix in reverse position order, and the index is
+//! never iterated (lookup-only: `get`/`contains_key`/`insert`/`remove`/`clear`). So
 //! fixing the seed changes no output; it makes the internal memory layout and
 //! probe sequences reproducible too, which is what makes a hash-order bug or a
 //! performance regression bisectable rather than a coin flip.
@@ -343,5 +344,37 @@ pub broadcast axiom fn axiom_index_hasher_builds_valid_hashers()
     ensures
         #[trigger] builds_valid_hashers::<IndexHasher>(),
 ;
+
+/// A `BuildHasher` an `SpMap` index may use. `Default`, because `SpMap::new`
+/// builds its index through `HashMap::default`, the one constructor vstd
+/// specifies; and provably valid in vstd's hash-table model, which is the one
+/// fact every index operation's contract needs. One impl per hasher, each
+/// resting on an axiom that already ships — nothing new is trusted by choosing
+/// a hasher:
+///
+/// * [`IndexHasher`] (the default): foldhash `fast` with a controllable seed,
+///   on this crate's [`axiom_index_hasher_builds_valid_hashers`].
+/// * [`std::hash::RandomState`]: std's SipHash-1-3 with per-process random
+///   keys, on vstd's `axiom_random_state_builds_valid_hashers`. Slower, and
+///   what a caller picks when its keys come from an untrusted source and the
+///   map must not be flooded into one bucket (the registries' names, say).
+pub trait ValidHasher: BuildHasher + Default {
+    proof fn lemma_builds_valid_hashers()
+        ensures
+            builds_valid_hashers::<Self>(),
+    ;
+}
+
+impl ValidHasher for IndexHasher {
+    proof fn lemma_builds_valid_hashers() {
+        broadcast use axiom_index_hasher_builds_valid_hashers;
+    }
+}
+
+impl ValidHasher for std::hash::RandomState {
+    proof fn lemma_builds_valid_hashers() {
+        broadcast use vstd::std_specs::hash::axiom_random_state_builds_valid_hashers;
+    }
+}
 
 } // verus!

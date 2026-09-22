@@ -6,8 +6,9 @@
 //! re-exports, `get`/`set` via `impl Into<I>`, `define_id31!`, and `IdFactory`.
 //! Assertions are unchanged from production.
 use proptest::prelude::*;
+use semi_persistent_containers_verus::ShrinkPolicy;
+use semi_persistent_containers_verus::history::GroupToken;
 use semi_persistent_containers_verus::{DenseId, IdFactory};
-use semi_persistent_containers_verus::{ShrinkPolicy, VecToken};
 
 semi_persistent_containers_verus::define_id31! {
     pub struct TestId / StoredTestId, "t";
@@ -34,9 +35,10 @@ fn op_strategy() -> impl Strategy<Value = Op> {
     ]
 }
 
-fn run_ops(ops: Vec<Op>, mut v: semi_persistent_containers_verus::VecI<u32, u32, true>) {
+fn run_ops(ops: Vec<Op>, v: semi_persistent_containers_verus::VecI<u32, u32, true>) {
+    let mut v = semi_persistent_containers_verus::group::ForkHistory::new(v);
     let mut oracle: Vec<u32> = Vec::new();
-    let mut snapshots: Vec<(VecToken, Vec<u32>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Vec<u32>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -69,7 +71,7 @@ fn run_ops(ops: Vec<Op>, mut v: semi_persistent_containers_verus::VecI<u32, u32,
                     continue;
                 }
                 let token = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone()));
             }
@@ -79,7 +81,7 @@ fn run_ops(ops: Vec<Op>, mut v: semi_persistent_containers_verus::VecI<u32, u32,
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                v.try_restore(token).expect("compat: own live token");
+                assert!(v.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }
@@ -110,8 +112,8 @@ proptest! {
     fn vec_parallel_proptest(ops in proptest::collection::vec(op_strategy(), 1..500)) {
         let v = semi_persistent_containers_verus::VecP::<u32, u32, true>::new();
         let mut oracle: Vec<u32> = Vec::new();
-        let mut snapshots: Vec<(VecToken, Vec<u32>)> = Vec::new();
-        let mut v = v;
+        let mut snapshots: Vec<(GroupToken, Vec<u32>)> = Vec::new();
+        let mut v = semi_persistent_containers_verus::group::ForkHistory::new(v);
 
         for op in ops {
             match op {
@@ -135,14 +137,14 @@ proptest! {
                 }
                 Op::Mark => {
                     if snapshots.len() >= 20 { continue; }
-                    let token = v.try_mark(ShrinkPolicy::Never).expect("compat: depth in bounds");
+                    let token = v.mark(ShrinkPolicy::Never).expect("compat: depth in bounds");
                     snapshots.push((token, oracle.clone()));
                 }
                 Op::Restore(idx) => {
                     if snapshots.is_empty() { continue; }
                     let idx = idx % snapshots.len();
                     let (token, snap) = snapshots[idx].clone();
-                    v.try_restore(token).expect("compat: own live token");
+                    assert!(v.restore(token), "compat: own live token");
                     oracle = snap;
                     snapshots.truncate(idx);
                 }
@@ -163,9 +165,9 @@ proptest! {
     #[test]
     fn vec_dense_id_proptest(ops in proptest::collection::vec(op_strategy(), 1..500)) {
         // VecI storing TestId values, indexed by u32 (TestId::Index)
-        let mut v = semi_persistent_containers_verus::VecI::<TestId, u32, true>::new();
+        let mut v = semi_persistent_containers_verus::group::ForkHistory::new(semi_persistent_containers_verus::VecI::<TestId, u32, true>::new());
         let mut oracle: Vec<TestId> = Vec::new();
-        let mut snapshots: Vec<(VecToken, Vec<TestId>)> = Vec::new();
+        let mut snapshots: Vec<(GroupToken, Vec<TestId>)> = Vec::new();
         let mut factory = IdFactory::<TestId>::new();
 
         for op in ops {
@@ -193,14 +195,14 @@ proptest! {
                 }
                 Op::Mark => {
                     if snapshots.len() >= 20 { continue; }
-                    let token = v.try_mark(ShrinkPolicy::Never).expect("compat: depth in bounds");
+                    let token = v.mark(ShrinkPolicy::Never).expect("compat: depth in bounds");
                     snapshots.push((token, oracle.clone()));
                 }
                 Op::Restore(idx) => {
                     if snapshots.is_empty() { continue; }
                     let idx = idx % snapshots.len();
                     let (token, snap) = snapshots[idx].clone();
-                    v.try_restore(token).expect("compat: own live token");
+                    assert!(v.restore(token), "compat: own live token");
                     oracle = snap;
                     snapshots.truncate(idx);
                 }

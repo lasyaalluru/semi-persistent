@@ -139,6 +139,18 @@ First-leaf preservation is the boundary fact required to recompose the linked
 leaf chain. A split inserts its new leaf to the right, so it does not move the
 subtree's leftmost leaf.
 
+**Rightmost-leaf tracking (2026-09-16).** `insert` used to recompute the
+cached `last_leaf` by descending from the root to the rightmost leaf after
+every insert (`rightmost_leaf_of`); production updates it only when the
+rightmost leaf splits. The recursion now returns, as a fifth component, the
+fresh right leaf iff the subtree's rightmost leaf split (`last_after`,
+`last_lift`): a leaf split reports its right sibling; an internal node
+forwards its child's report only when the child was its last one, else
+`None`; the root applies the report to `last_leaf`. Three lemmas
+(`lemma_last_after_absorb`, `_child_split`, `_parent_split`) carry the
+`last_leaf_id` argument per arm so `insert_rec` stays under the default
+solver budget. The descent is gone from the insert path.
+
 ## 6. Bulk Construction
 
 `from_sorted(keys)` builds a fresh tree bottom-up. Its input must be strictly
@@ -158,6 +170,15 @@ undersized `chunks(cap)` group would not satisfy `tree_wf`.
 The proof establishes the same model and well-formedness relation as repeated
 insertion. Performance comparisons for construction live in Criterion
 benchmarks; they are not part of the proof contract.
+
+**Leaf fill (2026-09-16).** The bulk loader writes each leaf with the total
+`NodeLayout::leaf_fill_keys`: the key-to-word conversion is fused into the
+copy, the window and leaf shape are refused once per leaf (an unverified
+caller cannot reach a malformed write), and the contract is conditional on the
+same facts, which `bulk_fill_leaf` establishes. The strict-order validation in
+`from_sorted`/`try_from_sorted` is a branch-free reduction with one refusal
+after the loop, and `try_from_sorted` no longer re-validates through
+`from_sorted`. Measured against legacy (16 384 keys): 11.3 µs vs 13.5 µs.
 
 ## 7. Cursor
 
@@ -179,6 +200,15 @@ The cursor proves:
 The lower-bound specification is shared with the sorted-vector cursor through
 `seek_target_idx`, so both implementations refine the same `SortedCursor`
 contract.
+
+**Cached leaf (2026-09-16).** The cursor keeps a copy of the leaf it stands
+on (`leaf`), refreshed only when `node` changes (`seek`, `seek_first`, and the
+link-follow in `step`). `key` and `step` read that copy, so the per-key
+arena fetch (a whole-node copy, which production still performs) is gone.
+The invariant `cursor_ok` is `cursor_wf` (positioning against the in-order
+model) plus `leaf_cached` (`leaf == arena[node]` while positioned); the
+public contracts are stated over `cursor_ok`. Measured against legacy: a
+scan of 16 384 keys takes 15.5 µs vs 57.5 µs.
 
 ## 8. Semi-Persistence
 

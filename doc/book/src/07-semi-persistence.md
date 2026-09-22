@@ -51,9 +51,10 @@ Restore replays those sparse differences and restores the saved lengths.
 
 Hash-consing tables and other derived indexes are not themselves the logical
 state. On restore, a node cache removes or repairs entries affected by the
-discarded suffix and by recanonized nodes. It reconstructs the table when that
-is cheaper than incremental repair. Saturation's matching indexes have
-round-local lifetimes and are built again when needed.
+discarded suffix and by recanonized nodes. The literal interning table is a
+verified semi-persistent map that unwinds the discarded suffix of its index,
+and rebuilds the index instead when that is cheaper. Saturation's matching
+indexes have round-local lifetimes and are built again when needed.
 
 Push therefore records coordinated container tokens rather than cloning all
 nodes and classes. Its exact work includes frame and capture bookkeeping, and

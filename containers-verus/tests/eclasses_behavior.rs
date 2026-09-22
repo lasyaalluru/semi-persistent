@@ -7,7 +7,7 @@
 
 use semi_persistent_containers_verus::dense_id::{DenseId31, DenseId63};
 use semi_persistent_containers_verus::eclasses::EClasses;
-use semi_persistent_containers_verus::error::ContainerError;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::index_like::IndexLike;
 use semi_persistent_containers_verus::opt::DenseId;
 use semi_persistent_containers_verus::union_find::NoJust;
@@ -154,59 +154,63 @@ fn min_pool_round_trip() {
 
 #[test]
 fn mark_restore_round_trip() {
-    let mut ec = EC::new();
+    let mut ec = ForkHistory::new(EC::new());
     let (a, _) = ec.try_add_singleton();
     let (b, _) = ec.try_add_singleton();
-    let token = ec.mark(ShrinkPolicy::Never);
+    let token = ec
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this test");
     // mutate: merge and allocate one more class.
     ec.merge(a, b).expect("merges");
     let (_c, _) = ec.try_add_singleton();
     assert_eq!(ec.len().as_usize(), 3);
     assert_eq!(ec.num_classes().as_usize(), 2);
     // restore: back to two singleton classes.
-    ec.try_restore(token).expect("fresh token restores");
+    assert!(ec.restore(token), "fresh token restores");
     assert_eq!(ec.len().as_usize(), 2);
     assert_eq!(ec.num_classes().as_usize(), 2);
     assert_ne!(ec.find(a).to_usize(), ec.find(b).to_usize());
     assert!(ec.repr_id(a).is_some() && ec.repr_id(b).is_some());
-    // the token is consumed.
-    assert_eq!(
-        ec.try_restore(token).unwrap_err(),
-        ContainerError::InvalidToken
-    );
+    // semantics B: the checkpoint is reusable; dropping its frame kills it.
+    assert!(ec.restore(token), "the checkpoint restores again");
+    assert!(ec.pop_scope());
+    assert!(!ec.restore(token), "a dead token is refused");
 }
 
 #[test]
 fn nested_marks_restore_in_order() {
-    let mut ec = EC::new();
+    let mut ec = ForkHistory::new(EC::new());
     let (a, _) = ec.try_add_singleton();
     let (b, _) = ec.try_add_singleton();
     let (c, _) = ec.try_add_singleton();
-    let t1 = ec.mark(ShrinkPolicy::Never);
+    let t1 = ec
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this test");
     ec.merge(a, b);
-    let t2 = ec.mark(ShrinkPolicy::Never);
+    let t2 = ec
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this test");
     ec.merge(a, c);
     assert_eq!(ec.num_classes().as_usize(), 1);
-    ec.try_restore(t2).expect("inner restores");
+    assert!(ec.restore(t2), "inner restores");
     assert_eq!(ec.num_classes().as_usize(), 2);
     assert_eq!(ec.find(a).to_usize(), ec.find(b).to_usize());
     assert_ne!(ec.find(a).to_usize(), ec.find(c).to_usize());
-    ec.try_restore(t1).expect("outer restores");
+    assert!(ec.restore(t1), "outer restores");
     assert_eq!(ec.num_classes().as_usize(), 3);
     assert_ne!(ec.find(a).to_usize(), ec.find(b).to_usize());
 }
 
 #[test]
 fn foreign_token_refuses_as_err() {
-    let mut ec1 = EC::new();
-    let mut ec2 = EC::new();
+    let mut ec1 = ForkHistory::new(EC::new());
+    let mut ec2 = ForkHistory::new(EC::new());
     let _ = ec1.try_add_singleton();
     let _ = ec2.try_add_singleton();
-    let t1 = ec1.mark(ShrinkPolicy::Never);
-    assert_eq!(
-        ec2.try_restore(t1).unwrap_err(),
-        ContainerError::InvalidToken
-    );
+    let t1 = ec1
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this test");
+    assert!(!ec2.restore(t1), "a dead token is refused");
 }
 
 #[test]
@@ -253,17 +257,19 @@ fn id64(n: usize) -> DenseId63 {
 
 #[test]
 fn bits63_merge_find_restore_round_trip() {
-    let mut ec = EC64::new();
+    let mut ec = ForkHistory::new(EC64::new());
     let (a, _) = ec.try_add_singleton();
     let (b, _) = ec.try_add_singleton();
     let (c, _) = ec.try_add_singleton();
     assert_eq!(a.to_usize(), 0);
-    let token = ec.mark(ShrinkPolicy::Never);
+    let token = ec
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this test");
     ec.merge(a, b).expect("distinct classes merge");
     assert_eq!(ec.find(a).to_usize(), ec.find(b).to_usize());
     assert_ne!(ec.find(a).to_usize(), ec.find(c).to_usize());
     assert_eq!(ec.num_classes().as_usize(), 2);
-    ec.try_restore(token).expect("own token restores");
+    assert!(ec.restore(token), "own token restores");
     assert_eq!(ec.num_classes().as_usize(), 3);
     assert_ne!(ec.find(a).to_usize(), ec.find(b).to_usize());
     let _ = id64(4);

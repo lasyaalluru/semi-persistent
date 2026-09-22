@@ -24,19 +24,18 @@ use crate::union_find::Justification;
 /// Per-class data from the verified kernel.
 pub use crate::containers::eclasses::ClassData;
 /// Opaque token for [`EClasses::mark`] / [`EClasses::restore`].
-pub use crate::containers::eclasses::EClassesToken;
 /// Returned by `merge`: survivor, absorbed, and the absorbed class's data.
 pub use crate::containers::eclasses::MergeInfo;
 
 /// Equivalence classes with integrated union-find and parent use-lists
 /// (the verified aggregate).
-pub type EClasses<T, K, L, N, const TRACK: bool, const PROOFS: bool> =
-    containers::eclasses::EClasses<T, K, L, N, Justification<T>, TRACK, PROOFS>;
+pub type EClasses<T, K, L, N, const TRACK: bool, const PROOFS: bool, P = containers::HotFirst> =
+    containers::eclasses::EClasses<T, K, L, N, Justification<T>, TRACK, PROOFS, P>;
 
 /// Class-ring iterator: the verified `RingIter`, yielding `T` node ids in
 /// ring order.
-pub type ClassIter<'a, T, K, const TRACK: bool> =
-    containers::circular_list::RingIter<'a, Opt<K>, T, TRACK>;
+pub type ClassIter<'a, T, K, const TRACK: bool, P = containers::HotFirst> =
+    containers::circular_list::RingIter<'a, Opt<K>, T, TRACK, P>;
 
 // The ring cell is two configured-width words: `next` uses its spare MSB for
 // capture, and the independent class key uses its spare MSB for `None`.

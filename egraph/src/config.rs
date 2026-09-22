@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! E-graph configuration trait — bundles all id types for a concrete e-graph.
 
-use crate::containers::{DenseId, IndexLike, Tagged};
+use crate::containers::{DenseId, IndexLike, PlainFamily, Tagged, TaggedFamily};
 use crate::typed_routing::NodeIds;
 use core::hash::Hash;
 
@@ -21,25 +21,30 @@ pub trait EGraphConfig: 'static {
     /// constrained to this word. Intentionally bounded semantic registries
     /// (e.g. rule ids) may remain narrower; each such exception is documented
     /// at its definition.
-    type Index: IndexLike + Tagged;
+    /// `Send` on every id family member: the e-graph's mark/restore fan the
+    /// member composites out across the rayon pool on disjoint `&mut` borrows
+    /// (`EGraph::mark_with`), which requires the members, and so the ids they
+    /// store, to cross threads. Every id is a `Copy` machine-word newtype, so
+    /// the bound costs nothing to satisfy.
+    type Index: IndexLike + Tagged + Send;
 
     /// Global e-node id (e.g. 31-bit `ENodeId`).
-    type G: DenseId<Index = Self::Index> + Hash;
+    type G: DenseId<Index = Self::Index> + Hash + Send;
     /// Recycled key into the packed e-class data store. It has the same
     /// payload width as `G`, because the worst case has one class per node.
-    type ClassKey: DenseId<Index = Self::Index>;
+    type ClassKey: DenseId<Index = Self::Index> + Send;
     /// Operator id.
-    type O: DenseId<Index = Self::Index> + Hash;
+    type O: DenseId<Index = Self::Index> + Hash + Send;
     /// Sort id.
-    type S: DenseId<Index = Self::Index>;
+    type S: DenseId<Index = Self::Index> + Send;
     /// Interned literal value id.
-    type V: DenseId<Index = Self::Index> + Hash;
+    type V: DenseId<Index = Self::Index> + Hash + Send;
     /// Use-list id.
-    type UL: DenseId<Index = Self::Index>;
+    type UL: DenseId<Index = Self::Index> + Send;
     /// Use-list node id.
-    type UN: DenseId<Index = Self::Index>;
+    type UN: DenseId<Index = Self::Index> + Send;
     /// AC child type (e.g. `(G, Multiplicity)`).
-    type C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug;
+    type C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug + Send;
     /// Multiplicity width for AC multiset nodes: `Multiplicity16`,
     /// `Multiplicity`, or `Multiplicity64`.
     ///
@@ -69,9 +74,117 @@ pub trait EGraphConfig: 'static {
     /// [`MultiplicityLike::checked_add`]: crate::multiplicity::MultiplicityLike::checked_add
     fn mset_child_merge(existing: &mut Self::C, new_g: Self::G) -> bool;
     /// Local id bundle for the node store.
-    type Ids: NodeIds<Index = Self::Index>;
+    type Ids: NodeIds<Index = Self::Index> + Send;
     /// AU search/snapshot/pool id bundle.
     type Au: AuIds<Index = Self::Index>;
+    /// Store policy for every tracked column the e-graph owns — the class
+    /// layer's columns and the node caches — one of the verified crate's
+    /// [`crate::containers::HotFirst`] (first-capture dedupe: the equality
+    /// saturation choice, where rewrite rounds touch the same slots many
+    /// times per frame) or [`crate::containers::TrailFirst`] (append-only
+    /// ingress: the SMT choice, where marks and restores dominate and each
+    /// slot is written about once per level). The bounds a policy must meet
+    /// are stated once, per use site, as [`StorePolicy`].
+    type Policy: 'static;
+}
+
+/// The family bounds the verified class layer (`EClasses`) needs of a
+/// policy, instantiated at a config's id types. Blanket-implemented, so a
+/// use site states one bound: `Cfg::Policy: ClassFamilies<Cfg, TRACK>`.
+pub trait ClassFamilies<Cfg: EGraphConfig, const TRACK: bool>:
+    TaggedFamily<
+        crate::containers::circular_list::CircularListNode<
+            crate::containers::Opt<Cfg::ClassKey>,
+            Cfg::G,
+        >,
+        Cfg::Index,
+        TRACK,
+    > + TaggedFamily<crate::containers::eclasses::ClassData<Cfg::UL, Cfg::G>, Cfg::Index, TRACK>
+    + TaggedFamily<Cfg::Index, Cfg::Index, TRACK>
+    + TaggedFamily<Cfg::G, Cfg::Index, TRACK>
+    + TaggedFamily<u8, Cfg::Index, TRACK>
+    + TaggedFamily<crate::union_find::Justification<Cfg::G>, Cfg::Index, TRACK>
+    + TaggedFamily<crate::containers::list::ListHead<Cfg::UN>, Cfg::Index, TRACK>
+    + TaggedFamily<crate::containers::list::ListNode<Cfg::G, Cfg::UN>, Cfg::Index, TRACK>
+    + PlainFamily<crate::containers::Opt<Cfg::G>, usize, TRACK>
+{
+}
+
+impl<P, Cfg: EGraphConfig, const TRACK: bool> ClassFamilies<Cfg, TRACK> for P where
+    P: TaggedFamily<
+            crate::containers::circular_list::CircularListNode<
+                crate::containers::Opt<Cfg::ClassKey>,
+                Cfg::G,
+            >,
+            Cfg::Index,
+            TRACK,
+        > + TaggedFamily<crate::containers::eclasses::ClassData<Cfg::UL, Cfg::G>, Cfg::Index, TRACK>
+        + TaggedFamily<Cfg::Index, Cfg::Index, TRACK>
+        + TaggedFamily<Cfg::G, Cfg::Index, TRACK>
+        + TaggedFamily<u8, Cfg::Index, TRACK>
+        + TaggedFamily<crate::union_find::Justification<Cfg::G>, Cfg::Index, TRACK>
+        + TaggedFamily<crate::containers::list::ListHead<Cfg::UN>, Cfg::Index, TRACK>
+        + TaggedFamily<crate::containers::list::ListNode<Cfg::G, Cfg::UN>, Cfg::Index, TRACK>
+        + PlainFamily<crate::containers::Opt<Cfg::G>, usize, TRACK>
+{
+}
+
+/// The family bounds the node caches need of a policy: one per cache column
+/// (the ten `nodes` columns and the four `children` pools), in terms of the
+/// node types and the local id bundle. Blanket-implemented.
+pub trait CacheFamilies<
+    G: DenseId,
+    O: DenseId,
+    V: DenseId,
+    C: Tagged,
+    I: NodeIds,
+    const TRACK: bool,
+>:
+    TaggedFamily<crate::node_types::FixedArityNode<G, O, 0>, I::L0, TRACK>
+    + TaggedFamily<crate::node_types::FixedArityNode<G, O, 1>, I::L1, TRACK>
+    + TaggedFamily<crate::node_types::FixedArityNode<G, O, 2>, I::L2, TRACK>
+    + TaggedFamily<crate::node_types::FixedArityNode<G, O, 3>, I::L3, TRACK>
+    + TaggedFamily<crate::node_types::FixedArityNode<G, O, 2>, I::LSPair, TRACK>
+    + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LN, TRACK>
+    + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LSeq, TRACK>
+    + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LMSet, TRACK>
+    + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LSet, TRACK>
+    + TaggedFamily<G, usize, TRACK>
+    + TaggedFamily<C, usize, TRACK>
+    + TaggedFamily<crate::node_types::LitNode<G, O, V>, I::LLit, TRACK>
+{
+}
+
+impl<P, G: DenseId, O: DenseId, V: DenseId, C: Tagged, I: NodeIds, const TRACK: bool>
+    CacheFamilies<G, O, V, C, I, TRACK> for P
+where
+    P: TaggedFamily<crate::node_types::FixedArityNode<G, O, 0>, I::L0, TRACK>
+        + TaggedFamily<crate::node_types::FixedArityNode<G, O, 1>, I::L1, TRACK>
+        + TaggedFamily<crate::node_types::FixedArityNode<G, O, 2>, I::L2, TRACK>
+        + TaggedFamily<crate::node_types::FixedArityNode<G, O, 3>, I::L3, TRACK>
+        + TaggedFamily<crate::node_types::FixedArityNode<G, O, 2>, I::LSPair, TRACK>
+        + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LN, TRACK>
+        + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LSeq, TRACK>
+        + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LMSet, TRACK>
+        + TaggedFamily<crate::node_types::VariableArityNode<G, O>, I::LSet, TRACK>
+        + TaggedFamily<G, usize, TRACK>
+        + TaggedFamily<C, usize, TRACK>
+        + TaggedFamily<crate::node_types::LitNode<G, O, V>, I::LLit, TRACK>,
+{
+}
+
+/// Everything the e-graph needs of `Cfg::Policy` at a given `TRACK`: the
+/// class-layer and the node-cache families. The one bound every generic
+/// use of `EGraph<Cfg, L, TRACK, PROOFS>` states. Blanket-implemented, so
+/// `HotFirst` and `TrailFirst` satisfy it for every config.
+pub trait StorePolicy<Cfg: EGraphConfig, const TRACK: bool>:
+    ClassFamilies<Cfg, TRACK> + CacheFamilies<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK>
+{
+}
+
+impl<P, Cfg: EGraphConfig, const TRACK: bool> StorePolicy<Cfg, TRACK> for P where
+    P: ClassFamilies<Cfg, TRACK> + CacheFamilies<Cfg::G, Cfg::O, Cfg::V, Cfg::C, Cfg::Ids, TRACK>
+{
 }
 
 /// The five `mset_child_*` bodies for a config whose `C` is
@@ -114,7 +227,12 @@ macro_rules! impl_mset_child_pair {
 /// Selected by `EGraphConfig::Au` so a wide e-graph gets wide AU arenas.
 pub trait AuIds: 'static {
     /// Backing word; equals the owning config's `Index`.
-    type Index: IndexLike + Tagged;
+    /// `Send` on every id family member: the e-graph's mark/restore fan the
+    /// member composites out across the rayon pool on disjoint `&mut` borrows
+    /// (`EGraph::mark_with`), which requires the members, and so the ids they
+    /// store, to cross threads. Every id is a `Copy` machine-word newtype, so
+    /// the bound costs nothing to satisfy.
+    type Index: IndexLike + Tagged + Send;
 
     // --- Direct identities ---
     /// Dense live-class index inside one AU snapshot.

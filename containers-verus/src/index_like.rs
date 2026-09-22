@@ -43,7 +43,9 @@ pub proof fn lemma_u64_usize_64bit()
 /// (which has `IndexLike` as a supertrait) is then `Debug`/`Ord`/`Hash` without
 /// the config restating those bounds, and the caches' `#[derive(Debug)]` and
 /// hash-map keying resolve.
-pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fmt::Debug {
+/// `Send` because the consumer's mark/restore fans containers of index words
+/// out across the rayon pool; every concrete index is a machine word.
+pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fmt::Debug + Send {
     // -- ghost projections ---------------------------------------------------
 
     /// Ghost projection to a natural number. Injective and bounded.
@@ -137,6 +139,16 @@ pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fm
             a.lt_spec(b) == (a.as_nat() < b.as_nat()),
             a.le_spec(b) == (a.as_nat() <= b.as_nat());
 
+    /// The std hash-table key model holds for `Self`: `Hash` is deterministic
+    /// and `==` is value identity, so a `HashSet<Self, _>` follows `Set`
+    /// semantics (`vstd::std_specs::hash`). Trail deduplication keys its
+    /// membership set by the index type directly. Primitive widths discharge
+    /// this from vstd's shipped axioms; the crate's id newtypes state it as a
+    /// justified axiom over their structural `raw` equality (trust ledger
+    /// group D shape).
+    proof fn lemma_obeys_key_model()
+        ensures vstd::std_specs::hash::obeys_key_model::<Self>();
+
     // -- exec API ------------------------------------------------------------
 
     /// Exec: zero / minimum value.
@@ -164,6 +176,51 @@ pub trait IndexLike: Sized + Copy + core::cmp::Ord + core::hash::Hash + core::fm
     /// Exec: less-than-or-equal.
     fn le(self, other: Self) -> (r: bool)
         ensures r == self.le_spec(other);
+}
+
+/// A ghost inverse of `as_nat` on `[0, max_nat())`, refining `IndexLike`. The
+/// index-major run encoder drops the index column and reconstructs each index
+/// from `run_start + offset`, so it needs to materialize an `I` from a `nat`; a
+/// type supports `IndexRuns` compression exactly when it is `IndexFromNat`.
+/// Implemented for the primitive index types (identity `from_nat`); the wrapper
+/// id types can add it when a column keyed on them wants `IndexRuns`.
+pub trait IndexFromNat: IndexLike {
+    /// Ghost inverse of `as_nat`: `from_nat(n).as_nat() == n` for `n < max_nat()`.
+    spec fn from_nat(n: nat) -> Self;
+
+    proof fn lemma_from_nat_round(n: nat)
+        requires n < Self::max_nat()
+        ensures Self::from_nat(n).as_nat() == n;
+
+    /// The other round-trip: `from_nat` recovers the original index from its
+    /// projection. The run decoder relies on this to reconstruct exactly the `I`
+    /// it compressed (`from_nat(i.as_nat()) == i`).
+    proof fn lemma_from_as_nat(i: Self)
+        ensures Self::from_nat(i.as_nat()) == i;
+
+    /// Receiver-free boundedness, so a ghost index (e.g. a diff-log entry read
+    /// out of a `Seq`) can be shown to fit `max_nat` without a tracked receiver —
+    /// which `lemma_as_nat_bounded`'s `tracked self` does not permit. Needed to
+    /// establish `RunFrame::fits` at compress time.
+    proof fn lemma_as_nat_bounded_val(i: Self)
+        ensures i.as_nat() < Self::max_nat();
+
+    /// Executable inverse: `try_from_usize` restated for `IndexFromNat`, so the
+    /// run decoder gets both the value and its `from_nat` identity in one call.
+    fn from_usize(n: usize) -> (r: Option<Self>)
+        ensures
+            r is Some ==> r->Some_0 == Self::from_nat(n as nat),
+            r is Some <==> (n as nat) < Self::max_nat(),
+    {
+        let r = Self::try_from_usize(n);
+        proof {
+            if let Some(i) = r {
+                Self::lemma_from_nat_round(n as nat);
+                Self::lemma_as_nat_injective(i, Self::from_nat(n as nat));
+            }
+        }
+        r
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -339,6 +396,9 @@ pub fn checked_add_usize<I: IndexLike>(a: I, n: usize) -> (r: Option<I>)
 // ---------------------------------------------------------------------------
 
 impl IndexLike for u8 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x100 }
     open spec fn min_spec() -> Self { 0u8 }
@@ -373,6 +433,9 @@ impl IndexLike for u8 {
 }
 
 impl IndexLike for u16 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x10000 }
     open spec fn min_spec() -> Self { 0u16 }
@@ -406,6 +469,9 @@ impl IndexLike for u16 {
 }
 
 impl IndexLike for u32 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x1_0000_0000 }
     open spec fn min_spec() -> Self { 0u32 }
@@ -447,6 +513,9 @@ impl IndexLike for u32 {
 // 64-bit machines). We make it explicit here.
 #[cfg(target_pointer_width = "64")]
 impl IndexLike for u64 {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { 0x1_0000_0000_0000_0000 }
     open spec fn min_spec() -> Self { 0u64 }
@@ -490,6 +559,9 @@ impl IndexLike for u64 {
 }
 
 impl IndexLike for usize {
+    proof fn lemma_obeys_key_model() {
+        broadcast use vstd::std_specs::hash::group_hash_axioms;
+    }
     open spec fn as_nat(self) -> nat { self as nat }
     open spec fn max_nat() -> nat { usize::MAX as nat + 1 }
     open spec fn min_spec() -> Self { 0usize }
@@ -519,6 +591,39 @@ impl IndexLike for usize {
 
     fn lt(self, other: Self) -> bool { self < other }
     fn le(self, other: Self) -> bool { self <= other }
+}
+
+// IndexFromNat for the primitive index types: `from_nat` is the truncating
+// nat->word cast, exact on `[0, max_nat())`.
+impl IndexFromNat for u8 {
+    open spec fn from_nat(n: nat) -> Self { n as u8 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u16 {
+    open spec fn from_nat(n: nat) -> Self { n as u16 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u32 {
+    open spec fn from_nat(n: nat) -> Self { n as u32 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for u64 {
+    open spec fn from_nat(n: nat) -> Self { n as u64 }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
+}
+impl IndexFromNat for usize {
+    open spec fn from_nat(n: nat) -> Self { n as usize }
+    proof fn lemma_from_nat_round(n: nat) {}
+    proof fn lemma_from_as_nat(i: Self) {}
+    proof fn lemma_as_nat_bounded_val(i: Self) {}
 }
 
 } // verus!

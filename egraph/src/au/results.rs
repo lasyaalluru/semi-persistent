@@ -20,7 +20,8 @@
 
 use super::AuIds31;
 use crate::config::AuIds;
-use crate::containers::{DenseId, IndexLike, ShrinkPolicy, VecP, VecToken};
+use crate::containers::group::Member;
+use crate::containers::{DenseId, IndexLike, ShrinkPolicy, VecP};
 
 /// Sentinel quality for "no result yet": worse than every real result.
 const NO_RESULT: (u32, u32) = (u32::MAX, u32::MAX);
@@ -47,14 +48,6 @@ impl<T> Default for ResultEntry<T> {
             global_exact: false,
         }
     }
-}
-
-/// Token for restoring a `BestResults` to a previous state. Wraps the inner
-/// vector's token; container identity and branch genealogy are validated by
-/// the underlying semi-persistent vector.
-#[derive(Clone, Copy, Debug)]
-pub struct BestResultsToken {
-    entries: VecToken,
 }
 
 /// The best-result table for a search session. The entry vector's index type
@@ -235,24 +228,27 @@ impl<A: AuIds> BestResults<A> {
         self.entry(or_id).global_exact
     }
 
-    pub fn mark(&mut self) -> BestResultsToken {
-        BestResultsToken {
-            entries: self
-                .entries
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.entries, shrink);
     }
 
-    /// Is this token restorable right now (same instance, live branch)?
-    pub fn is_valid_token(&self, token: &BestResultsToken) -> bool {
-        self.entries.is_valid_token(&token.entries)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.entries, depth);
     }
 
-    pub fn restore(&mut self, token: BestResultsToken) {
-        self.entries
-            .try_restore(token.entries)
-            .expect("restore: token minted by this container's own mark");
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.entries, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.entries);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.entries)
     }
 }
 
@@ -361,12 +357,13 @@ mod tests {
         let t0 = TermId::from_usize(0);
 
         results.offer(or0, t0, (5, 5));
-        let token = results.mark();
+        let token = results.frame_depth();
+        results.push_frame(ShrinkPolicy::Never);
 
         results.offer(or1, t0, (3, 3));
         assert_eq!(results.best_term(or1), Some(t0));
 
-        results.restore(token);
+        results.reset_frame(token);
         assert_eq!(results.best_term(or1), None);
         assert_eq!(results.best_term(or0), Some(t0));
     }
@@ -379,7 +376,8 @@ mod tests {
         let t1 = TermId::from_usize(1);
 
         results.offer(or0, t0, (10, 10));
-        let token = results.mark();
+        let token = results.frame_depth();
+        results.push_frame(ShrinkPolicy::Never);
 
         // Improve the pre-mark entry.
         results.offer(or0, t1, (5, 5));
@@ -387,7 +385,7 @@ mod tests {
         assert_eq!(results.best_quality(or0), (5, 5));
 
         // Restore: the overwrite is undone.
-        results.restore(token);
+        results.reset_frame(token);
         assert_eq!(results.best_term(or0), Some(t0));
         assert_eq!(results.best_quality(or0), (10, 10));
     }

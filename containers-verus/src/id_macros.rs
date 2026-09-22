@@ -177,6 +177,9 @@ macro_rules! define_id_impl {
         }
 
         impl $crate::index_like::IndexLike for $Name {
+            proof fn lemma_obeys_key_model() {
+                broadcast use axiom_key_model_id;
+            }
             open spec fn as_nat(self) -> nat { self@ }
             open spec fn max_nat() -> nat { $CAP as nat }
             closed spec fn min_spec() -> Self { $Name { raw: 0 } }
@@ -221,6 +224,11 @@ macro_rules! define_id_impl {
             #[inline(always)]
             fn le(self, other: Self) -> bool { self.raw <= other.raw }
         }
+
+        /// ASSUMED (trust ledger group D shape): a clean id's `==`/`Hash` are structural
+        /// over its masked `raw`, the identity mask under the type invariant, so equal
+        /// ids are identical values and hashing is deterministic.
+        pub broadcast axiom fn axiom_key_model_id() ensures #[trigger] ::vstd::std_specs::hash::obeys_key_model::<$Name>();
 
         impl $crate::opt::DenseId for $Name {
             type Index = $Int;

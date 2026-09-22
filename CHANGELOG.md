@@ -2,6 +2,143 @@
 
 ## [Unreleased]
 
+### Added
+
+- `SpMap` has a key discipline parameter: `SpMap<K, V, I, TRACK, UNIQUE>`,
+  with `SpUniqueMap<K, V, I, TRACK>` as the `UNIQUE = true` alias. Under it
+  no key occurs twice in the log — `try_insert` refuses a present key with
+  the new `ContainerError::DuplicateKey`, `try_intern` answers with the
+  existing entry — and the previous-occurrence column is not kept, so an
+  insert is one hash and one log push and a restore's index unwind is a
+  bare removal per discarded entry. The default `UNIQUE = false` is the
+  published last-write-wins map, unchanged. Every interning table in the
+  e-graph (four registries, the literal store, the unit-node and
+  inverse-op maps, the seven anti-unification indices) and the hinted
+  arena's fingerprint index are `SpUniqueMap`s; a repeated operator, rule
+  or axiom name, or a second unit node or inverse for an operator, is now
+  refused by the map rather than shadowed.
+- `SpMap::try_intern`: interning insert in one hash of the key.
+- `SpMap::try_intern_with(key, f)`: interning insert whose value is computed
+  only on a miss, still in one hash. The anti-unification action cache and
+  or-statistics map build their entries inside it; the action cache used to
+  hash a class pair three times per visit (check, insert, read-back).
+- `SpMap<…, S>`: the index's hasher is a parameter, any `hasher_spec::ValidHasher`
+  (`Default`, and provably valid in vstd's model on an already-shipped axiom).
+  `IndexHasher` stays the default; `std::hash::RandomState` is implemented for
+  keys from an untrusted source. No new trusted item.
+- `VecD`, the runtime-selected three-tier column, is an enum over the three
+  static columns (`vec_dyn`), dispatched once per operation, instead of a
+  `Vec` over the per-primitive `DynStore`. Same constructors and methods;
+  it is no longer the same type as `Vec<T, I, DynStore<T, I>, TRACK>`,
+  which still exists. On the three-tier write rows the runtime-selected
+  columns were 1.26–2.2× the static ones running the same loops; they are
+  now within 1.02–1.19 on writes (one match per operation) and level on
+  restores.
+- The e-graph node caches' hint slot is the id family's own repr word with
+  the family's reserved bit as the spill marker (`HintSlot<L>`), so it is as
+  wide as the id: 32 bits for a 31-bit family, 64 for a 63-bit one. It was a
+  hardcoded `u32` with a `1 << 31` tag that a 63-bit id would have overflowed
+  into the spill index silently in release builds.
+- `AppendOnlyVec::try_push` reads the length once for the capacity test, the
+  returned index and the append, and the whole append path (`try_push`,
+  `push`, `len`, `can_push`, `as_slice`, the group's `Deref`) is inlined
+  unconditionally: the append loop a caller runs is a compare, a branch to
+  the cold growth call and a store, the same instructions as a bare
+  `Vec::push` loop.
+- `retained_containers_bench` has `aov/push`, `aov/push_presized`,
+  `aov/scan` and `aov/mark_restore` beside the alignment-bound `aov/log`
+  composite, and `bench_compare.py` prints a speedup column (reference ÷
+  new) next to its ratio.
+
+### Changed
+
+- `explain_deep`'s memoization is now recorded in full: the code comment,
+  design chapter 15 and a regression test (`deep_proof_diamond_is_linear`)
+  state both failure modes the two pair sets prevent, exponential
+  re-expansion on diamonds and non-termination when a congruence step's
+  original-children pair routes through that same edge, with the termination
+  bound that follows.
+
+- `reconstruct_parent_split` (B+ tree) is three proofs instead of one: the
+  link splice and the footprint reasoning moved into
+  `reconstruct_parent_split_links` and `reconstruct_parent_split_ids`, and the
+  `rlimit(70)` bump is gone; every query now verifies at the default limit
+  (the single body timed out on the Linux CI runner). Every quantifier whose
+  trigger Verus reported as auto-chosen now carries that trigger explicitly
+  (containers-verus and au-verus); the verifier prints no trigger notes.
+
+- Version tokens now carry their minting manager, a generation and a depth
+  (`GroupToken`; `VecToken` is an alias); every container is a group of one
+  with its own token manager, and a token from another container is refused.
+- `restore(t)` resets to the checkpoint and keeps its frame open (semantics
+  B): the token stays valid and can be restored to again, every token minted
+  after it is dead, and the new `pop_scope` / `try_pop_scope` (with
+  `ContainerError::NoOpenFrame`) drops the open top frame. The SMT-LIB
+  `pop` is `restore_and_pop(t)` / `try_restore_and_pop(t)`: the two fused
+  on one pop core, at the legacy restore's cost. The e-graph gains
+  `EGraph::pop_scope` and `EGraph::restore_and_pop`; its interpreter's
+  `(pop)` is the fused call. The stamp table
+  behind token validity is O(1) per mark and per restore, and a restore
+  never migrates tier history (the reopened frame is a header push with a
+  deferred rollover; the next `mark` applies the tier policy once).
+- The e-graph literal store is a verified `SpMap` keyed by canonical keys
+  (`LitVal::Key`, `CanonicalKey`): floats intern under `CanonicalF64`,
+  rationals under `CanonicalRational`.
+- Byte reporters (`heap_bytes`, `tracking_bytes`, `total_bytes`,
+  `diff_log_len`) are plain Rust outside the verified perimeter; the
+  `HeapBytes` trait is exported for stores, and `DiffStore` no longer has a
+  `heap_bytes` method.
+- The Trail dedupe takes a verified straight-copy fast path on strictly
+  ascending frames.
+
+- The fork-history manager is always provided from the outside:
+  `group::ForkHistory<M: Member>` owns one `History` and one typed member.
+  Members carry no tokens — their versioning surface is structural
+  (`push_frame`, `reset_frame`, `restore_frame`, `pop_frame`, `depth_exec`) —
+  and the group answers `mark` (`Option<GroupToken>`),
+  `restore`/`restore_and_pop`/`pop_scope` (`bool`), `mint_pushed`, `is_valid`,
+  `depth` and `in_lockstep`. Every container in the crate is a `Member`,
+  `Pair<A, B>` forwards to two members and nests, and a standalone container
+  is a group of one (`ForkHistory::new(Vec::new())`). `Deref`/`DerefMut` keep
+  typed access. A member driven behind the group's back drifts and the next
+  group operation refuses, changing nothing.
+- The e-graph runs its nine synchronized members on one `History` through a
+  borrowed forwarding view (`EGraphMembers`): no per-member token stacks, one
+  token per scope for the whole e-graph. Store traces land at 0.97–1.00× of
+  the previous commit, `empty20k` at 0.79–0.80×, saturation at parity.
+
+- The trusted base is 12 `external_body` items, down from 34: twelve read-only
+  diagnostics moved out of the verified perimeter, and ten were proved (the B+
+  tree node-layout primitives, the container id's equality, the sparse set's
+  value comparison, the precondition guard and the compression-mode heuristic
+  with its statistics pass). The B+ tree paths pay Rust's bounds checks again;
+  they remain faster than the unverified implementation.
+
+### Removed
+
+- Every container's own versioning surface. `Vec`, `AppendOnlyVec`, `SpMap`,
+  `SparseSet`, `CircularList`, `ListArena`, `UnionFind`, `BPlusTreeSet`,
+  `EClasses` and `HintedArena` no longer have `mark`, `try_mark`, `restore`,
+  `try_restore`, `restore_and_pop`, `try_restore_and_pop`, `pop_scope`,
+  `try_pop_scope` or `is_valid_token`, and the token types (`MapToken`,
+  `SparseSetToken`, `CircularListToken`, `ListArenaToken`, `UnionFindToken`,
+  `BPlusToken`, `EClassesToken`) are gone; `VecToken` remains as the alias for
+  the group's `GroupToken`. Version a container by putting it in a
+  `ForkHistory` group of one. `Vec` and `AppendOnlyVec` also lost the embedded
+  `Genealogy`: the branch cut happens in the group's `History`.
+- The predecessor dyn group (`sync_group`, with `Box<dyn SyncMember>`
+  members) and the `Solo`/`SyncPair` migration wrappers.
+- In the e-graph, the wrappers' token layer: `CacheToken`, `PoolCacheToken`,
+  `NodeStoreToken`, `RoutingToken`, `LitValStoreToken` and the registry
+  tokens. The director pool takes the frame protocol instead.
+
+### Added
+
+- Randomized grouped-history tests at the `ForkHistory` and e-graph levels,
+  and a typed-group suite (`tests/typed_group.rs`): a group of one per
+  container, a nested `Pair` of three columns under one history driven by a
+  randomized lockstep proptest, and the refusal cases.
+
 ## [0.3.0] - 2026-08-28
 
 ### Added

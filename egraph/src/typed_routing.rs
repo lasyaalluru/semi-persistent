@@ -9,22 +9,24 @@ use crate::containers::AppendOnlyVec;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
 use crate::containers::ShrinkPolicy;
-use crate::containers::VecToken;
+use crate::containers::group::Member;
 
 /// Bundle of local DenseId types — one per node kind.
 pub trait NodeIds {
     /// Backing word; must match the owning config's `Index`.
-    type Index: crate::containers::IndexLike + crate::containers::Tagged;
-    type L0: DenseId<Index = Self::Index>;
-    type L1: DenseId<Index = Self::Index>;
-    type L2: DenseId<Index = Self::Index>;
-    type L3: DenseId<Index = Self::Index>;
-    type LSPair: DenseId<Index = Self::Index>;
-    type LN: DenseId<Index = Self::Index>;
-    type LSeq: DenseId<Index = Self::Index>;
-    type LMSet: DenseId<Index = Self::Index>;
-    type LSet: DenseId<Index = Self::Index>;
-    type LLit: DenseId<Index = Self::Index>;
+    /// `Send` on every local id: the node store crosses threads in the
+    /// mark/restore fan-out (see `EGraphConfig::Index`).
+    type Index: crate::containers::IndexLike + crate::containers::Tagged + Send;
+    type L0: DenseId<Index = Self::Index> + Send;
+    type L1: DenseId<Index = Self::Index> + Send;
+    type L2: DenseId<Index = Self::Index> + Send;
+    type L3: DenseId<Index = Self::Index> + Send;
+    type LSPair: DenseId<Index = Self::Index> + Send;
+    type LN: DenseId<Index = Self::Index> + Send;
+    type LSeq: DenseId<Index = Self::Index> + Send;
+    type LMSet: DenseId<Index = Self::Index> + Send;
+    type LSet: DenseId<Index = Self::Index> + Send;
+    type LLit: DenseId<Index = Self::Index> + Send;
 }
 
 /// Typed local id reference — one variant per node kind.
@@ -152,26 +154,30 @@ impl<G: DenseId<Index = I::Index>, I: NodeIds, const TRACK: bool> TypedRouting<G
         self.entries.is_empty()
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> RoutingToken {
-        RoutingToken {
-            entries: self
-                .entries
-                .try_mark(shrink)
-                .expect("routing mark: depth is bounded by the saturation driver"),
-        }
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.entries, shrink);
     }
 
-    pub fn restore(&mut self, token: RoutingToken) {
-        self.entries
-            .try_restore(token.entries)
-            .expect("routing restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.entries, depth);
         self.reserved = false;
     }
-}
 
-#[derive(Clone, Copy, Debug)]
-pub struct RoutingToken {
-    entries: VecToken,
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.entries, depth);
+        self.reserved = false;
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.entries);
+        self.reserved = false;
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.entries)
+    }
 }
 
 #[cfg(test)]
@@ -225,11 +231,12 @@ mod tests {
         let mut rt = RT::new();
         let id0 = rt.reserve();
         rt.finalize(id0, NodeRef::Plain1(Plain1Id::new(0)));
-        let token = rt.mark(ShrinkPolicy::Never);
+        let token = rt.frame_depth();
+        rt.push_frame(ShrinkPolicy::Never);
         let id1 = rt.reserve();
         rt.finalize(id1, NodeRef::SPair(SPairNodeId::new(0)));
         assert_eq!(rt.len(), 2);
-        rt.restore(token);
+        rt.reset_frame(token);
         assert_eq!(rt.len(), 1);
         assert_eq!(rt.get(id0), NodeRef::Plain1(Plain1Id::new(0)));
     }

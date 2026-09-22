@@ -11,6 +11,7 @@
 //! restore is token-only.
 
 use semi_persistent_containers_verus::circular_list::CircularList;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::list::ListArena;
 // Packed next-pointers need an id with a spare tag bit: DenseId63 (63-bit
 // payload over u64) replaces the full-range DenseUsize the raw-usize surface
@@ -196,7 +197,7 @@ fn list_arena_splice_match_oracle() {
 #[test]
 fn list_arena_mark_restore() {
     for seed in 0..10u64 {
-        let mut a = ArenaT::new();
+        let mut a = ForkHistory::new(ArenaT::new());
         let mut oracle: Vec<Vec<u32>> = Vec::new();
         let mut rng = Lcg::new(seed ^ 0x9988);
         let nlists = 2 + rng.below(4);
@@ -210,13 +211,13 @@ fn list_arena_mark_restore() {
             match rng.below(8) {
                 0 => {
                     let token = a
-                        .try_mark(ShrinkPolicy::Never)
+                        .mark(ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness");
                     frames.push((token, oracle.clone()));
                 }
                 1 if !frames.is_empty() => {
                     let (tok, snap) = frames.pop().unwrap();
-                    a.try_restore(tok).expect("restore: own token"); // token-only signature
+                    assert!(a.restore(tok), "restore: own token"); // token-only signature
                     oracle = snap;
                 }
                 _ => {
@@ -242,7 +243,7 @@ fn list_arena_mark_restore() {
         }
         // unwind fully.
         while let Some((tok, snap)) = frames.pop() {
-            a.try_restore(tok).expect("restore: own token"); // token-only signature
+            assert!(a.restore(tok), "restore: own token"); // token-only signature
             for (l, expected) in snap.iter().enumerate() {
                 assert_eq!(
                     read_list(&a, l),
@@ -446,7 +447,7 @@ fn circular_list_singleton_and_splice() {
 #[test]
 fn circular_list_mark_restore() {
     for seed in 0..10u64 {
-        let mut c = RingT::new();
+        let mut c = ForkHistory::new(RingT::new());
         let mut rng = Lcg::new(seed ^ 0x7A7A);
         let mut node_payload: Vec<u32> = Vec::new();
         let mut rings: Vec<Vec<usize>> = Vec::new();
@@ -459,9 +460,7 @@ fn circular_list_mark_restore() {
         for _ in 0..250 {
             match rng.below(7) {
                 0 => {
-                    let token = c
-                        .try_mark(ShrinkPolicy::Never)
-                        .expect("mark: bounded depth");
+                    let token = c.mark(ShrinkPolicy::Never).expect("mark: bounded depth");
                     frames.push((
                         token,
                         (node_payload.clone(), rings.clone(), ring_of.clone()),
@@ -469,7 +468,7 @@ fn circular_list_mark_restore() {
                 }
                 1 if !frames.is_empty() => {
                     let (tok, (np, rg, ro)) = frames.pop().unwrap();
-                    c.try_restore(tok).expect("restore: own token"); // token-only signature
+                    assert!(c.restore(tok), "restore: own token"); // token-only signature
                     node_payload = np;
                     rings = rg;
                     ring_of = ro;

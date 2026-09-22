@@ -109,7 +109,7 @@ fn rhs_of(src: &str) -> semi_persistent_egraph::ast::RhsTerm {
 
 fn mk(eg: &EG, rr: &mut RuleRegistry<false>, lhs: &str, rhs: &str) -> Rule {
     compile_rewrite(
-        "probe",
+        &format!("probe_{}", rr.len()),
         lhs,
         rhs,
         &pat(lhs),

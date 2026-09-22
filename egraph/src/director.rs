@@ -9,7 +9,8 @@ use core::hash::Hash;
 
 use crate::containers::IndexLike;
 use crate::containers::Tagged;
-use crate::containers::{AppendOnlyVec, ShrinkPolicy, VecI, VecToken};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, ShrinkPolicy, VecI};
 
 // ---------------------------------------------------------------------------
 // PortArity — transparent newtype over u8 for matrix dimensions
@@ -752,18 +753,27 @@ impl<I: IndexLike, const TRACK: bool, const PROOFS: bool> DirectorPool<I, TRACK,
         self.work.is_empty()
     }
 
-    /// Mark for semi-persistent checkpoint.
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> VecToken {
-        self.work
-            .try_mark(shrink)
-            .expect("mark: frame depth is bounded by the saturation driver")
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the working pool's column (no tokens). The proof pool is append-only
+    // across scopes and is not versioned.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.work, shrink);
     }
 
-    /// Restore to a previous checkpoint.
-    pub fn restore(&mut self, token: VecToken) {
-        self.work
-            .try_restore(token)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.work, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.work, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.work);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.work)
     }
 
     // -- Proof pool -----------------------------------------------------------
@@ -1105,11 +1115,12 @@ mod tests {
     #[test]
     fn dir_pool_mark_restore() {
         let mut pool = DirectorPool::<u32, true, false>::new();
-        let token = pool.mark(crate::containers::ShrinkPolicy::Never);
+        let token = pool.frame_depth();
+        pool.push_frame(crate::containers::ShrinkPolicy::Never);
         pool.append(63, &[PoolDirector::new(0xFF)]);
         pool.append(63, &[PoolDirector::new(0xAA)]);
         assert_eq!(pool.len(), 4);
-        pool.restore(token);
+        pool.reset_frame(token);
         assert!(pool.is_empty());
     }
 
@@ -1219,13 +1230,14 @@ mod tests {
         // The pool is generic over its index word, so a small pool can be addressed in
         // a `u16` rather than paying 4 bytes per journal entry.
         let mut pool = DirectorPool::<u16, true, false>::new();
-        let token = pool.mark(crate::containers::ShrinkPolicy::Never);
+        let token = pool.frame_depth();
+        pool.push_frame(crate::containers::ShrinkPolicy::Never);
         let start: u16 = pool.append(63, &[PoolDirector::new(0x5A)]);
         assert_eq!(pool.len(), 2u16);
         assert_eq!(pool.read(start).1[0].bits(), 0x5A);
         pool.set(start + 1, PoolDirector::new(0xA5));
         assert_eq!(pool.get(start + 1).bits(), 0xA5);
-        pool.restore(token);
+        pool.reset_frame(token);
         assert!(pool.is_empty());
     }
 

@@ -50,6 +50,7 @@ fn class_name<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> String
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let eg = snap.egraph();
     eg.ops()
@@ -105,6 +106,7 @@ fn replay_node<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> (String, usize, Vec<EdgeRow>)
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let idx = or_id.to_index();
     let l = *space.or_arena.left.get(idx);
@@ -243,6 +245,7 @@ pub(crate) fn term_sexp<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
 ) -> String
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let eg = snap.egraph();
     super::pretty::pretty_print(
@@ -269,6 +272,7 @@ pub(crate) fn dump_search_graph<Cfg: EGraphConfig, L: LitVal, const T: bool, con
 ) -> Dump
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let ExactRun {
         term,

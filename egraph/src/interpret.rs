@@ -130,7 +130,9 @@ pub struct Interpreter<
     M: LitModel<Value = L>,
     const TRACK: bool,
     const PROOFS: bool,
-> {
+> where
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+{
     pub eg: EGraph<Cfg, L, TRACK, PROOFS>,
     pub model: M,
     rules: Vec<PreparedRule<Cfg::O, Cfg::S, L>>,
@@ -169,6 +171,7 @@ impl<Cfg: EGraphConfig, L: LitVal, M: LitModel<Value = L>, const TRACK: bool, co
 where
     Cfg::O: std::hash::Hash,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     pub fn new(model: M) -> Self {
         let eg = EGraph::from_model(&model);
@@ -795,7 +798,10 @@ where
             }
             CCommand::Pop => {
                 let mark = self.marks.pop().ok_or(InterpError::PopWithoutPush)?;
-                self.eg.restore(mark.token);
+                // SMT-LIB pop: back to the checkpoint, then drop its scope —
+                // fused, so it costs one pop core per column (design doc 08 §1;
+                // the verified `restore` alone keeps the scope open).
+                self.eg.restore_and_pop(mark.token);
                 self.rules.truncate(mark.rules_len);
                 self.globals.truncate(mark.globals_len);
             }

@@ -8,9 +8,8 @@
 
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::{AuIds, EGraphConfig};
-use crate::containers::{
-    AppendOnlyVec, DenseId, IndexLike, MapToken, ShrinkPolicy, SpMap, VecToken,
-};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 use crate::literal::LitVal;
 use crate::multiplicity::MultiplicityLike;
 
@@ -49,7 +48,7 @@ pub struct TermPool<O: DenseId, V: DenseId, A: AuIds = AuIds31> {
     child_pool: AppendOnlyVec<A::Term, A::Index>,
     sizes: AppendOnlyVec<u32, A::Index>,
     vmasses: AppendOnlyVec<u32, A::Index>,
-    by_structure: SpMap<(TermOp<O, V>, Vec<A::Term>), A::Term, A::Index>,
+    by_structure: SpUniqueMap<(TermOp<O, V>, Vec<A::Term>), A::Term, A::Index>,
     /// Memoized [`build_best_term`] result per snapshot class.
     ///
     /// A class's minimal member is fixed by the snapshot, so its extracted term
@@ -65,19 +64,7 @@ pub struct TermPool<O: DenseId, V: DenseId, A: AuIds = AuIds31> {
     /// `build_best_term` call on this pool uses the same snapshot. That holds
     /// by construction: every pool is created next to one snapshot
     /// (`session.rs`, `exact.rs`, `mcgs.rs`) and never outlives it.
-    best_terms: SpMap<A::Class, A::Term, A::Index>,
-}
-
-/// Token for restoring a `TermPool` to a previous state.
-#[derive(Clone, Copy, Debug)]
-pub struct TermPoolToken {
-    ops: VecToken,
-    child_spans: VecToken,
-    child_pool: VecToken,
-    sizes: VecToken,
-    vmasses: VecToken,
-    by_structure: MapToken,
-    best_terms: MapToken,
+    best_terms: SpUniqueMap<A::Class, A::Term, A::Index>,
 }
 
 impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> TermPool<O, V, A> {
@@ -88,8 +75,8 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
             child_pool: AppendOnlyVec::new(),
             sizes: AppendOnlyVec::new(),
             vmasses: AppendOnlyVec::new(),
-            by_structure: SpMap::new(),
-            best_terms: SpMap::new(),
+            by_structure: SpUniqueMap::new(),
+            best_terms: SpUniqueMap::new(),
         }
     }
 
@@ -107,12 +94,20 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
 
     /// Intern a term. Returns the existing id if structurally equal term exists.
     pub fn intern(&mut self, op: TermOp<O, V>, children: &[A::Term]) -> A::Term {
+        // One hash of the structural key (an operator plus a child vector, so a
+        // heap key) whether the term is new or not: the map decides membership
+        // and claims the id in the same probe, and the columns below are only
+        // extended when the id is fresh.
         let key = (op.clone(), children.to_vec());
-        if let Some(log_idx) = self.by_structure.id_of(&key) {
-            return *self.by_structure.get_val(log_idx);
+        let id: A::Term = crate::id::id_at_index(self.ops.len());
+        let (found, fresh) = self
+            .by_structure
+            .try_intern(key, id)
+            .expect("AU arena sized by its index word");
+        if !fresh {
+            return *self.by_structure.get_val(found);
         }
 
-        let id: A::Term = crate::id::id_at_index(self.ops.len());
         let start = self.child_pool.len().as_usize();
         for &c in children {
             self.child_pool
@@ -165,9 +160,6 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
             .expect("AU arena sized by its index word");
         self.vmasses
             .try_push(vmass)
-            .expect("AU arena sized by its index word");
-        self.by_structure
-            .try_insert(key, id)
             .expect("AU arena sized by its index word");
         id
     }
@@ -318,82 +310,63 @@ impl<O: DenseId + core::hash::Hash, V: DenseId + core::hash::Hash, A: AuIds> Ter
     /// Record the minimal term extracted for a snapshot class. Callers check
     /// the cache first, so a key is never overwritten (no shadow log entries).
     fn cache_best_term(&mut self, class: A::Class, term: A::Term) {
+        // One hash, and the write-once discipline is now enforced rather than
+        // asserted: a present key leaves the entry as it was.
+        let (_, fresh) = self
+            .best_terms
+            .try_intern(class, term)
+            .expect("AU arena sized by its index word");
         debug_assert!(
-            self.best_terms.id_of(&class).is_none(),
+            fresh,
             "best-term cache entries are written at most once per class"
         );
-        self.best_terms
-            .try_insert(class, term)
-            .expect("AU arena sized by its index word");
     }
 
-    pub fn mark(&mut self) -> TermPoolToken {
-        TermPoolToken {
-            ops: self
-                .ops
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_spans: self
-                .child_spans
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            child_pool: self
-                .child_pool
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            sizes: self
-                .sizes
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            vmasses: self
-                .vmasses
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            by_structure: self
-                .by_structure
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            best_terms: self
-                .best_terms
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.ops, shrink);
+        Member::push_frame(&mut self.child_spans, shrink);
+        Member::push_frame(&mut self.child_pool, shrink);
+        Member::push_frame(&mut self.sizes, shrink);
+        Member::push_frame(&mut self.vmasses, shrink);
+        Member::push_frame(&mut self.by_structure, shrink);
+        Member::push_frame(&mut self.best_terms, shrink);
     }
 
-    /// Is this token restorable right now (same instances, live branches on
-    /// every inner container)?
-    pub fn is_valid_token(&self, token: &TermPoolToken) -> bool {
-        self.ops.is_valid_token(&token.ops)
-            && self.child_spans.is_valid_token(&token.child_spans)
-            && self.child_pool.is_valid_token(&token.child_pool)
-            && self.sizes.is_valid_token(&token.sizes)
-            && self.vmasses.is_valid_token(&token.vmasses)
-            && self.by_structure.is_valid_token(&token.by_structure)
-            && self.best_terms.is_valid_token(&token.best_terms)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.ops, depth);
+        Member::reset_frame(&mut self.child_spans, depth);
+        Member::reset_frame(&mut self.child_pool, depth);
+        Member::reset_frame(&mut self.sizes, depth);
+        Member::reset_frame(&mut self.vmasses, depth);
+        Member::reset_frame(&mut self.by_structure, depth);
+        Member::reset_frame(&mut self.best_terms, depth);
     }
 
-    pub fn restore(&mut self, token: TermPoolToken) {
-        self.best_terms
-            .try_restore(token.best_terms)
-            .expect("restore: token minted by this container's own mark");
-        self.by_structure
-            .try_restore(token.by_structure)
-            .expect("restore: token minted by this container's own mark");
-        self.vmasses
-            .try_restore(token.vmasses)
-            .expect("restore: token minted by this container's own mark");
-        self.sizes
-            .try_restore(token.sizes)
-            .expect("restore: token minted by this container's own mark");
-        self.child_pool
-            .try_restore(token.child_pool)
-            .expect("restore: token minted by this container's own mark");
-        self.child_spans
-            .try_restore(token.child_spans)
-            .expect("restore: token minted by this container's own mark");
-        self.ops
-            .try_restore(token.ops)
-            .expect("restore: token minted by this container's own mark");
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.ops, depth);
+        Member::restore_frame(&mut self.child_spans, depth);
+        Member::restore_frame(&mut self.child_pool, depth);
+        Member::restore_frame(&mut self.sizes, depth);
+        Member::restore_frame(&mut self.vmasses, depth);
+        Member::restore_frame(&mut self.by_structure, depth);
+        Member::restore_frame(&mut self.best_terms, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.ops);
+        Member::pop_frame(&mut self.child_spans);
+        Member::pop_frame(&mut self.child_pool);
+        Member::pop_frame(&mut self.sizes);
+        Member::pop_frame(&mut self.vmasses);
+        Member::pop_frame(&mut self.by_structure);
+        Member::pop_frame(&mut self.best_terms);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.ops)
     }
 
     /// Project one side of the anti-unifier: replace every `Variants` node —
@@ -505,6 +478,7 @@ pub(crate) fn evaluate_generalize_action<
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if l == r {
         return build_best_term(snap, pool, l);
@@ -537,6 +511,7 @@ pub fn build_best_term<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: boo
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     struct Frame<O, C, M, Term> {
         /// The class this frame extracts, cached when the frame completes.
@@ -837,7 +812,8 @@ mod tests {
         assert_eq!(pool.size(t_fa), 2);
 
         let len_at_mark = pool.len();
-        let token = pool.mark();
+        let token = pool.frame_depth();
+        pool.push_frame(ShrinkPolicy::Never);
 
         // Post-mark: caches the gfa class and interns the g term.
         let t_gfa = build_best_term(&snap, &mut pool, gfa_class);
@@ -845,7 +821,7 @@ mod tests {
         assert_eq!(pool.children(t_gfa), &[t_fa]);
         assert!(pool.len() > len_at_mark);
 
-        pool.restore(token);
+        pool.reset_frame(token);
         assert_eq!(pool.len(), len_at_mark);
 
         // Pre-mark entry survives: cache hit on the surviving id, no growth.

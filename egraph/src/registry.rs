@@ -5,23 +5,11 @@
 use crate::containers::AppendOnlyVec;
 use crate::containers::DenseId;
 use crate::containers::IndexLike;
-use crate::containers::MapToken;
 use crate::containers::ShrinkPolicy;
-use crate::containers::SpMap;
-use crate::containers::VecToken;
+use crate::containers::SpUniqueMap;
+use crate::containers::error::ContainerError;
+use crate::containers::group::Member;
 use crate::id::{ENodeKind, id_at};
-
-/// Opaque token for [`SortRegistry::mark`] / [`SortRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct SortRegistryToken(MapToken);
-
-/// Opaque token for [`OpRegistry::mark`] / [`OpRegistry::restore`]. Bundles the op log's
-/// token with the completion table's, so the two are always marked and truncated together.
-#[derive(Clone, Copy, Debug)]
-pub struct OpRegistryToken {
-    map: MapToken,
-    completion: VecToken,
-}
 
 /// Flattening direction for variadic sequence operators.
 ///
@@ -189,7 +177,7 @@ impl<S: DenseId> OpInfo<S> {
 #[derive(Debug)]
 pub struct SortRegistry<S: DenseId, const TRACK: bool> {
     /// Positions in this log ARE sort ids, so the log's index word is the id's.
-    map: SpMap<String, (), S::Index, TRACK>,
+    map: SpUniqueMap<String, (), S::Index, TRACK>,
     builtin_count: usize,
     concrete_count: usize,
     _phantom: core::marker::PhantomData<S>,
@@ -204,7 +192,7 @@ impl<S: DenseId, const TRACK: bool> Default for SortRegistry<S, TRACK> {
 impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
     pub fn new() -> Self {
         Self {
-            map: SpMap::new(),
+            map: SpUniqueMap::new(),
             builtin_count: 0,
             concrete_count: 0,
             _phantom: core::marker::PhantomData,
@@ -217,8 +205,9 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
             "register_builtins must be called on empty registry"
         );
         for name in sort_names {
+            // Interning, so a builtin list that repeats a name registers it once.
             self.map
-                .try_insert(name.to_string(), ())
+                .try_intern(name.to_string(), ())
                 .expect("registry id space exhausted for its index word");
         }
         self.builtin_count = self.map.len();
@@ -226,14 +215,11 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
     }
 
     pub fn intern(&mut self, name: &str) -> S {
-        if let Some(id) = self.map.id_of(&name.to_owned()) {
-            // A position already in the log came from `sort_id` below, so it is in
-            // range; re-checking costs nothing on this path and keeps one spelling.
-            return id_at::<S>(id.as_usize());
-        }
-        let id = self
+        // One hash of the name, whether it is already registered or not: the
+        // entry decides membership and inserts through the same probe.
+        let (id, _fresh) = self
             .map
-            .try_insert(name.to_owned(), ())
+            .try_intern(name.to_owned(), ())
             .expect("registry id space exhausted for its index word");
         id_at::<S>(id.as_usize())
     }
@@ -268,18 +254,26 @@ impl<S: DenseId, const TRACK: bool> SortRegistry<S, TRACK> {
             .map(|id| id_at::<S>(id.as_usize()))
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> SortRegistryToken {
-        SortRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
     }
 
-    pub fn restore(&mut self, token: SortRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 
@@ -322,7 +316,7 @@ thread_local! {
 #[derive(Debug)]
 pub struct OpRegistry<O: DenseId, S: DenseId, const TRACK: bool> {
     /// Positions in this log ARE op ids, so the log's index word is the id's.
-    map: SpMap<String, OpInfo<S>, O::Index, TRACK>,
+    map: SpUniqueMap<String, OpInfo<S>, O::Index, TRACK>,
     /// Completion bookkeeping per op, one entry per op id ([`CompletionSlot`]).
     ///
     /// `insert` pushes exactly one entry per op, so entry `i` describes op `i`, and the
@@ -346,7 +340,7 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> Default for OpRegistry<O,
 impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
     pub fn new() -> Self {
         Self {
-            map: SpMap::new(),
+            map: SpUniqueMap::new(),
             completion: AppendOnlyVec::new(),
             builtin_count: 0,
             concrete_sort_count: 0,
@@ -651,10 +645,6 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
     }
 
     fn insert(&mut self, name: &str, return_sort: S, kind: OpKind<S>, meta: OpMeta) -> O {
-        assert!(
-            !self.map.contains_key(&name.to_owned()),
-            "operator '{name}' already registered"
-        );
         match &kind {
             OpKind::Commutative { arg_sorts } => assert!(
                 arg_sorts[0] == arg_sorts[1],
@@ -679,20 +669,24 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
             OpKind::Set { .. } => CompletionKind::Set,
             _ => CompletionKind::NotCompletion,
         };
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                OpInfo {
-                    name: name.to_owned(),
-                    return_sort,
-                    kind,
-                    is_constructor: meta.is_constructor,
-                    cost: meta.cost,
-                    unextractable: meta.unextractable,
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // One hash of the name: the unique-keyed map decides membership and
+        // inserts through the same probe, and refuses a repeated name, which
+        // is the duplicate-registration check.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            OpInfo {
+                name: name.to_owned(),
+                return_sort,
+                kind,
+                is_constructor: meta.is_constructor,
+                cost: meta.cost,
+                unextractable: meta.unextractable,
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("operator '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         let (msets, sets) = self.completion_counts();
         let slot = CompletionSlot {
             kind: completion_kind,
@@ -711,41 +705,51 @@ impl<O: crate::DenseId, S: DenseId, const TRACK: bool> OpRegistry<O, S, TRACK> {
         id_at::<O>(id.as_usize())
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> OpRegistryToken {
-        OpRegistryToken {
-            map: self
-                .map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-            completion: self
-                .completion
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        }
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
+        Member::push_frame(&mut self.completion, shrink);
     }
 
-    pub fn restore(&mut self, token: OpRegistryToken) {
-        self.map
-            .try_restore(token.map)
-            .expect("restore: token minted by this container's own mark");
-        self.completion
-            .try_restore(token.completion)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+        Member::reset_frame(&mut self.completion, depth);
         debug_assert_eq!(
             self.completion.len().as_usize(),
             self.map.log_len().as_usize(),
             "the completion table is truncated with the op log"
         );
     }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+        Member::restore_frame(&mut self.completion, depth);
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "the completion table is truncated with the op log"
+        );
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+        Member::pop_frame(&mut self.completion);
+        debug_assert_eq!(
+            self.completion.len().as_usize(),
+            self.map.log_len().as_usize(),
+            "pop left the completion column out of step with the map"
+        );
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Rule registry
 // ---------------------------------------------------------------------------
-
-/// Opaque token for [`RuleRegistry::mark`] / [`RuleRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct RuleRegistryToken(MapToken);
 
 /// Metadata for a registered rewrite rule.
 #[derive(Clone, Debug)]
@@ -759,7 +763,7 @@ pub struct RuleInfo {
 pub struct RuleRegistry<const TRACK: bool> {
     /// Positions in this log ARE rule ids, so the log's index word is `RuleId`'s — a
     /// `u16`, since `RuleId` is 15-bit.
-    map: SpMap<String, RuleInfo, <crate::id::RuleId as DenseId>::Index, TRACK>,
+    map: SpUniqueMap<String, RuleInfo, <crate::id::RuleId as DenseId>::Index, TRACK>,
 }
 
 impl<const TRACK: bool> Default for RuleRegistry<TRACK> {
@@ -770,21 +774,26 @@ impl<const TRACK: bool> Default for RuleRegistry<TRACK> {
 
 impl<const TRACK: bool> RuleRegistry<TRACK> {
     pub fn new() -> Self {
-        Self { map: SpMap::new() }
+        Self {
+            map: SpUniqueMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, lhs: &str, rhs: &str) -> crate::id::RuleId {
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                RuleInfo {
-                    name: name.to_owned(),
-                    lhs: lhs.to_owned(),
-                    rhs: rhs.to_owned(),
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // The registry is unique-keyed: a second rule under the same name is a
+        // caller error, and the map refuses it rather than shadowing the first.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            RuleInfo {
+                name: name.to_owned(),
+                lhs: lhs.to_owned(),
+                rhs: rhs.to_owned(),
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("rule '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         id_at::<crate::id::RuleId>(id.as_usize())
     }
 
@@ -810,28 +819,32 @@ impl<const TRACK: bool> RuleRegistry<TRACK> {
             .map(|id| id_at::<crate::id::RuleId>(id.as_usize()))
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> RuleRegistryToken {
-        RuleRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
     }
 
-    pub fn restore(&mut self, token: RuleRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Axiom registry
 // ---------------------------------------------------------------------------
-
-/// Opaque token for [`AxiomRegistry::mark`] / [`AxiomRegistry::restore`].
-#[derive(Clone, Copy, Debug)]
-pub struct AxiomRegistryToken(MapToken);
 
 /// Metadata for a registered axiom (user-asserted equality).
 #[derive(Clone, Debug)]
@@ -846,7 +859,7 @@ pub struct AxiomRegistry<G: Copy + DenseId, const TRACK: bool> {
     /// Positions in this log ARE axiom ids, so the log's index word is `AxiomId`'s — a
     /// `u16`, since `AxiomId` is 15-bit. Note this is NOT `G::Index`: `G` is the id type
     /// of the *terms* an axiom relates, not of the axiom.
-    map: SpMap<String, AxiomInfo<G>, <crate::id::AxiomId as DenseId>::Index, TRACK>,
+    map: SpUniqueMap<String, AxiomInfo<G>, <crate::id::AxiomId as DenseId>::Index, TRACK>,
 }
 
 impl<G: Copy + DenseId, const TRACK: bool> Default for AxiomRegistry<G, TRACK> {
@@ -857,21 +870,25 @@ impl<G: Copy + DenseId, const TRACK: bool> Default for AxiomRegistry<G, TRACK> {
 
 impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
     pub fn new() -> Self {
-        Self { map: SpMap::new() }
+        Self {
+            map: SpUniqueMap::new(),
+        }
     }
 
     pub fn register(&mut self, name: &str, lhs: G, rhs: G) -> crate::id::AxiomId {
-        let id = self
-            .map
-            .try_insert(
-                name.to_owned(),
-                AxiomInfo {
-                    name: name.to_owned(),
-                    lhs,
-                    rhs,
-                },
-            )
-            .expect("registry id space exhausted for its index word");
+        // Unique-keyed, as the rule registry: a repeated axiom name is refused.
+        let id = match self.map.try_insert(
+            name.to_owned(),
+            AxiomInfo {
+                name: name.to_owned(),
+                lhs,
+                rhs,
+            },
+        ) {
+            Ok(id) => id,
+            Err(ContainerError::DuplicateKey) => panic!("axiom '{name}' already registered"),
+            Err(_) => panic!("registry id space exhausted for its index word"),
+        };
         id_at::<crate::id::AxiomId>(id.as_usize())
     }
 
@@ -891,18 +908,26 @@ impl<G: Copy + DenseId, const TRACK: bool> AxiomRegistry<G, TRACK> {
         self.map.is_empty()
     }
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> AxiomRegistryToken {
-        AxiomRegistryToken(
-            self.map
-                .try_mark(shrink)
-                .expect("mark: frame depth is bounded by the saturation driver"),
-        )
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.map, shrink);
     }
 
-    pub fn restore(&mut self, token: AxiomRegistryToken) {
-        self.map
-            .try_restore(token.0)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.map, depth);
+    }
+
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.map, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.map);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.map)
     }
 }
 
@@ -1176,7 +1201,8 @@ mod tests {
             (Some(0), Some(1))
         );
 
-        let token = ops.mark(ShrinkPolicy::Never);
+        let token = ops.frame_depth();
+        ops.push_frame(ShrinkPolicy::Never);
         let mul = ops.register_mset("Mul", int_sort, int_sort);
         let or = ops.register_set("Or", bool_sort, bool_sort);
         // The new MSet op takes column 1, pushing every Set op up one.
@@ -1186,7 +1212,7 @@ mod tests {
         assert_eq!(ops.completion_column(or), Some(3));
         assert_eq!(ops.completion_op_count(), 4);
 
-        ops.restore(token);
+        ops.reset_frame(token);
         assert_eq!(ops.completion_ops(), vec![add, and]);
         assert_eq!(ops.completion_column(add), Some(0));
         assert_eq!(ops.completion_column(and), Some(1));

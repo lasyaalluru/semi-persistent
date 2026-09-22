@@ -1,11 +1,10 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
-//! Error type for total public container operations.
+//! Error types for total public container operations.
 //!
-//! Every `try_` wrapper returns `Result<_, ContainerError>`; the variant
-//! names which precondition failed, so a caller can distinguish operational
-//! exhaustion (capacity, depth, forks — conditions a correct program can
-//! meet at scale) from contract violations (a foreign or stale token).
+//! `ContainerError` names failures shared by total container operations.
+//! Additive APIs with narrower failure domains use dedicated error types so
+//! this enum's public variant surface remains stable.
 
 use vstd::prelude::*;
 
@@ -25,6 +24,8 @@ pub enum ContainerError {
     InvalidToken,
     /// The operation needs TRACK=true (mark/restore on an untracked container).
     Untracked,
+    /// `pop` on an empty frame stack: there is no open frame to drop.
+    NoOpenFrame,
     /// An index beyond the current length.
     IndexOutOfBounds,
     /// Input violates an ordering/shape requirement (e.g. `from_sorted` on
@@ -33,6 +34,9 @@ pub enum ContainerError {
     /// The key type lacks a property the container requires statically
     /// (e.g. a non-bit-stealing id family on the B+tree).
     UnsupportedKey,
+    /// The key is already present in a unique-keys map (`SpUniqueMap`), which
+    /// never overwrites.
+    DuplicateKey,
 }
 
 } // verus!
@@ -45,9 +49,11 @@ impl core::fmt::Display for ContainerError {
             ContainerError::ForkLimit => "fork count at u32 ceiling",
             ContainerError::InvalidToken => "token does not name a restorable frame",
             ContainerError::Untracked => "operation requires a tracked (TRACK=true) container",
+            ContainerError::NoOpenFrame => "pop on an empty frame stack: no open frame to drop",
             ContainerError::IndexOutOfBounds => "index beyond current length",
             ContainerError::NotSorted => "input keys not strictly ascending",
             ContainerError::UnsupportedKey => "key type lacks a required static property",
+            ContainerError::DuplicateKey => "key already present in a unique-keys map",
         };
         f.write_str(s)
     }

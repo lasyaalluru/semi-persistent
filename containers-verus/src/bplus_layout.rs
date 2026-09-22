@@ -135,17 +135,11 @@ pub proof fn lemma_u64_usize_roundtrip(x: u64)
 /// `a[i]`), and `N` here is the array's own const-generic length, so no
 /// arithmetic relates the bound to the index — there is nothing to get wrong
 /// beyond the precondition Verus checks at every call site.
-#[verifier::external_body]
 pub(crate) fn arr_get<T: Copy, const N: usize>(a: &[T; N], i: usize) -> (r: T)
     requires i < N,
     ensures r == a[i as int],
 {
-    // SAFETY: `i < N` is a verified precondition at every call site. The
-    // debug_assert is a runtime monitor on that assumption for unverified
-    // crate-internal callers (get_unchecked skips the bounds check even in
-    // debug builds): a violation panics cleanly instead of reading OOB.
-    debug_assert!(i < N);
-    unsafe { *a.get_unchecked(i) }
+    *vstd::array::array_index_get(a, i)
 }
 
 /// `s[i]` with the bounds check elided. The slice analogue of [`arr_get`], for
@@ -158,15 +152,11 @@ pub(crate) fn arr_get<T: Copy, const N: usize>(a: &[T; N], i: usize) -> (r: T)
 /// production's zero (it bulk-copies a pre-materialized word vector). Same trust
 /// as [`arr_get`]: `external_body`, contract is `get_unchecked`'s own documented
 /// one, and the precondition is checked by Verus at every call site.
-#[verifier::external_body]
 pub(crate) fn slice_get<T: Copy>(s: &[T], i: usize) -> (r: T)
     requires i < s@.len(),
     ensures r == s@[i as int],
 {
-    // SAFETY: `i < s.len()` is a verified precondition at every call site.
-    // debug_assert: runtime monitor (see `arr_get`).
-    debug_assert!(i < s.len());
-    unsafe { *s.get_unchecked(i) }
+    *vstd::slice::slice_index_get(s, i)
 }
 
 /// `if c { b } else { a }`, lowered to `cmov` instead of a branch.
@@ -191,50 +181,34 @@ pub(crate) fn slice_get<T: Copy>(s: &[T], i: usize) -> (r: T)
 /// body is a total, `unsafe`-free expression whose contract is the postcondition
 /// stated here, and `select_unpredictable`'s own documented semantics are exactly
 /// `if c { b } else { a }` — it is a codegen hint, not a semantic one.
-#[verifier::external_body]
 pub(crate) fn sel_usize(c: bool, a: usize, b: usize) -> (r: usize)
-    requires true,
     ensures r == if c { b } else { a },
 {
-    core::hint::select_unpredictable(c, b, a)
+    if c { b } else { a }
 }
 
 /// `a[i] = v` with the bounds check elided. See [`arr_get`] for why the check
 /// is provably dead and what is trusted here.
-#[verifier::external_body]
 pub(crate) fn arr_set<T: Copy, const N: usize>(a: &mut [T; N], i: usize, v: T)
     requires i < N,
     ensures final(a)@ =~= old(a)@.update(i as int, v),
 {
-    // SAFETY: `i < N` is a verified precondition at every call site.
-    // debug_assert: runtime monitor (see `arr_get`).
-    debug_assert!(i < N);
-    unsafe {
-        *a.get_unchecked_mut(i) = v;
-    }
+    a[i] = v;
 }
 
-/// Open a hole at `pos` by moving `a[pos..cnt]` up one slot, i.e.
-/// `a.copy_within(pos..cnt, pos + 1)`.
+/// Open a hole at `pos` by moving `a[pos..cnt]` up one slot, i.e. what
+/// `a.copy_within(pos..cnt, pos + 1)` does.
 ///
-/// Verus can carry the element-wise postcondition through the scalar arm, while
-/// `copy_within` supplies one `memmove` for longer tails. Short and long shifts
-/// have different machine costs, so the implementation uses a tuned crossover.
-/// The value 18 is a historical tuning choice, not a portable performance
-/// theorem; changes require the Criterion B+tree insertion distribution as well
-/// as the agreement tests around the boundary.
+/// Verified: the descending loop writes each slot from its predecessor, and the
+/// invariant carries three facts — the slots below `pos` are untouched, the
+/// window above the cursor already holds the shifted values, and the slots above
+/// `cnt` are untouched. The `memmove` arm this replaces was trusted for exactly
+/// that postcondition; the loop proves it instead. A node's window is bounded by
+/// its arity, so the copy is short by construction.
 ///
-/// Trusted (`external_body`) for the same reason as [`arr_get`]: the postcondition
-/// below is the whole contract, `copy_within`'s own documented behavior supplies
-/// it for the long arm, and the short arm is the loop it replaces. `pos <= cnt <
-/// N` is a verified precondition at every call site (`cnt` is strictly below `N`
-/// because the moved window's top element lands at `cnt`). `unsafe`-free.
-/// `#[inline(always)]` is load-bearing, not cosmetic: an `external_body` function
-/// is a real call boundary, and left out-of-line this cost more than the scalar
-/// loop it replaced — the length dispatch only pays off if the constant-length
-/// call sites can fold it away and `memmove` can be reached without a `callq`.
+/// `#[inline(always)]` is load-bearing, not cosmetic: the call sites have
+/// constant lengths, and leaving this out-of-line costs more than the shift.
 #[inline(always)]
-#[verifier::external_body]
 pub(crate) fn arr_shift_up<T: Copy, const N: usize>(a: &mut [T; N], pos: usize, cnt: usize)
     requires pos <= cnt, cnt < N,
     ensures
@@ -243,18 +217,21 @@ pub(crate) fn arr_shift_up<T: Copy, const N: usize>(a: &mut [T; N], pos: usize, 
         forall|k: int| pos < k <= cnt ==> final(a)@[k] == old(a)@[k - 1],
         forall|k: int| cnt < k < N ==> final(a)@[k] == old(a)@[k],
 {
-    // Runtime monitor on the verified precondition: a violated bound here
-    // corrupts the node silently rather than faulting.
-    debug_assert!(pos <= cnt && cnt < N);
-    // Historical crossover for this layout. Criterion owns any retuning.
-    if cnt - pos < 18 {
-        let mut j = cnt;
-        while j > pos {
-            a[j] = a[j - 1];
-            j -= 1;
-        }
-    } else {
-        a.copy_within(pos..cnt, pos + 1);
+    let ghost original = a@;
+    let mut j: usize = cnt;
+    while j > pos
+        invariant
+            pos <= j <= cnt,
+            cnt < N,
+            a@.len() == original.len(),
+            forall|k: int| 0 <= k <= j ==> (#[trigger] a@[k]) == original[k],
+            forall|k: int| j < k <= cnt ==> a@[k] == original[k - 1],
+            forall|k: int| cnt < k < N ==> (#[trigger] a@[k]) == original[k],
+        decreases j - pos,
+    {
+        let prev = arr_get(a, j - 1);
+        arr_set(a, j, prev);
+        j = j - 1;
     }
 }
 
@@ -314,6 +291,16 @@ pub trait NodeLayout: Sized {
     spec fn node_wf(n: Self::Node) -> bool;
 
     // -- exec accessors, each proven to refine the views above --
+    //
+    // Every primitive below is TOTAL: a layout refuses (panics on) a malformed
+    // node or an out-of-range position at runtime — the check `rustc` would
+    // otherwise emit on the array read, spelled once — and the contract is
+    // conditional on the same facts, which the verified tree establishes.
+
+    /// Exec twin of `node_wf` (one compare), so a generic helper can
+    /// re-establish the invariant after its own runtime guard.
+    fn is_node_wf(n: &Self::Node) -> (b: bool)
+        ensures b == Self::node_wf(*n);
 
     fn is_leaf(n: &Self::Node) -> (b: bool)
         ensures b == Self::is_leaf_spec(*n);
@@ -323,26 +310,23 @@ pub trait NodeLayout: Sized {
 
     /// `keys_view()[i]`, read from the packed array.
     fn key(n: &Self::Node, i: usize) -> (k: Self::Word)
-        requires Self::node_wf(*n), i < Self::count_spec(*n),
-        ensures k == Self::keys_view(*n)[i as int];
+        ensures (Self::node_wf(*n)
+            && i < Self::count_spec(*n)) ==> (k == Self::keys_view(*n)[i as int]);
 
     /// The live key prefix `data[0..count]` as one borrowed slice, refining
     /// `keys_view` (production's `&L::data(n)[..count]`). This is what the
     /// tree hands to `SearchKind::find_ge`/`find_gt`, whose contracts speak
     /// about a `&[Word]` slice rather than a node.
     fn keys(n: &Self::Node) -> (s: &[Self::Word])
-        requires Self::node_wf(*n),
-        ensures s@ == Self::keys_view(*n);
+        ensures (Self::node_wf(*n)) ==> (s@ == Self::keys_view(*n));
 
     /// `child_view(i)`, read from the packed array (internal nodes only). `i`
     /// ranges over `0 ..= count` (one more child than separators); `i == count
     /// <= key_cap` may be the `link`-held last child.
     fn child(n: &Self::Node, i: usize) -> (c: Self::ArenaIdx)
-        requires
-            Self::node_wf(*n),
-            !Self::is_leaf_spec(*n),
-            i <= Self::count_spec(*n),
-        ensures c.as_nat() == Self::child_view(*n, i as int);
+        ensures (Self::node_wf(*n)
+            && !Self::is_leaf_spec(*n)
+            && i <= Self::count_spec(*n)) ==> (c.as_nat() == Self::child_view(*n, i as int));
 
     fn link(n: &Self::Node) -> (l: Self::ArenaIdx)
         ensures l.as_nat() == Self::link_view(*n);
@@ -367,17 +351,16 @@ pub trait NodeLayout: Sized {
     /// w)`, `count' == count + 1`, still a leaf, still `node_wf`. Production's
     /// `data_mut(&mut leaf).copy_within(pos..n, pos+1); data_mut[pos] = w`.
     fn leaf_insert_at(n: &mut Self::Node, pos: usize, w: Self::Word)
-        requires
-            Self::node_wf(*old(n)),
-            Self::is_leaf_spec(*old(n)),
-            Self::count_spec(*old(n)) < Self::leaf_cap_spec(),
-            pos <= Self::count_spec(*old(n)),
-        ensures
-            Self::is_leaf_spec(*final(n)),
-            Self::node_wf(*final(n)),
-            Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1,
-            Self::keys_view(*final(n)) == Self::keys_view(*old(n)).insert(pos as int, w),
-            Self::link_view(*final(n)) == Self::link_view(*old(n));
+        ensures (Self::node_wf(*old(n))
+            && Self::is_leaf_spec(*old(n))
+            && Self::count_spec(*old(n)) < Self::leaf_cap_spec()
+            && pos <= Self::count_spec(*old(n))) ==> ({
+            &&& Self::is_leaf_spec(*final(n))
+            &&& Self::node_wf(*final(n))
+            &&& Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1
+            &&& Self::keys_view(*final(n)) == Self::keys_view(*old(n)).insert(pos as int, w)
+            &&& Self::link_view(*final(n)) == Self::link_view(*old(n))
+        });
 
     /// Append `w` to a leaf: `leaf_insert_at(n, count, w)` with the shift gone.
     ///
@@ -394,16 +377,42 @@ pub trait NodeLayout: Sized {
     /// construction. Production pays neither cost — it fills a whole leaf with one
     /// `copy_from_slice` — so this is the primitive that closes that per-key gap.
     fn leaf_push(n: &mut Self::Node, w: Self::Word)
-        requires
-            Self::node_wf(*old(n)),
-            Self::is_leaf_spec(*old(n)),
-            Self::count_spec(*old(n)) < Self::leaf_cap_spec(),
+        ensures (Self::node_wf(*old(n))
+            && Self::is_leaf_spec(*old(n))
+            && Self::count_spec(*old(n)) < Self::leaf_cap_spec()) ==> ({
+            &&& Self::is_leaf_spec(*final(n))
+            &&& Self::node_wf(*final(n))
+            &&& Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1
+            &&& Self::keys_view(*final(n)) == Self::keys_view(*old(n)).push(w)
+            &&& Self::link_view(*final(n)) == Self::link_view(*old(n))
+        });
+
+    /// Fill an empty leaf with the index words of `keys[at .. at + take]` in
+    /// one pass (the bulk loader's leaf write): key-to-word conversion is fused
+    /// into the copy and `leaf_push`'s per-key precondition is checked once per
+    /// leaf. Also collects each key's `id_bound` fact (needs the exec key).
+    /// Total: an unverified caller with a malformed/non-empty leaf or an
+    /// out-of-range window is refused at runtime; the contract is conditional
+    /// on the same facts, which the verified loader establishes.
+    fn leaf_fill_keys<K: crate::opt::DenseId<Index = Self::Word>>(
+        n: &mut Self::Node,
+        keys: &[K],
+        at: usize,
+        take: usize,
+    )
         ensures
-            Self::is_leaf_spec(*final(n)),
-            Self::node_wf(*final(n)),
-            Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1,
-            Self::keys_view(*final(n)) == Self::keys_view(*old(n)).push(w),
-            Self::link_view(*final(n)) == Self::link_view(*old(n));
+            (Self::node_wf(*old(n)) && Self::is_leaf_spec(*old(n))
+                && Self::count_spec(*old(n)) == 0 && take <= Self::leaf_cap_spec()
+                && at + take <= keys@.len()) ==> {
+                &&& Self::is_leaf_spec(*final(n))
+                &&& Self::node_wf(*final(n))
+                &&& Self::count_spec(*final(n)) == take
+                &&& Self::keys_view(*final(n)).len() == take
+                &&& forall|i: int| 0 <= i < take
+                    ==> (#[trigger] Self::keys_view(*final(n))[i]).as_nat() == keys@[at + i].id_nat()
+                &&& forall|i: int| 0 <= i < take ==> #[trigger] keys@[at + i].id_nat() < K::id_bound()
+                &&& Self::link_view(*final(n)) == Self::link_view(*old(n))
+            };
 
     /// The leaf-split median: `ceil(leaf_cap / 2) = (leaf_cap + 1) / 2`. The
     /// left half keeps `split_mid` keys, the right half gets `leaf_cap + 1 -
@@ -422,12 +431,9 @@ pub trait NodeLayout: Sized {
     /// in-place two-case `copy_within` (which a fixed-width array forces but
     /// verification need not mirror).
     fn leaf_split_at(n: &Self::Node, pos: usize, w: Self::Word) -> (res: (Self::Node, Self::Node))
-        requires
-            Self::is_leaf_spec(*n),
-            Self::count_spec(*n) == Self::leaf_cap_spec(),
-            pos <= Self::leaf_cap_spec(),
-        ensures
-            ({
+        ensures (Self::is_leaf_spec(*n)
+            && Self::count_spec(*n) == Self::leaf_cap_spec()
+            && pos <= Self::leaf_cap_spec()) ==> (({
                 let combined = Self::keys_view(*n).insert(pos as int, w);
                 let mid = Self::split_mid_spec();
                 &&& Self::is_leaf_spec(res.0)
@@ -439,7 +445,7 @@ pub trait NodeLayout: Sized {
                 &&& Self::keys_view(res.0) == combined.subrange(0, mid as int)
                 &&& Self::keys_view(res.1) == combined.subrange(mid as int, combined.len() as int)
                 &&& Self::link_view(res.1) == Self::link_view(*n)
-            });
+            }));
 
     /// The internal-split median: `key_cap / 2` (production's `imid =
     /// INTERNAL_KEY_CAP / 2`). A full internal node has `key_cap` separators;
@@ -473,13 +479,10 @@ pub trait NodeLayout: Sized {
         new_sep: Self::Word,
         new_child: Self::ArenaIdx,
     ) -> (res: (Self::Node, Self::Node, Self::Word))
-        requires
-            !Self::is_leaf_spec(*n),
-            Self::node_wf(*n),
-            Self::count_spec(*n) == Self::key_cap_spec(),
-            cp <= Self::key_cap_spec(),
-        ensures
-            ({
+        ensures (!Self::is_leaf_spec(*n)
+            && Self::node_wf(*n)
+            && Self::count_spec(*n) == Self::key_cap_spec()
+            && cp <= Self::key_cap_spec()) ==> (({
                 let cseps = Self::keys_view(*n).insert(cp as int, new_sep);
                 let imid = Self::isplit_mid_spec();
                 let kc = Self::key_cap_spec();
@@ -499,7 +502,7 @@ pub trait NodeLayout: Sized {
                         #[trigger] Self::child_view(res.0, j) == Self::isplit_cchild(*n, cp as int, new_child, j))
                 &&& (forall|j: int| 0 <= j <= (kc - imid) ==>
                         #[trigger] Self::child_view(res.1, j) == Self::isplit_cchild(*n, cp as int, new_child, imid as int + 1 + j))
-            });
+            }));
 
     /// The combined child arena-id at child-position `j` after inserting
     /// `new_child` at position `cp+1` (spec helper for `internal_split_at`).
@@ -554,18 +557,17 @@ pub trait NodeLayout: Sized {
     /// and every *other* child unchanged. The single primitive that owns the
     /// `link`-as-last-child packing wrinkle; the internal insert/split build on it.
     fn set_internal_child(n: &mut Self::Node, i: usize, v: Self::ArenaIdx)
-        requires
-            !Self::is_leaf_spec(*old(n)),
-            Self::node_wf(*old(n)),
-            i <= Self::key_cap_spec(),
-        ensures
-            Self::is_leaf_spec(*final(n)) == Self::is_leaf_spec(*old(n)),
-            Self::node_wf(*final(n)),
-            Self::count_spec(*final(n)) == Self::count_spec(*old(n)),
-            Self::keys_view(*final(n)) == Self::keys_view(*old(n)),
-            Self::child_view(*final(n), i as int) == v.as_nat(),
-            forall|j: int| 0 <= j <= Self::key_cap_spec() && j != i ==>
-                Self::child_view(*final(n), j) == Self::child_view(*old(n), j);
+        ensures (!Self::is_leaf_spec(*old(n))
+            && Self::node_wf(*old(n))
+            && i <= Self::key_cap_spec()) ==> ({
+            &&& Self::is_leaf_spec(*final(n)) == Self::is_leaf_spec(*old(n))
+            &&& Self::node_wf(*final(n))
+            &&& Self::count_spec(*final(n)) == Self::count_spec(*old(n))
+            &&& Self::keys_view(*final(n)) == Self::keys_view(*old(n))
+            &&& Self::child_view(*final(n), i as int) == v.as_nat()
+            &&& forall|j: int| 0 <= j <= Self::key_cap_spec() && j != i ==>
+                Self::child_view(*final(n), j) == Self::child_view(*old(n), j)
+        });
 
     /// Insert separator `w` into an internal node at key-position `pos`,
     /// shifting `[pos..count)` up. The node must have separator room (`count <
@@ -575,18 +577,17 @@ pub trait NodeLayout: Sized {
     /// `leaf_insert_at`; `internal_insert_at` shifts children separately via
     /// `set_internal_child`.
     fn internal_key_insert(n: &mut Self::Node, pos: usize, w: Self::Word)
-        requires
-            !Self::is_leaf_spec(*old(n)),
-            Self::node_wf(*old(n)),
-            Self::count_spec(*old(n)) < Self::key_cap_spec(),
-            pos <= Self::count_spec(*old(n)),
-        ensures
-            Self::is_leaf_spec(*final(n)) == Self::is_leaf_spec(*old(n)),
-            Self::node_wf(*final(n)),
-            Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1,
-            Self::keys_view(*final(n)) == Self::keys_view(*old(n)).insert(pos as int, w),
-            forall|j: int| 0 <= j <= Self::key_cap_spec() ==>
-                Self::child_view(*final(n), j) == Self::child_view(*old(n), j);
+        ensures (!Self::is_leaf_spec(*old(n))
+            && Self::node_wf(*old(n))
+            && Self::count_spec(*old(n)) < Self::key_cap_spec()
+            && pos <= Self::count_spec(*old(n))) ==> ({
+            &&& Self::is_leaf_spec(*final(n)) == Self::is_leaf_spec(*old(n))
+            &&& Self::node_wf(*final(n))
+            &&& Self::count_spec(*final(n)) == Self::count_spec(*old(n)) + 1
+            &&& Self::keys_view(*final(n)) == Self::keys_view(*old(n)).insert(pos as int, w)
+            &&& forall|j: int| 0 <= j <= Self::key_cap_spec() ==>
+                Self::child_view(*final(n), j) == Self::child_view(*old(n), j)
+        });
 
     // -- proof glue --
 
@@ -674,26 +675,26 @@ pub trait NodeLayout: Sized {
 /// a trait method, because heavy default bodies perturb crate-wide spec
 /// pruning.
 pub fn internal_insert_at<L: NodeLayout>(n: &mut L::Node, cp: usize, sep: L::Word, child: L::ArenaIdx)
-    requires
-        !L::is_leaf_spec(*old(n)),
-        L::node_wf(*old(n)),
-        L::count_spec(*old(n)) < L::key_cap_spec(),
-        cp <= L::count_spec(*old(n)),
-    ensures
-        !L::is_leaf_spec(*final(n)),
-        L::node_wf(*final(n)),
-        L::count_spec(*final(n)) == L::count_spec(*old(n)) + 1,
-        L::keys_view(*final(n)) == L::keys_view(*old(n)).insert(cp as int, sep),
-        forall|j: int| 0 <= j <= cp ==> L::child_view(*final(n), j) == L::child_view(*old(n), j),
-        L::child_view(*final(n), cp + 1) == child.as_nat(),
-        forall|j: int| cp + 1 < j <= L::count_spec(*old(n)) + 1 ==>
-            L::child_view(*final(n), j) == L::child_view(*old(n), (j - 1)),
+    ensures (!L::is_leaf_spec(*old(n))
+        && L::node_wf(*old(n))
+        && L::count_spec(*old(n)) < L::key_cap_spec()
+        && cp <= L::count_spec(*old(n))) ==> ({
+        &&& !L::is_leaf_spec(*final(n))
+        &&& L::node_wf(*final(n))
+        &&& L::count_spec(*final(n)) == L::count_spec(*old(n)) + 1
+        &&& L::keys_view(*final(n)) == L::keys_view(*old(n)).insert(cp as int, sep)
+        &&& forall|j: int| 0 <= j <= cp ==> L::child_view(*final(n), j) == L::child_view(*old(n), j)
+        &&& L::child_view(*final(n), cp + 1) == child.as_nat()
+        &&& forall|j: int| cp + 1 < j <= L::count_spec(*old(n)) + 1 ==>
+            L::child_view(*final(n), j) == L::child_view(*old(n), (j - 1))
+    })
 {
     let ghost old_n = *n;
-    crate::guard::check_precondition(
-        !L::is_leaf(n) && L::count(n) < L::key_cap() && cp <= L::count(n),
-        "bplus_layout::internal_insert_at: malformed node or child position past count",
-    );
+    // Total: the guard re-establishes the erased precondition (node_wf through
+    // its exec twin, since `node_wf` is opaque through the generic `L`).
+    if !(L::is_node_wf(n) && !L::is_leaf(n) && L::count(n) < L::key_cap() && cp <= L::count(n)) {
+        crate::guard::refuse("bplus_layout::internal_insert_at: malformed node or child position past count");
+    }
     let cnt = L::count(n);
     let kc = L::key_cap();  // exec key_cap; cnt < kc, so m+1, cp+1 <= kc.
     // Phase A: shift children [cp+1..=cnt] up to [cp+2..=cnt+1], descending.
@@ -872,6 +873,10 @@ macro_rules! gen_layout_u32 {
             open spec fn node_wf(n: $node) -> bool {
                 if n.is_leaf { n.count <= $leaf_cap } else { n.count <= $key_cap }
             }
+            #[inline(always)]
+            fn is_node_wf(n: &$node) -> (b: bool) {
+                if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }
+            }
 
             #[inline(always)]
             fn is_leaf(n: &$node) -> (b: bool) { n.is_leaf }
@@ -887,31 +892,27 @@ macro_rules! gen_layout_u32 {
                 // Runtime guard for UNVERIFIED callers on the erased requires
                 // (provably dead for verified ones): the unchecked read below
                 // leaves the array exactly when this fails.
-                crate::guard::check_precondition(
-                    (if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap })
-                        && i < n.count as usize,
-                    "NodeLayout::key: malformed node or index past count",
-                );
+                if !((if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }) && i < n.count as usize) {
+                    crate::guard::refuse("NodeLayout::key: malformed node or index past count");
+                }
                 arr_get(&n.data, i)
             }
             // `node_wf` bounds `count` by `leaf_cap`/`key_cap`, both `<= data_len`,
             // so the subrange is in bounds.
             #[inline(always)]
             fn keys(n: &$node) -> (s: &[u32]) {
-                crate::guard::check_precondition(
-                    if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap },
-                    "NodeLayout::keys: malformed node",
-                );
+                if !(if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }) {
+                    crate::guard::refuse("NodeLayout::keys: malformed node");
+                }
                 let s = vstd::slice::slice_subrange(n.data.as_slice(), 0, n.count as usize);
                 proof { assert(s@ =~= Self::keys_view(*n)); }
                 s
             }
             #[inline(always)]
             fn child(n: &$node, i: usize) -> (c: u32) {
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize <= $key_cap && i <= n.count as usize,
-                    "NodeLayout::child: malformed node or child index past count",
-                );
+                if !(!n.is_leaf && n.count as usize <= $key_cap && i <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::child: malformed node or child index past count");
+                }
                 if i < $key_cap { arr_get(&n.data, $key_cap + i) } else { n.link }
             }
             #[inline(always)]
@@ -923,10 +924,9 @@ macro_rules! gen_layout_u32 {
 
             #[inline(always)]
             fn leaf_insert_at(n: &mut $node, pos: usize, w: u32) {
-                crate::guard::check_precondition(
-                    n.is_leaf && (n.count as usize) < $leaf_cap && pos <= n.count as usize,
-                    "NodeLayout::leaf_insert_at: malformed node or position past count",
-                );
+                if !(n.is_leaf && (n.count as usize) < $leaf_cap && pos <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::leaf_insert_at: malformed node or position past count");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // one call, length-dispatched: the scalar walk for short tails,
@@ -939,10 +939,9 @@ macro_rules! gen_layout_u32 {
 
             #[inline(always)]
             fn leaf_push(n: &mut $node, w: u32) {
-                crate::guard::check_precondition(
-                    n.is_leaf && (n.count as usize) < $leaf_cap,
-                    "NodeLayout::leaf_push: malformed or full node",
-                );
+                if !(n.is_leaf && (n.count as usize) < $leaf_cap) {
+                    crate::guard::refuse("NodeLayout::leaf_push: malformed or full node");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // No shift and no length dispatch: the hole is already at `cnt`.
@@ -951,16 +950,60 @@ macro_rules! gen_layout_u32 {
                 assert(Self::keys_view(*n) =~= Self::keys_view(old_n).push(w));
             }
 
+            #[inline(always)]
+            fn leaf_fill_keys<K: crate::opt::DenseId<Index = u32>>(
+                n: &mut $node,
+                keys: &[K],
+                at: usize,
+                take: usize,
+            ) {
+                if !(n.is_leaf && n.count == 0 && take <= $leaf_cap
+                    && at <= keys.len() && take <= keys.len() - at)
+                {
+                    crate::guard::refuse(
+                        "NodeLayout::leaf_fill_keys: malformed or non-empty leaf, or window out of range",
+                    );
+                }
+                let ghost old_n = *n;
+                let klen = keys.len();
+                let mut j: usize = 0;
+                while j < take
+                    invariant
+                        j <= take,
+                        take <= $leaf_cap,
+                        keys@.len() == klen,
+                        at + take <= keys@.len(),
+                        n.is_leaf == old_n.is_leaf,
+                        n.count == old_n.count,
+                        n.link == old_n.link,
+                        n._pad == old_n._pad,
+                        forall|i: int| 0 <= i < j
+                            ==> (#[trigger] n.data[i]).as_nat() == keys@[at + i].id_nat(),
+                        forall|i: int| 0 <= i < j ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
+                    decreases take - j,
+                {
+                    let k: K = slice_get(keys, at + j);
+                    proof { k.lemma_id_nat_bounded(); }
+                    let w: u32 = k.to_index();
+                    arr_set(&mut n.data, j, w);
+                    j += 1;
+                }
+                n.count = take as u8;
+                assert forall|i: int| 0 <= i < take
+                    implies (#[trigger] Self::keys_view(*n)[i]).as_nat() == keys@[at + i].id_nat() by {
+                    assert(Self::keys_view(*n)[i] == n.data[i]);
+                }
+            }
+
             open spec fn split_mid_spec() -> nat { (($leaf_cap + 1) / 2) as nat }
             #[inline(always)]
             fn split_mid() -> (m: usize) { ($leaf_cap + 1) / 2 }
 
             #[inline(always)]
             fn leaf_split_at(n: &$node, pos: usize, w: u32) -> (res: ($node, $node)) {
-                crate::guard::check_precondition(
-                    n.is_leaf && n.count as usize == $leaf_cap && pos <= $leaf_cap,
-                    "NodeLayout::leaf_split_at: node is not a full leaf or position out of range",
-                );
+                if !(n.is_leaf && n.count as usize == $leaf_cap && pos <= $leaf_cap) {
+                    crate::guard::refuse("NodeLayout::leaf_split_at: node is not a full leaf or position out of range");
+                }
                 let ghost old_n = *n;
                 let mid: usize = ($leaf_cap + 1) / 2;
                 let rc: usize = $leaf_cap + 1 - mid;
@@ -1033,10 +1076,9 @@ macro_rules! gen_layout_u32 {
             }
             #[inline(always)]
             fn internal_key_insert(n: &mut $node, pos: usize, w: u32) {
-                crate::guard::check_precondition(
-                    !n.is_leaf && (n.count as usize) < $key_cap && pos <= n.count as usize,
-                    "NodeLayout::internal_key_insert: malformed node or position past count",
-                );
+                if !(!n.is_leaf && (n.count as usize) < $key_cap && pos <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::internal_key_insert: malformed node or position past count");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // see `arr_shift_up`: length-dispatched, and its postcondition
@@ -1051,10 +1093,9 @@ macro_rules! gen_layout_u32 {
             }
             #[inline(always)]
             fn set_internal_child(n: &mut $node, i: usize, v: u32) {
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize <= $key_cap && i <= $key_cap,
-                    "NodeLayout::set_internal_child: malformed node or child index out of range",
-                );
+                if !(!n.is_leaf && n.count as usize <= $key_cap && i <= $key_cap) {
+                    crate::guard::refuse("NodeLayout::set_internal_child: malformed node or child index out of range");
+                }
                 let ghost old_n = *n;
                 if i < $key_cap {
                     // i < key_cap and 2*key_cap <= data_len ⟹ key_cap + i in bounds.
@@ -1081,10 +1122,9 @@ macro_rules! gen_layout_u32 {
             fn internal_split_at(n: &$node, cp: usize, new_sep: u32, new_child: u32)
                 -> (res: ($node, $node, u32))
             {
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize == $key_cap && cp <= $key_cap,
-                    "NodeLayout::internal_split_at: node is not a full internal or position out of range",
-                );
+                if !(!n.is_leaf && n.count as usize == $key_cap && cp <= $key_cap) {
+                    crate::guard::refuse("NodeLayout::internal_split_at: node is not a full internal or position out of range");
+                }
                 let imid: usize = $key_cap / 2;
                 let kc: usize = $key_cap;
                 let ghost cseps = Self::keys_view(*n).insert(cp as int, new_sep);
@@ -1327,6 +1367,10 @@ macro_rules! gen_layout_u64 {
             open spec fn node_wf(n: $node) -> bool {
                 if n.is_leaf { n.count <= $leaf_cap } else { n.count <= $key_cap }
             }
+            #[inline(always)]
+            fn is_node_wf(n: &$node) -> (b: bool) {
+                if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }
+            }
 
             #[inline(always)]
             fn is_leaf(n: &$node) -> (b: bool) { n.is_leaf }
@@ -1339,20 +1383,17 @@ macro_rules! gen_layout_u64 {
                 // Runtime guard for UNVERIFIED callers on the erased requires
                 // (provably dead for verified ones): the unchecked read below
                 // leaves the array exactly when this fails.
-                crate::guard::check_precondition(
-                    (if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap })
-                        && i < n.count as usize,
-                    "NodeLayout::key: malformed node or index past count",
-                );
+                if !((if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }) && i < n.count as usize) {
+                    crate::guard::refuse("NodeLayout::key: malformed node or index past count");
+                }
                 arr_get(&n.data, i)
             }
             // In-bounds for the same reason as the u32 `keys` above.
             #[inline(always)]
             fn keys(n: &$node) -> (s: &[u64]) {
-                crate::guard::check_precondition(
-                    if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap },
-                    "NodeLayout::keys: malformed node",
-                );
+                if !(if n.is_leaf { n.count as usize <= $leaf_cap } else { n.count as usize <= $key_cap }) {
+                    crate::guard::refuse("NodeLayout::keys: malformed node");
+                }
                 let s = vstd::slice::slice_subrange(n.data.as_slice(), 0, n.count as usize);
                 proof { assert(s@ =~= Self::keys_view(*n)); }
                 s
@@ -1366,10 +1407,9 @@ macro_rules! gen_layout_u64 {
             // inherited.
             #[inline(always)]
             fn child(n: &$node, i: usize) -> (c: usize) {
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize <= $key_cap && i <= n.count as usize,
-                    "NodeLayout::child: malformed node or child index past count",
-                );
+                if !(!n.is_leaf && n.count as usize <= $key_cap && i <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::child: malformed node or child index past count");
+                }
                 if i < $key_cap {
                     assert($key_cap + i < $data_len);  // 2*key_cap <= data_len
                     let c = arr_get(&n.data, $key_cap + i) as usize;
@@ -1388,10 +1428,9 @@ macro_rules! gen_layout_u64 {
 
             #[inline(always)]
             fn leaf_insert_at(n: &mut $node, pos: usize, w: u64) {
-                crate::guard::check_precondition(
-                    n.is_leaf && (n.count as usize) < $leaf_cap && pos <= n.count as usize,
-                    "NodeLayout::leaf_insert_at: malformed node or position past count",
-                );
+                if !(n.is_leaf && (n.count as usize) < $leaf_cap && pos <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::leaf_insert_at: malformed node or position past count");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // one call, length-dispatched: the scalar walk for short tails,
@@ -1404,10 +1443,9 @@ macro_rules! gen_layout_u64 {
 
             #[inline(always)]
             fn leaf_push(n: &mut $node, w: u64) {
-                crate::guard::check_precondition(
-                    n.is_leaf && (n.count as usize) < $leaf_cap,
-                    "NodeLayout::leaf_push: malformed or full node",
-                );
+                if !(n.is_leaf && (n.count as usize) < $leaf_cap) {
+                    crate::guard::refuse("NodeLayout::leaf_push: malformed or full node");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // No shift and no length dispatch: the hole is already at `cnt`.
@@ -1416,16 +1454,60 @@ macro_rules! gen_layout_u64 {
                 assert(Self::keys_view(*n) =~= Self::keys_view(old_n).push(w));
             }
 
+            #[inline(always)]
+            fn leaf_fill_keys<K: crate::opt::DenseId<Index = u64>>(
+                n: &mut $node,
+                keys: &[K],
+                at: usize,
+                take: usize,
+            ) {
+                if !(n.is_leaf && n.count == 0 && take <= $leaf_cap
+                    && at <= keys.len() && take <= keys.len() - at)
+                {
+                    crate::guard::refuse(
+                        "NodeLayout::leaf_fill_keys: malformed or non-empty leaf, or window out of range",
+                    );
+                }
+                let ghost old_n = *n;
+                let klen = keys.len();
+                let mut j: usize = 0;
+                while j < take
+                    invariant
+                        j <= take,
+                        take <= $leaf_cap,
+                        keys@.len() == klen,
+                        at + take <= keys@.len(),
+                        n.is_leaf == old_n.is_leaf,
+                        n.count == old_n.count,
+                        n.link == old_n.link,
+                        n._pad == old_n._pad,
+                        forall|i: int| 0 <= i < j
+                            ==> (#[trigger] n.data[i]).as_nat() == keys@[at + i].id_nat(),
+                        forall|i: int| 0 <= i < j ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
+                    decreases take - j,
+                {
+                    let k: K = slice_get(keys, at + j);
+                    proof { k.lemma_id_nat_bounded(); }
+                    let w: u64 = k.to_index();
+                    arr_set(&mut n.data, j, w);
+                    j += 1;
+                }
+                n.count = take as u8;
+                assert forall|i: int| 0 <= i < take
+                    implies (#[trigger] Self::keys_view(*n)[i]).as_nat() == keys@[at + i].id_nat() by {
+                    assert(Self::keys_view(*n)[i] == n.data[i]);
+                }
+            }
+
             open spec fn split_mid_spec() -> nat { (($leaf_cap + 1) / 2) as nat }
             #[inline(always)]
             fn split_mid() -> (m: usize) { ($leaf_cap + 1) / 2 }
 
             #[inline(always)]
             fn leaf_split_at(n: &$node, pos: usize, w: u64) -> (res: ($node, $node)) {
-                crate::guard::check_precondition(
-                    n.is_leaf && n.count as usize == $leaf_cap && pos <= $leaf_cap,
-                    "NodeLayout::leaf_split_at: node is not a full leaf or position out of range",
-                );
+                if !(n.is_leaf && n.count as usize == $leaf_cap && pos <= $leaf_cap) {
+                    crate::guard::refuse("NodeLayout::leaf_split_at: node is not a full leaf or position out of range");
+                }
                 let ghost old_n = *n;
                 let mid: usize = ($leaf_cap + 1) / 2;
                 let rc: usize = $leaf_cap + 1 - mid;
@@ -1518,10 +1600,9 @@ macro_rules! gen_layout_u64 {
             }
             #[inline(always)]
             fn internal_key_insert(n: &mut $node, pos: usize, w: u64) {
-                crate::guard::check_precondition(
-                    !n.is_leaf && (n.count as usize) < $key_cap && pos <= n.count as usize,
-                    "NodeLayout::internal_key_insert: malformed node or position past count",
-                );
+                if !(!n.is_leaf && (n.count as usize) < $key_cap && pos <= n.count as usize) {
+                    crate::guard::refuse("NodeLayout::internal_key_insert: malformed node or position past count");
+                }
                 let ghost old_n = *n;
                 let cnt = n.count as usize;
                 // see `arr_shift_up`: length-dispatched, and its postcondition
@@ -1550,10 +1631,9 @@ macro_rules! gen_layout_u64 {
                         Self::child_view(*final(n), j) == Self::child_view(*old(n), j),
             {
                 let ghost old_n = *n;
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize <= $key_cap && i <= $key_cap,
-                    "NodeLayout::set_internal_child: malformed node or child index out of range",
-                );
+                if !(!n.is_leaf && n.count as usize <= $key_cap && i <= $key_cap) {
+                    crate::guard::refuse("NodeLayout::set_internal_child: malformed node or child index out of range");
+                }
                 if i < $key_cap {
                     assert($key_cap + i < $data_len);  // 2*key_cap <= data_len
                     arr_set(&mut n.data, $key_cap + i, v as u64);
@@ -1577,10 +1657,9 @@ macro_rules! gen_layout_u64 {
             fn internal_split_at(n: &$node, cp: usize, new_sep: u64, new_child: usize)
                 -> (res: ($node, $node, u64))
             {
-                crate::guard::check_precondition(
-                    !n.is_leaf && n.count as usize == $key_cap && cp <= $key_cap,
-                    "NodeLayout::internal_split_at: node is not a full internal or position out of range",
-                );
+                if !(!n.is_leaf && n.count as usize == $key_cap && cp <= $key_cap) {
+                    crate::guard::refuse("NodeLayout::internal_split_at: node is not a full internal or position out of range");
+                }
                 let imid: usize = $key_cap / 2;
                 let kc: usize = $key_cap;
                 let ghost cseps = Self::keys_view(*n).insert(cp as int, new_sep);
@@ -1744,9 +1823,12 @@ verus! {
 /// First key of a non-empty node, via the generic trait. Witnesses that the
 /// refinement `ensures` compose: the exec read equals the logical view.
 pub fn first_key<L: NodeLayout>(n: &L::Node) -> (k: L::Word)
-    requires L::node_wf(*n), L::count_spec(*n) > 0,
-    ensures k == L::keys_view(*n)[0],
+    ensures (L::node_wf(*n)
+        && L::count_spec(*n) > 0) ==> (k == L::keys_view(*n)[0])
 {
+    if !(L::is_node_wf(n) && L::count(n) > 0) {
+        crate::guard::refuse("bplus_layout::first_key: malformed or empty node");
+    }
     L::key(n, 0)
 }
 

@@ -33,34 +33,38 @@ use crate::index_like::IndexLike;
 
 verus! {
 
-/// Storage backend for the semi-persistent vector.
+/// Storage backend for the semi-persistent vector — the PUBLIC half of the
+/// store contract: total queries and maintenance operations. The capture
+/// protocol itself (`push`/`get`/`set_raw`/`truncate`, `prepare_mark`,
+/// `capture`, `begin_restore`/`restore_entry`/`restore_overlay`/
+/// `finish_restore`, …) lives on the crate-private supertrait
+/// [`crate::diff_store_ops::DiffStoreOps`]: those operations carry
+/// preconditions that only `Vec`'s own proven invariants can discharge (some
+/// are ghost — "every set flag is named by a diff entry"), so they are sealed
+/// away from the public surface rather than guarded at runtime. Every store
+/// implements both; `DiffStore` stays the one bound consumers name.
 ///
 /// Diff entries are `(T, I)` pairs (old value, index). Methods take exec
 /// slices/`Vec`s; their `@` views are the spec-level `Seq` we reason about.
-pub trait DiffStore<T, I, const TRACK: bool>: Sized
+pub trait DiffStore<T, I, const TRACK: bool>: crate::diff_store_ops::DiffStoreOps<T, I, TRACK> + Sized
 where
     T: Sized + Copy,
     I: IndexLike,
 {
-    // -- ghost views ---------------------------------------------------------
-
-    /// The abstract sequence of stored values. Tag-bit edits in concrete impls
-    /// project out: `data()` is invariant under `set_tag`/`clear_tag` on the
-    /// underlying repr.
-    spec fn data(&self) -> Seq<T>;
-
-    /// Per-slot capture flag for the active frame. Length matches `data()`.
-    spec fn captured(&self) -> Seq<bool>;
-
-    /// Backend-specific well-formedness. Concrete impls strengthen this; the
-    /// universal part is `captured().len() == data().len()`.
-    spec fn wf(&self) -> bool;
 
     /// Universal consequence of `wf`: the capture-flag sequence is exactly
     /// as long as the data sequence. Both backends discharge this trivially.
     proof fn lemma_wf_captured_len(&self)
         requires self.wf(),
         ensures self.captured().len() == self.data().len();
+
+    /// Universal consequence of `wf`: the element count fits the index word,
+    /// so every position is representable in `I`. Each backend's `wf` pins
+    /// it; a composite over an abstract store reaches it through this lemma
+    /// (the frame-pushing `Vec` entry points require it).
+    proof fn lemma_wf_data_len(&self)
+        requires self.wf(),
+        ensures self.data().len() < I::max_nat();
 
     // -- raw read / write API ------------------------------------------------
 
@@ -80,27 +84,20 @@ where
         requires self.wf(),
         ensures n == self.data().len();
 
-    fn get(&self, i: I) -> (v: T)
-        requires
-            self.wf(),
-            i.as_nat() < self.data().len(),
-        ensures v == self.data()[i.as_nat() as int];
-
-    fn push(&mut self, value: T)
-        requires
-            old(self).wf(),
-            old(self).data().len() + 1 < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data().push(value),
-            // Flag maintenance is TRACK-conditional: an untracked store may
-            // skip it wholesale (production parity — its flags are dead).
-            TRACK ==> final(self).captured() == old(self).captured().push(false);
-
     fn pop(&mut self) -> (r: Option<T>)
         requires old(self).wf(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             old(self).data().len() == 0 ==> {
                 &&& r is None
                 &&& final(self).data() == old(self).data()
@@ -113,244 +110,63 @@ where
                 &&& TRACK ==> final(self).captured() == old(self).captured().drop_last()
             };
 
-    fn set_raw(&mut self, i: I, value: T)
-        requires
-            old(self).wf(),
-            i.as_nat() < old(self).data().len(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data().update(i.as_nat() as int, value),
-            // TRACK-conditional for the same reason as `push`/`pop` above, and
-            // it is a performance contract, not just a modelling nicety.
-            // Preserving an inline store's flag across a write costs a read and
-            // a branch (read the old repr's tag, re-set it on the new one);
-            // production spends that only when tracking is on
-            // (`containers/src/diff_store.rs:263`, `let was_captured = TRACK &&
-            // T::tag(...)`). Stating the clause unconditionally forces Verus's
-            // `InlineStore` to pay that work on untracked writes too. Untracked
-            // flags are dead: nothing reads `captured()` when `!TRACK`. The
-            // current machine effect is a Criterion question.
-            TRACK ==> final(self).captured() == old(self).captured();
+    /// Exec twin of `unique_capture_spec`: the sealing and reordering paths
+    /// gate on it at runtime (a chronological column never seals).
+    fn unique_capture(&self) -> (b: bool)
+        ensures b == self.unique_capture_spec();
 
-    fn truncate(&mut self, len: I)
-        requires
-            old(self).wf(),
-            len.as_nat() <= old(self).data().len(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data().subrange(0, len.as_nat() as int),
-            TRACK ==> final(self).captured() == old(self).captured().subrange(0, len.as_nat() as int);
+    fn needs_replayed_indices(&self) -> (b: bool)
+        ensures b == self.needs_replayed_indices_spec();
 
-    /// Mark slot `i` as captured without logging or changing `data`. Used by
-    /// `Vec::push` when a previously-popped marked index is re-added: the
-    /// pop already captured `snap[i]`, so the fresh slot must inherit the
-    /// captured flag to keep first-write-wins (and bound the diff log).
-    fn mark_captured(&mut self, i: I)
-        requires
-            old(self).wf(),
-            i.as_nat() < old(self).data().len(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            TRACK ==> final(self).captured()
-                == old(self).captured().update(i.as_nat() as int, true);
-
-    /// Resize `data` to `len`: truncate if longer, or extend with
-    /// `T::default()` fillers if shorter. Used by `restore` to regrow the
-    /// popped region before the overwrite-only replay. The filler values are
-    /// arbitrary — they are always overwritten by the replay, which is why
-    /// no constraint is placed on `T::default()`. New slots are uncaptured.
-    fn resize_default(&mut self, len: I)
-        where T: core::default::Default
-        requires
-            old(self).wf(),
-            len.as_nat() < I::max_nat(),
-        ensures
-            final(self).wf(),
-            final(self).data().len() == len.as_nat(),
-            // existing prefix preserved
-            forall|j: int| 0 <= j < len.as_nat() && j < old(self).data().len()
-                ==> #[trigger] final(self).data()[j] == old(self).data()[j],
-            final(self).captured().len() == len.as_nat(),  // definitional (padded view at data len)
-            // Flags: shared prefix preserved, grown region clear (both
-            // stores: truncate retires, growth extends with clear tags).
-            TRACK ==> forall|j: int| 0 <= j < len.as_nat()
-                ==> #[trigger] final(self).captured()[j]
-                    == (j < old(self).captured().len() && old(self).captured()[j]);
-
-    // -- capture protocol ----------------------------------------------------
-
-    /// Begin a new frame. Clears the capture flag for all slots in
-    /// `[0, saved_len)`. The `prev_diffs` slice is the diff log of the
-    /// outer (parent) frame, used by `InlineStore` to know which inline
-    /// tags need clearing; `ParallelStore` ignores it.
-    fn prepare_mark(&mut self, saved_len: I, prev_diffs: &[(T, I)])
-        requires
-            old(self).wf(),
-            saved_len.as_nat() <= old(self).data().len(),
-            // Sparse-clear soundness (production's O(diffs) protocol): every
-            // set capture flag is indexed by some entry of `prev_diffs`, so
-            // clearing exactly those slots clears ALL flags. The caller
-            // (`Vec::mark`) holds this from its wf capture-flag bridge —
-            // a flag is only ever set by capture/force_capture, which push
-            // the slot into the diff log in the same step.
-            TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
-                && #[trigger] old(self).captured()[j]
-                ==> exists|k: int| 0 <= k < prev_diffs@.len()
-                        && (#[trigger] prev_diffs@[k]).1.as_nat() == j as nat,
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
-                #[trigger] final(self).captured()[i] == false;
-
-    /// First-write-wins capture. If the slot is in-frame and not yet captured,
-    /// log `(old.data()[i], i)` and flip `captured[i]`.
-    fn capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
-        requires
-            old(self).wf(),
-            i.as_nat() < old(self).data().len(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            // First-write-wins (all TRACK-conditional; an untracked store's
-            // flags are dead and its capture is a no-op — production parity):
-            (TRACK && i.as_nat() < saved_len.as_nat()
-                && !old(self).captured()[i.as_nat() as int])
-                ==> {
-                    &&& final(diff_log)@ == old(diff_log)@.push(
-                            (old(self).data()[i.as_nat() as int], i))
-                    &&& final(self).captured()[i.as_nat() as int] == true
-                    &&& forall|j: int| 0 <= j < final(self).captured().len() && j != i.as_nat()
-                            ==> #[trigger] final(self).captured()[j] == old(self).captured()[j]
-                },
-            // Already captured, out of frame, or untracked: no-op.
-            !(TRACK && i.as_nat() < saved_len.as_nat()
-                && !old(self).captured()[i.as_nat() as int])
-                ==> {
-                    &&& final(diff_log)@ == old(diff_log)@
-                    &&& (TRACK ==> final(self).captured() == old(self).captured())
-                };
-
-    /// Retained unconditional-capture operation. Within-frame: log + set
-    /// captured. Out-of-frame: no-op. `Vec` has no call site; marked pops use
-    /// conditional `capture` to preserve the one-entry-per-index bound.
-    fn force_capture(&mut self, i: I, saved_len: I, diff_log: &mut Vec<(T, I)>)
-        requires
-            old(self).wf(),
-            i.as_nat() < old(self).data().len(),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            (TRACK && i.as_nat() < saved_len.as_nat()) ==> {
-                &&& final(diff_log)@ == old(diff_log)@.push(
-                        (old(self).data()[i.as_nat() as int], i))
-                &&& final(self).captured()[i.as_nat() as int] == true
-                &&& forall|j: int| 0 <= j < final(self).captured().len() && j != i.as_nat()
-                        ==> #[trigger] final(self).captured()[j] == old(self).captured()[j]
-            },
-            !(TRACK && i.as_nat() < saved_len.as_nat()) ==> {
-                &&& final(diff_log)@ == old(diff_log)@
-                &&& (TRACK ==> final(self).captured() == old(self).captured())
-            };
-
-    /// Pre-replay flag reset: clear EVERY capture flag, given that each set
-    /// flag is named by some entry of the about-to-be-replayed slice (the
-    /// caller's wf bridge fact). ParallelStore: one in-place bitmap memset
-    /// (production pays the identical zero inside its finish_restore;
-    /// hoisting it lets `restore_entry` do NO per-entry bit work — measured
-    /// 1.6µs/2048-entry replay). InlineStore: sparse tag-clear over the
-    /// named slots, O(replayed) — the same protocol as its `prepare_mark`.
-    fn begin_restore(&mut self, replayed_diffs: &[(T, I)])
-        requires
-            old(self).wf(),
-            TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
-                && #[trigger] old(self).captured()[j]
-                ==> exists|k: int| 0 <= k < replayed_diffs@.len()
-                        && (#[trigger] replayed_diffs@[k]).1.as_nat() == j as nat,
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
-                ==> !(#[trigger] final(self).captured()[j]);
-
-    /// Rewind a single slot to `old_value`. Within `[0, target_saved_len)`,
-    /// either overwrites the existing slot (`index < data.len()`) or pushes
-    /// (`index == data.len()`); above `target_saved_len`, no-op.
-    ///
-    /// The push case handles the pop+restore cycle: when restore truncates
-    /// then replays diffs, popped slots reappear via `restore_entry`.
-    fn restore_entry(&mut self, index: I, old_value: &T, target_saved_len: I)
-        requires
-            old(self).wf(),
-            index.as_nat() < target_saved_len.as_nat() ==>
-                index.as_nat() <= old(self).data().len(),
-            // If we'd push, the new length must still fit in I.
-            (index.as_nat() < target_saved_len.as_nat()
-                && index.as_nat() == old(self).data().len())
-                ==> old(self).data().len() + 1 < I::max_nat(),
-        ensures
-            final(self).wf(),
-            // In-frame, in-bounds: overwrite.
-            (index.as_nat() < target_saved_len.as_nat()
-                && index.as_nat() < old(self).data().len())
-                ==> final(self).data() ==
-                    old(self).data().update(index.as_nat() as int, *old_value),
-            // In-frame, at end: push.
-            (index.as_nat() < target_saved_len.as_nat()
-                && index.as_nat() == old(self).data().len())
-                ==> final(self).data() == old(self).data().push(*old_value),
-            // Out-of-frame: no-op on data.
-            (index.as_nat() >= target_saved_len.as_nat())
-                ==> final(self).data() == old(self).data(),
-            // Flags decrease-only: a replay write never SETS a flag
-            // (InlineStore writes tag-clear reprs; ParallelStore leaves its
-            // pre-zeroed bitmap untouched). From `begin_restore`'s all-clear
-            // start this keeps every flag clear through the replay — the
-            // sparse set-only `finish_restore` needs exactly that.
-            TRACK ==> forall|j: int| 0 <= j < final(self).captured().len()
-                && #[trigger] final(self).captured()[j]
-                ==> j < old(self).captured().len() && old(self).captured()[j];
-
-    /// Rebuild `captured` from the surviving diff suffix. After restore, a
-    /// slot is captured iff it appears in the parent frame's diff log.
-    /// The all-clear requires (established by the replay loop via
-    /// `restore_entry`'s flag-clearing ensures) is what makes an O(diffs)
-    /// set-only implementation sound — production's protocol.
-    fn finish_restore(&mut self, current_frame_diffs: &[(T, I)], saved_len: I)
-        requires
-            old(self).wf(),
-            saved_len.as_nat() <= old(self).data().len(),
-            // ALL flags clear (begin_restore + flag-free replay establish
-            // this over the full flag range, not just [0, saved_len)).
-            TRACK ==> forall|j: int| 0 <= j < old(self).captured().len()
-                ==> !(#[trigger] old(self).captured()[j]),
-        ensures
-            final(self).wf(),
-            final(self).data() == old(self).data(),
-            // Within `[0, saved_len)`, captured iff some surviving diff entry
-            // points at this index. Above `saved_len`, unspecified (those
-            // slots are about to be truncated by `Vec::restore`).
-            TRACK ==> forall|i: int| 0 <= i < saved_len.as_nat() ==>
-                #[trigger] final(self).captured()[i] == exists|k: int|
-                    0 <= k < current_frame_diffs@.len()
-                        && (#[trigger] current_frame_diffs@[k]).1.as_nat() == i;
+    fn restore_entries_clear_capture(&self) -> (b: bool)
+        ensures b == self.restore_entries_clear_capture_spec();
 
     // -- maintenance ---------------------------------------------------------
+
+
+    /// Restore one cold run: write `values` into the live column starting at
+    /// `base`, clamped to the current length. Overwrite-only: the window
+    /// `[base, base+values.len())` (intersected with `[0, data.len())`) takes
+    /// the run values, every other cell is untouched, and the length and
+    /// capture flags are unchanged (a raw data write; the bitmap is inert).
+    /// Each backend proves this operation: tag-inline re-encodes each cell,
+    /// while raw stores use a checked copy_from_slice.
+    fn restore_run(&mut self, base: I, values: &[T])
+        requires
+            old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
+            final(self).captured() == old(self).captured(),
+            final(self).data().len() == old(self).data().len(),
+            forall|i: int| 0 <= i < final(self).data().len() ==>
+                #[trigger] final(self).data()[i] ==
+                    if base.as_nat() <= i && (i as nat) < base.as_nat() + values@.len() {
+                        values@[i - base.as_nat()]
+                    } else {
+                        old(self).data()[i]
+                    };
 
     fn shrink_if(&mut self, factor: usize, headroom: usize)
         requires old(self).wf(),
         ensures
             final(self).wf(),
+            // Discipline constancy: a store's capture discipline and replay
+            // protocol are chosen at construction and immutable, so every
+            // mutation preserves both. This is what lets the discipline be
+            // an INSTANCE property (runtime-selectable via `DynStore`) while
+            // `Vec`'s proofs still carry discipline facts across calls.
+            final(self).unique_capture_spec() == old(self).unique_capture_spec(),
+            final(self).needs_replayed_indices_spec()
+                == old(self).needs_replayed_indices_spec(),
+            final(self).restore_entries_clear_capture_spec()
+                == old(self).restore_entries_clear_capture_spec(),
             final(self).data() == old(self).data(),
             TRACK ==> final(self).captured() == old(self).captured();
-
-    /// Heap bytes used by the backing storage (diagnostic; no spec content —
-    /// it's a capacity measurement, not part of the semi-persistent contract).
-    /// Default 0 for backends that don't introspect capacity.
-    fn heap_bytes(&self) -> usize {
-        0
-    }
 
     /// Contiguous read access to the raw values, when the backend stores them
     /// contiguously (production parity: `Some` for `ParallelStore`, `None`
@@ -360,6 +176,102 @@ where
     {
         None
     }
+}
+
+/// Definitional broadcasts for the three base stores' constant discipline
+/// answers. The trait's constancy ensures mention `unique_capture_spec` /
+/// `needs_replayed_indices_spec` applications whose open bodies the solver
+/// only unfolds when an occurrence triggers; these pin the constants at every
+/// occurrence. They live here (not in the store modules) so each store module
+/// can `broadcast use` its lemma without a definitional cycle.
+pub broadcast proof fn lemma_inline_discipline<T, I, const TRACK: bool>(
+    s: &crate::inline_store::InlineStore<T, I>,
+)
+where
+    T: crate::tagged::Tagged,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::unique_capture_spec(s) == true,
+        #[trigger] <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == true,
+        #[trigger] <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == true,
+{
+}
+
+pub broadcast proof fn lemma_parallel_discipline<T, I, const TRACK: bool>(
+    s: &crate::parallel_store::ParallelStore<T, I>,
+)
+where
+    T: Sized + Copy,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::unique_capture_spec(s) == true,
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == false,
+        #[trigger] <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == false,
+{
+}
+
+pub broadcast proof fn lemma_trail_discipline<T, I, const TRACK: bool>(
+    s: &crate::trail_store::TrailStore<T, I>,
+)
+where
+    T: Sized + Copy,
+    I: crate::index_like::IndexLike,
+    ensures
+        #[trigger] <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::unique_capture_spec(s) == false,
+        #[trigger] <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::needs_replayed_indices_spec(s) == false,
+        #[trigger] <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>
+            ::restore_entries_clear_capture_spec(s) == false,
+{
+}
+
+/// Definitional broadcast for `DynStore`'s delegated spec views: pins each
+/// view to its variant's, so a caller-supplied fact phrased over the enum
+/// reaches the inner store's precondition (and back) in every proof context
+/// that mentions the application. Lives here for the same no-cycle reason as
+/// the discipline lemmas above.
+pub broadcast proof fn lemma_dyn_views<T, I, const TRACK: bool>(
+    s: &crate::dyn_store::DynStore<T, I>,
+)
+where
+    T: crate::tagged::Tagged,
+    I: crate::index_like::IndexLike,
+    ensures
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::captured(inner),
+            },
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::data(inner),
+            },
+        (#[trigger] <crate::dyn_store::DynStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(s))
+            == match s {
+                crate::dyn_store::DynStore::Inline(inner) =>
+                    <crate::inline_store::InlineStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(inner),
+                crate::dyn_store::DynStore::Parallel(inner) =>
+                    <crate::parallel_store::ParallelStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(inner),
+                crate::dyn_store::DynStore::Trail(inner) =>
+                    <crate::trail_store::TrailStore<T, I> as crate::diff_store_ops::DiffStoreOps<T, I, TRACK>>::wf(inner),
+            },
+{
 }
 
 } // verus!

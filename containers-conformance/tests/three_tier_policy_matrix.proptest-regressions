@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to tape = [Mark, DuplicateBurst { at: 0, value: 100, count: 4 }, Mark, Mark, Pop, Push(900), Set { at: 65535, value: 901 }, SetPolicy(4), ApplyPolicy, ApplyAdaptive(0), FlushTrail, CompressHot, RestoreLive { which: 0 }, RetryLastRestore, Mark, Set { at: 1, value: 700 }, MarkAdaptive(2), DuplicateBurst { at: 65535, value: 800, count: 3 }, Mark, DeepUnwind, Push(0), Push(0), Push(0), Push(0), Push(0), Push(0), Push(0), Set { at: 0, value: 7971 }]
+cc ba9d0af82868d4accb1288c150d360c24c458d78e405a214c4942df3853fa736 # shrinks to tape = [Mark, DuplicateBurst { at: 0, value: 100, count: 4 }, Mark, Mark, Pop, Push(900), Set { at: 65535, value: 901 }, SetPolicy(4), ApplyPolicy, ApplyAdaptive(0), FlushTrail, CompressHot, RestoreLive { which: 0 }, RetryLastRestore, Mark, Set { at: 1, value: 700 }, MarkAdaptive(2), DuplicateBurst { at: 65535, value: 800, count: 3 }, Mark, DeepUnwind, Push(0), Push(0), Push(0), Mark, Push(0), Push(0), Push(0), RestoreLive { which: 0 }]

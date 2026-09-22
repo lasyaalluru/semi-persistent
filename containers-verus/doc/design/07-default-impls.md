@@ -27,7 +27,7 @@ general vector can regrow.
 
 ## 1. Filler soundness: a default is never observable
 
-The headline restore theorem is `view() == snapshots[token.frame_idx]`. A
+The headline restore theorem is `view() == snapshots[token.depth]`. A
 filler written by `resize_default` lives at a position that the backward replay
 then **overwrites** with the captured diff value (coverage guarantees every
 regrown cell has a diff, `01-verification-design.md` §8). Therefore:

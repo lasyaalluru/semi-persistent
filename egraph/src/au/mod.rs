@@ -47,6 +47,7 @@ pub mod estimates;
 pub mod exact;
 mod exact_fixed;
 pub mod exact_memo;
+pub(crate) mod group_members;
 pub mod mcgs;
 pub mod pretty;
 pub mod results;
@@ -235,3 +236,15 @@ impl core::fmt::Display for AuError {
 }
 
 impl std::error::Error for AuError {}
+
+/// A closure as an [`SpMap::try_intern_with`](crate::containers::SpMap::try_intern_with)
+/// producer. The map takes a [`Produce`](crate::containers::Produce) rather than a
+/// bare closure so that its operation stays total; this crate is not verified, so
+/// the adapter is one line and carries no obligation.
+pub(crate) struct Lazy<F>(pub(crate) F);
+
+impl<V, F: FnOnce() -> V> crate::containers::Produce<V> for Lazy<F> {
+    fn produce(self) -> V {
+        (self.0)()
+    }
+}

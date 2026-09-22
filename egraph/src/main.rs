@@ -301,6 +301,7 @@ fn run<Cfg, L, M, const PROOFS: bool>(
     M: semi_persistent_egraph::lit_model::LitModel<Value = L>,
     semi_persistent_egraph::canon::MSetCanon:
         semi_persistent_egraph::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: semi_persistent_egraph::config::StorePolicy<Cfg, true>,
 {
     if opts.count_match_steps {
         semi_persistent_egraph::ematch::set_match_step_counting(true);

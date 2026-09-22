@@ -25,6 +25,7 @@
 use containers_conformance::Rng;
 use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
+use verus::group::ForkHistory;
 
 // ---------------------------------------------------------------------------
 // Vec differential: production VecI/VecP vs verus Vec<_, _, InlineStore/
@@ -34,7 +35,7 @@ use semi_persistent_containers_verus as verus;
 fn vec_trace_inline(seed: u64, steps: usize) {
     type VInline = verus::vec::Vec<u32, u32, verus::inline_store::InlineStore<u32, u32>, true>;
     let mut p: prod::VecI<u32, u32, true> = prod::VecI::new();
-    let mut v: VInline = VInline::new();
+    let mut v: ForkHistory<VInline> = ForkHistory::new(VInline::new());
 
     let mut rng = Rng::new(seed);
     // (prod token, verus token) pairs; restore-to-ancestor invalidates suffix.
@@ -77,7 +78,7 @@ fn vec_trace_inline(seed: u64, steps: usize) {
                 }
                 let tp = p.mark(prod::ShrinkPolicy::Never);
                 let tv = v
-                    .try_mark(verus::vec::ShrinkPolicy::Never)
+                    .mark(verus::vec::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 marks.push((tp, tv));
             }
@@ -88,7 +89,10 @@ fn vec_trace_inline(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
@@ -120,7 +124,7 @@ fn vec_trace_parallel(seed: u64, steps: usize) {
     type VParallel =
         verus::vec::Vec<u32, u32, verus::parallel_store::ParallelStore<u32, u32>, true>;
     let mut p: prod::VecP<u32, u32, true> = prod::VecP::new();
-    let mut v: VParallel = VParallel::new();
+    let mut v: ForkHistory<VParallel> = ForkHistory::new(VParallel::new());
 
     let mut rng = Rng::new(seed);
     let mut marks: Vec<(prod::VecToken, verus::vec::VecToken)> = Vec::new();
@@ -160,7 +164,7 @@ fn vec_trace_parallel(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.try_mark(verus::vec::ShrinkPolicy::Never)
+                    v.mark(verus::vec::ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 ));
             }
@@ -171,7 +175,10 @@ fn vec_trace_parallel(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
@@ -196,8 +203,8 @@ fn differential_vec_parallel() {
 
 fn aov_trace(seed: u64, steps: usize) {
     let mut p: prod::AppendOnlyVec<u32, usize, true> = prod::AppendOnlyVec::new();
-    let mut v: verus::append_only_vec::AppendOnlyVec<u32, usize, true> =
-        verus::append_only_vec::AppendOnlyVec::new();
+    let mut v: ForkHistory<verus::append_only_vec::AppendOnlyVec<u32, usize, true>> =
+        ForkHistory::new(verus::append_only_vec::AppendOnlyVec::new());
 
     let mut rng = Rng::new(seed);
     let mut marks: Vec<(prod::VecToken, verus::vec::VecToken)> = Vec::new();
@@ -223,7 +230,7 @@ fn aov_trace(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.try_mark(verus::vec::ShrinkPolicy::Never)
+                    v.mark(verus::vec::ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 ));
             }
@@ -234,7 +241,10 @@ fn aov_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
             }
         }
@@ -261,10 +271,11 @@ fn differential_append_only_vec() {
 
 fn map_trace(seed: u64, steps: usize) {
     let mut p: prod::Map<u32, u32, usize, true> = prod::Map::new();
-    let mut v: verus::map::SpMap<u32, u32, usize, true> = verus::map::SpMap::new();
+    let mut v: ForkHistory<verus::map::SpMap<u32, u32, usize, true>> =
+        ForkHistory::new(verus::map::SpMap::new());
 
     let mut rng = Rng::new(seed);
-    let mut marks: Vec<(prod::MapToken, verus::map::MapToken)> = Vec::new();
+    let mut marks: Vec<(prod::MapToken, verus::history::GroupToken)> = Vec::new();
 
     for step in 0..steps {
         match rng.below(100) {
@@ -301,7 +312,7 @@ fn map_trace(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.try_mark(verus::vec::ShrinkPolicy::Never)
+                    v.mark(verus::vec::ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 ));
             }
@@ -312,7 +323,10 @@ fn map_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
             }
         }
@@ -347,15 +361,17 @@ fn bplus_trace(seed: u64, steps: usize) {
 
     let mut p: prod::BPlusTreeSet<DiffId, prod::Layout64U32, prod::BinarySearch, true> =
         prod::BPlusTreeSet::new();
-    let mut v: verus::bplus::BPlusTreeSet<
-        DenseId31,
-        verus::bplus_layout::Layout64U32,
-        verus::bplus_search::BinarySearch,
-        true,
-    > = verus::bplus::BPlusTreeSet::new();
+    let mut v: ForkHistory<
+        verus::bplus::BPlusTreeSet<
+            DenseId31,
+            verus::bplus_layout::Layout64U32,
+            verus::bplus_search::BinarySearch,
+            true,
+        >,
+    > = ForkHistory::new(verus::bplus::BPlusTreeSet::new());
 
     let mut rng = Rng::new(seed);
-    let mut marks: Vec<(prod::BPlusToken, verus::bplus::BPlusToken)> = Vec::new();
+    let mut marks: Vec<(prod::BPlusToken, verus::history::GroupToken)> = Vec::new();
 
     for step in 0..steps {
         match rng.below(100) {
@@ -381,7 +397,8 @@ fn bplus_trace(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.mark(verus::vec::ShrinkPolicy::Never),
+                    v.mark(verus::vec::ShrinkPolicy::Never)
+                        .expect("mark: depth bounded by this harness"),
                 ));
             }
             _ => {
@@ -392,6 +409,9 @@ fn bplus_trace(seed: u64, steps: usize) {
                 let (tp, tv) = marks[idx].clone();
                 p.restore(tp);
                 v.restore(tv);
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
             }
         }
@@ -438,15 +458,17 @@ fn bplus_ascending_trace(seed: u64, steps: usize) {
 
     let mut p: prod::BPlusTreeSet<DiffId, prod::Layout64U32, prod::BinarySearch, true> =
         prod::BPlusTreeSet::new();
-    let mut v: verus::bplus::BPlusTreeSet<
-        DenseId31,
-        verus::bplus_layout::Layout64U32,
-        verus::bplus_search::BinarySearch,
-        true,
-    > = verus::bplus::BPlusTreeSet::new();
+    let mut v: ForkHistory<
+        verus::bplus::BPlusTreeSet<
+            DenseId31,
+            verus::bplus_layout::Layout64U32,
+            verus::bplus_search::BinarySearch,
+            true,
+        >,
+    > = ForkHistory::new(verus::bplus::BPlusTreeSet::new());
 
     let mut rng = Rng::new(seed);
-    let mut marks: Vec<(prod::BPlusToken, verus::bplus::BPlusToken)> = Vec::new();
+    let mut marks: Vec<(prod::BPlusToken, verus::history::GroupToken)> = Vec::new();
     // The ascending cursor. `restore` rolls the trees back but not this counter,
     // so post-restore keys are still ascending w.r.t. the *rolled-back* tree —
     // exactly the shape that catches a `last_leaf` not restored with the arena.
@@ -468,7 +490,8 @@ fn bplus_ascending_trace(seed: u64, steps: usize) {
                 if marks.len() < 8 {
                     marks.push((
                         p.mark(prod::ShrinkPolicy::Never),
-                        v.mark(verus::vec::ShrinkPolicy::Never),
+                        v.mark(verus::vec::ShrinkPolicy::Never)
+                            .expect("mark: depth bounded by this harness"),
                     ));
                 }
                 continue;
@@ -479,6 +502,9 @@ fn bplus_ascending_trace(seed: u64, steps: usize) {
                     let (tp, tv) = marks[idx].clone();
                     p.restore(tp);
                     v.restore(tv);
+                    // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                    assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                    assert!(v.pop_scope(), "pop: an open scope");
                     marks.truncate(idx);
                     assert_eq!(p.len(), v.len(), "step {step}: len diverged after restore");
                 }
@@ -628,10 +654,11 @@ fn differential_bplus_from_sorted_batched() {
 
 fn map_string_trace(seed: u64, steps: usize) {
     let mut p: prod::Map<String, u32, usize, true> = prod::Map::new();
-    let mut v: verus::map::SpMap<String, u32, usize, true> = verus::map::SpMap::new();
+    let mut v: ForkHistory<verus::map::SpMap<String, u32, usize, true>> =
+        ForkHistory::new(verus::map::SpMap::new());
 
     let mut rng = Rng::new(seed);
-    let mut marks: Vec<(prod::MapToken, verus::map::MapToken)> = Vec::new();
+    let mut marks: Vec<(prod::MapToken, verus::history::GroupToken)> = Vec::new();
 
     for step in 0..steps {
         match rng.below(100) {
@@ -658,7 +685,7 @@ fn map_string_trace(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.try_mark(verus::vec::ShrinkPolicy::Never)
+                    v.mark(verus::vec::ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                 ));
             }
@@ -669,7 +696,10 @@ fn map_string_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
             }
         }
@@ -698,20 +728,16 @@ fn sparse_set_trace(seed: u64, steps: usize) {
     use prod::IndexLike as ProdIndexLike;
 
     let mut p = prod::SparseSet::<u32, u32, prod::ParallelStore<u32, u32>, true>::new();
-    let mut v = verus::sparse_set::SparseSet::<
+    let mut v = ForkHistory::new(verus::sparse_set::SparseSet::<
         u32,
         u32,
         verus::parallel_store::ParallelStore<u32, u32>,
         true,
-    >::new();
+    >::new());
 
     let mut rng = Rng::new(seed);
     let mut live_ids: Vec<u32> = Vec::new();
-    let mut marks: Vec<(
-        prod::SparseSetToken,
-        verus::sparse_set::SparseSetToken,
-        Vec<u32>,
-    )> = Vec::new();
+    let mut marks: Vec<(prod::SparseSetToken, verus::history::GroupToken, Vec<u32>)> = Vec::new();
 
     for step in 0..steps {
         match rng.below(100) {
@@ -750,7 +776,7 @@ fn sparse_set_trace(seed: u64, steps: usize) {
                 }
                 marks.push((
                     p.mark(prod::ShrinkPolicy::Never),
-                    v.try_mark(verus::vec::ShrinkPolicy::Never)
+                    v.mark(verus::vec::ShrinkPolicy::Never)
                         .expect("mark: depth bounded by this harness"),
                     live_ids.clone(),
                 ));
@@ -763,6 +789,9 @@ fn sparse_set_trace(seed: u64, steps: usize) {
                 let (tp, tv, snap_ids) = marks[idx].clone();
                 p.restore(tp);
                 v.restore(tv);
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 live_ids = snap_ids;
                 marks.truncate(idx);
             }
@@ -812,7 +841,7 @@ fn bytes_trace(seed: u64, steps: usize) {
     type VParallel =
         verus::vec::Vec<u64, u32, verus::parallel_store::ParallelStore<u64, u32>, true>;
     let mut p: prod::VecP<u64, u32, true> = prod::VecP::new();
-    let mut v: VParallel = VParallel::new();
+    let mut v: ForkHistory<VParallel> = ForkHistory::new(VParallel::new());
 
     let mut rng = Rng::new(seed);
     let mut marks: Vec<(prod::VecToken, verus::vec::VecToken)> = Vec::new();
@@ -846,7 +875,7 @@ fn bytes_trace(seed: u64, steps: usize) {
                 }
                 let tp = p.mark(prod::ShrinkPolicy::Never);
                 let tv = v
-                    .try_mark(verus::vec::ShrinkPolicy::Never)
+                    .mark(verus::vec::ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
                 marks.push((tp, tv));
             }
@@ -857,18 +886,26 @@ fn bytes_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore: own token");
+                assert!(v.restore(tv), "restore: own token");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
                 len = p.len() as usize;
             }
         }
 
-        // Tracking bytes agree exactly (same capacity-based formula over
-        // identically-laid-out element types and identical growth histories).
+        // Diff-stack cost agrees exactly (identical diff-log growth histories).
+        // Fork-history bytes are NO LONGER compared: verus reclaims its fork
+        // history to O(max depth) generation stamps, while prod keeps the
+        // O(lifetime-restores) `origins` Vec — an intentional divergence (the leak
+        // fix, doc 10), so `tracking_bytes` (which includes fork history) need not
+        // match. The diff-log length is the compression-relevant retained cost and
+        // still matches.
         assert_eq!(
-            p.tracking_bytes(),
-            v.tracking_bytes(),
-            "step {step}: tracking_bytes diverged"
+            p.diff_log_len(),
+            v.diff_log_len(),
+            "step {step}: diff_log_len diverged"
         );
 
         // total_bytes formula checks (see the header comment for why exact
@@ -922,8 +959,8 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
 
     const N: usize = 4_000;
     let mut p = pring::build::<true>(N);
-    let mut v: verus::CircularList<verus::Opt<VClassKey>, VNodeId, true> =
-        verus::CircularList::new();
+    let mut v: ForkHistory<verus::CircularList<verus::Opt<VClassKey>, VNodeId, true>> =
+        ForkHistory::new(verus::CircularList::new());
     for i in 0..N {
         v.try_add_singleton(verus::Opt::some(VClassKey::from_usize(i)))
             .expect("within id space");
@@ -941,9 +978,9 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
     // Ring membership is not tracked here (the merge *result* is differential-
     // tested elsewhere); this trace is about allocation, so it only needs the
     // operation sequences to be identical on both sides.
-    let mut marks: Vec<(prod::VecToken, verus::circular_list::CircularListToken)> = Vec::new();
+    let mut marks: Vec<(prod::VecToken, verus::history::GroupToken)> = Vec::new();
 
-    for step in 0..steps {
+    for _step in 0..steps {
         match rng.below(100) {
             // Merge two distinct nodes. Splicing already-merged nodes is fine
             // (it splits, which is the same write pattern), so no bookkeeping is
@@ -976,7 +1013,7 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
                     continue;
                 }
                 let tp = p.mark(prod::ShrinkPolicy::Never);
-                let tv = v.try_mark(verus::vec::ShrinkPolicy::Never).expect("mark");
+                let tv = v.mark(verus::vec::ShrinkPolicy::Never).expect("mark");
                 marks.push((tp, tv));
             }
             _ => {
@@ -986,22 +1023,25 @@ fn class_ring_bytes_trace(seed: u64, steps: usize) {
                 let idx = rng.below(marks.len() as u64) as usize;
                 let (tp, tv) = marks[idx];
                 p.restore(tp);
-                v.try_restore(tv).expect("restore");
+                assert!(v.restore(tv), "restore");
+                // Semantics B keeps the checkpoint open; legacy pops it. Pop for parity.
+                assert!(v.is_valid(tv), "restored checkpoint stays valid (B)");
+                assert!(v.pop_scope(), "pop: an open scope");
                 marks.truncate(idx);
             }
         }
 
-        // THE claim: identical retained-history cost at every step. Exact
-        // equality is right here for the same reason as `bytes_trace` — both
-        // sides push identical sequences into std::Vecs of identically-sized
-        // elements ((cell, u32) diff entries, {saved_len: u32, diff_start:
-        // usize} frames, (u32, u32) fork origins) and std::Vec's growth is
-        // deterministic.
-        assert_eq!(
-            p.tracking_bytes(),
-            v.tracking_bytes(),
-            "seed {seed} step {step}: ring tracking_bytes diverged"
-        );
+        // Fork-inclusive tracking_bytes parity is retired here BY DESIGN: verus
+        // reclaims its fork history to O(max depth) generation stamps while prod
+        // keeps the O(lifetime-restores) `origins` Vec (the leak fix, doc 10), so
+        // the ring's `tracking_bytes` (which forwards to the entries vec, forks
+        // included) diverges after restores — the intended win. The ring exposes
+        // no forks-excluded byte accessor and prod cannot be changed here, so this
+        // pure fork-allocation microtest keeps only its pre-mark parity (asserted
+        // above) and now serves as a no-panic operation trace. The diff-stack byte
+        // parity (the compression-relevant retained cost) is covered by
+        // `differential_bytes` via `diff_log_len`.
+        let _ = v.tracking_bytes();
     }
 
     // Whole-container footprint: same two-word cell and capacity growth history,

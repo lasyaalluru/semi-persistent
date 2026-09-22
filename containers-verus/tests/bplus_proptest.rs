@@ -1032,7 +1032,7 @@ fn sorted_keys_tracked(t: &TrackedTree) -> Vec<u32> {
 #[test]
 fn tree_mark_restore_rollback() {
     for seed in 0..8u64 {
-        let mut t = TrackedTree::new();
+        let mut t = semi_persistent_containers_verus::group::ForkHistory::new(TrackedTree::new());
         let mut oracle: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let keys = arbitrary_keys(400, seed ^ 0xBEEF);
         // seed an initial tree.
@@ -1042,7 +1042,9 @@ fn tree_mark_restore_rollback() {
         }
 
         // mark, snapshot the oracle.
-        let token = t.mark(ShrinkPolicy::Never);
+        let token = t
+            .mark(ShrinkPolicy::Never)
+            .expect("compat: depth in bounds");
         let mut snap: Vec<u32> = oracle.iter().copied().collect();
         snap.sort_unstable();
 
@@ -1052,7 +1054,7 @@ fn tree_mark_restore_rollback() {
         }
 
         // restore: the ghost tree arg is erased, so assume_new().
-        t.restore(token); // token-only signature
+        assert!(t.restore(token), "compat: own live token");
 
         // the restored tree enumerates exactly the marked snapshot, in order.
         let got = sorted_keys_tracked(&t);

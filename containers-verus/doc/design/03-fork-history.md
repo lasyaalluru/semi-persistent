@@ -1,5 +1,17 @@
 # Fork History / Branch-Cut Safety
 
+> **Status (2026-09-18):** historical design. The shipped token is
+> `history::GroupToken { history: ContainerId, generation: u64, depth: u32 }`
+> (`VecToken` survives only as an alias), minted and validated by exactly one
+> `History`, which is **provided from outside** the container: a group of one for
+> a standalone column, one for a whole synchronized member set. No container owns
+> a manager or has a token API of its own any more (§6, and doc 10 for the
+> shipped shape). `frame_idx` below is today's `depth`; the branch model
+> described here was replaced by generation stamps (doc 10, "Shipped design").
+> The restore rule is doc 08 §1: semantics B — a restored token stays valid and
+> the tokens above it die.
+
+
 Branch-cut safety is the second correctness property of the semi-persistent
 containers (the first is the reconstruction theorem of Chapter 1). It governs
 *which tokens `restore` will accept*: a token naming a state that has been
@@ -130,13 +142,20 @@ Proved in `fork_history.rs`:
    `lemma_fork_valid_current_branch` remain as convenient specializations.
 3. **`fh_wf` maintenance.** `new` establishes it; `fork` maintains it.
 
-Wiring into `Vec`: `forks: ForkHistory` and `id: ContainerId` fields;
-`VecToken` carries the four fields; `mark` stamps them; `restore` validates the
-full restorable predicate and calls `forks.fork(token, frames.len())` at the
-end; `wf` carries `fh_wf`. Because `fork` mutates only the `ForkHistory` field,
-the reconstruction proof of Chapter 1 is untouched. Public
-`is_valid_token(t)` checks tracking, container identity, frame liveness,
-counter headroom, and `forks.is_valid(...)`.
+How this was wired into `Vec` while the container owned its own history: a
+`forks: ForkHistory` field and an `id: ContainerId`, a token carrying the four
+fields, `mark` stamping them, `restore` validating the restorable predicate and
+recording the branch cut, and `wf` carrying `fh_wf`. Since the cut mutated only
+the history field, Chapter 1's reconstruction proof was untouched.
+
+**That wiring is gone (2026-09-18).** The history is external: a container has
+no token type, no `mark`/`restore`, no validity query and no embedded
+genealogy, and its whole versioning surface is the structural frame protocol.
+One `History`, held by a `group::ForkHistory<M>` or by a consumer directly,
+mints and validates tokens for the whole member set. The model in this chapter
+is still the model — `GenStamps`, the depth, the branch cut — but it lives in
+exactly one place. Read [doc 10](10-shared-fork-history.md) for the shipped
+shape and its contracts.
 
 ## 5. Design decisions
 
@@ -148,16 +167,14 @@ would buy nothing for the SMT solver. A `u32` branch-id overflow at 4 G forks is
 bounded in `fork`'s precondition (`origins.len() + 1 <= u32::MAX`) rather than
 ghosted away, mirroring the `saved_len` treatment elsewhere.
 
-`origins` grows by one entry per `restore` and is never reclaimed, so
-`origins.len()` is the *lifetime* restore count and this `u32` ceiling is the
-binding mark/restore limit (~4.29e9, versus `depth`, which falls back on
-restore and so only caps concurrent nesting). The verified `frame_idx` is a
-`usize`; the reference implementation's `frame_index` is `u32`. A verified caller proves
-the bound; for an unverified one, `restore` carries a runtime guard
-(`check_precondition`, [Ch. 2 §2.5](02-trust-boundary.md)) that traps rather
-than letting the `as u32` cast silently wrap. The headroom is queryable at
-runtime: `restores_remaining()` returns `u32::MAX - origins.len()` (saturating),
-so a caller can check before it runs out.
+That `origins` vector is history: the shipped `GenStamps` truncates (see §"Shipped
+design" in [doc 10](10-shared-fork-history.md)), so a cut is one write and memory
+is O(deepest depth ever reached) rather than one entry per restore for the
+process's lifetime. The generation counter only grows, and it is the binding
+mark/restore limit; `depth` falls back on restore and so caps concurrent nesting
+only. A verified caller proves the bound; for an unverified one the runtime guard
+(`check_precondition`, [Ch. 2 §2.5](02-trust-boundary.md)) traps rather than
+letting a cast silently wrap.
 
 **`depth` and `frame_idx` stay separate, with no equating wf clause.** They
 are numerically equal at `mark` time but feed different axes of the contract:
@@ -168,16 +185,63 @@ predicate. Keeping `frame_idx < frames.len()` (a structural precondition) and
 validity (a separate precondition) independent is what keeps the reconstruction
 theorem orthogonal to fork history.
 
-**`ContainerId` is modeled minimally.** The current encoding is `external_body`
-with a `spec id(): nat` and an exec `eq` reflecting id equality. The container
-check is not on the correctness-critical path (it only rejects cross-container
-misuse, a caller error), so genuine end-to-end distinctness is not proved. It
+**`ContainerId` is modeled minimally.** It is a `u64` payload with a
+`spec id(): nat` that reads it, and an exec `eq` reflecting id equality —
+transparent inside the crate and opaque to consumers, so both the projection and
+the equality are proved (2026-09-18); only the atomic mint stays trusted. The
+container check is not on the correctness-critical path (it only rejects
+cross-container misuse, a caller error), so genuine end-to-end distinctness is
+not proved. It
 *could* be: a `tracked` monotone ghost counter threaded as the "next id" source
 (advanced on each `new`, ensuring `fresh_id` exceeds all prior) expresses a
 static integer generator in Verus without a global mutable static. That upgrade
 is available if cross-container distinctness is ever wanted as a proved rather
 than trusted property. See [Chapter 2](02-trust-boundary.md) for the trust
 boundary `ContainerId` sits in.
+
+## 6. Ownership inversion: the history is provided from outside (shipped 2026-09-18)
+
+The layered design above left each `Vec` owning its own `GenStamps` and
+`ContainerId`, with a synchronized group adding a shared `History` on top — so
+genealogy state was duplicated per member and two authorities could advance a
+depth. The inversion decided on 2026-09-08 fixed that by having the history own
+its members. What shipped inverts it once more, and further: the history is
+**provided from outside**, and a container is never its own authority.
+
+`group::ForkHistory<M: Member>` owns one `History` and exactly one typed member.
+A container implements `Member` — a structural protocol with no tokens in it
+(`push_frame`, `reset_frame`, `restore_frame`, `pop_frame`, `depth_exec`, plus
+the spec side `wf`/`depth_spec`/`can_push`/`model`/`archive`) — and the group
+owns every token operation: `mark`, `restore`, `restore_and_pop`, `pop_scope`,
+`mint_pushed`, `is_valid`, `depth`. A standalone container is a group of one,
+`ForkHistory::new(Vec::new())`. `Pair<A, B>` composes two members and nests, so
+a consumer with several columns either nests pairs or writes one borrowed
+forwarding view and implements `Member` on it.
+
+What the decided-but-superseded design got right, and what changed:
+
+- **Typed, not `dyn`.** The 2026-09-08 plan used `Vec<Box<dyn SyncMember>>`, and
+  that version shipped first and worked. It is deleted: a `dyn` group cannot
+  state a member's model in its contract, so the lockstep theorem could only be
+  stated per member rather than once. The typed group states it once, on
+  `History::{mark,restore,restore_and_pop,pop}_member` over a borrowed `&mut M`,
+  and every member type discharges it through `Member`'s contract.
+- **`mark` and `restore` are still one write plus a fan-out.** The genealogy is
+  touched only outside the fan-out, exactly as planned: `mark` mints once and
+  pushes a frame on the member, `restore` validates once, resets the member and
+  records the cut once.
+- **Disjoint borrows still license the parallel path.** Each member owns its
+  store, diff log and frame stack, so a wide member's fan-out can run on a
+  `rayon::scope`; the e-graph's forwarding view does exactly that above a
+  threshold, and it is glue in an unverified crate rather than a trusted twin of
+  a verified function.
+
+Misuse is refused rather than undefined: a frame pushed or popped on a member
+behind the group's back drifts its depth away from the history's, and the next
+group operation returns `None`/`false` and changes nothing.
+
+Contracts, the member list and the acceptance suite:
+[doc 10](10-shared-fork-history.md) and `tests/typed_group.rs`.
 
 ---
 [← Table of Contents](00-table-of-contents.md)

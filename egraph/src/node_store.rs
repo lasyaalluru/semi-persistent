@@ -1,5 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+// Profiling instrumentation is deliberately grouped after the tests.
+#![allow(clippy::items_after_test_module)]
 //! Generic node store facade — caches + typed routing, parameterized by id types.
 
 use std::hash::Hash;
@@ -11,7 +14,7 @@ use crate::containers::ShrinkPolicy;
 use crate::containers::Tagged;
 use crate::multiplicity::Multiplicity;
 use crate::registry::{Clamp, OpKind, OpRegistry};
-use crate::typed_routing::{NodeIds, NodeRef, RoutingToken, TypedRouting};
+use crate::typed_routing::{NodeIds, NodeRef, TypedRouting};
 
 /// SpMap an MSet op's descriptor `Clamp` to the canonizer's [`crate::canon::MSetClamp`]. An MSet op
 /// carries `Clamp::None` (plain AC) or `Clamp::Nilpotent` (`Idempotent` is the Set partition, and
@@ -68,41 +71,47 @@ pub struct NodeStore<
     I: NodeIds,
     const TRACK: bool = true,
     const PROOFS: bool = false,
-> {
+    P = crate::containers::HotFirst,
+> where
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
+{
     routing: TypedRouting<G, I, TRACK>,
-    pub plain0: FixedArityCache<G, O, I::L0, 0, TRACK, PROOFS>,
-    pub plain1: FixedArityCache<G, O, I::L1, 1, TRACK, PROOFS>,
-    pub plain2: FixedArityCache<G, O, I::L2, 2, TRACK, PROOFS>,
-    pub plain3: FixedArityCache<G, O, I::L3, 3, TRACK, PROOFS>,
-    pub spair: FixedArityCache<G, O, I::LSPair, 2, TRACK, PROOFS>,
-    pub plain_n: VariableArityCache<G, O, G, I::LN, TRACK, PROOFS>,
-    pub seq: VariableArityCache<G, O, G, I::LSeq, TRACK, PROOFS>,
-    pub mset: VariableArityCache<G, O, C, I::LMSet, TRACK, PROOFS>,
-    pub set: VariableArityCache<G, O, G, I::LSet, TRACK, PROOFS>,
-    pub lit: LitCache<G, O, V, I::LLit, TRACK>,
+    pub plain0: FixedArityCache<G, O, I::L0, 0, TRACK, PROOFS, P>,
+    pub plain1: FixedArityCache<G, O, I::L1, 1, TRACK, PROOFS, P>,
+    pub plain2: FixedArityCache<G, O, I::L2, 2, TRACK, PROOFS, P>,
+    pub plain3: FixedArityCache<G, O, I::L3, 3, TRACK, PROOFS, P>,
+    pub spair: FixedArityCache<G, O, I::LSPair, 2, TRACK, PROOFS, P>,
+    pub plain_n: VariableArityCache<G, O, G, I::LN, TRACK, PROOFS, P>,
+    pub seq: VariableArityCache<G, O, G, I::LSeq, TRACK, PROOFS, P>,
+    pub mset: VariableArityCache<G, O, C, I::LMSet, TRACK, PROOFS, P>,
+    pub set: VariableArityCache<G, O, G, I::LSet, TRACK, PROOFS, P>,
+    pub lit: LitCache<G, O, V, I::LLit, TRACK, P>,
 }
 
-impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool> Default
-    for NodeStore<G, O, V, C, I, TRACK, PROOFS>
+impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool, P> Default
+    for NodeStore<G, O, V, C, I, TRACK, PROOFS, P>
 where
     G: DenseId<Index = I::Index> + Hash,
     O: DenseId + Hash,
     V: DenseId + Hash,
     C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug,
     I: NodeIds,
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool> NodeStore<G, O, V, C, I, TRACK, PROOFS>
+impl<G, O, V, C, I, const TRACK: bool, const PROOFS: bool, P>
+    NodeStore<G, O, V, C, I, TRACK, PROOFS, P>
 where
     G: DenseId<Index = I::Index> + Hash,
     O: DenseId + Hash,
     V: DenseId + Hash,
     C: Tagged + Clone + Copy + Hash + Eq + core::fmt::Debug,
     I: NodeIds,
+    P: crate::config::CacheFamilies<G, O, V, C, I, TRACK>,
 {
     pub fn new() -> Self {
         Self {
@@ -499,50 +508,95 @@ where
     // Semi-persistence
     // -----------------------------------------------------------------------
 
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> NodeStoreToken {
-        NodeStoreToken {
-            routing: self.routing.mark(shrink),
-            plain0: self.plain0.mark(shrink),
-            plain1: self.plain1.mark(shrink),
-            plain2: self.plain2.mark(shrink),
-            plain3: self.plain3.mark(shrink),
-            spair: self.spair.mark(shrink),
-            plain_n: self.plain_n.mark(shrink),
-            seq: self.seq.mark(shrink),
-            mset: self.mset.mark(shrink),
-            set: self.set.mark(shrink),
-            lit: self.lit.mark(shrink),
+    // Structural frame operations: the typed-group member protocol forwarded
+    // to the columns (`History::*_member` drives them; no tokens).
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        self.routing.push_frame(shrink);
+        self.plain0.push_frame(shrink);
+        self.plain1.push_frame(shrink);
+        self.plain2.push_frame(shrink);
+        self.plain3.push_frame(shrink);
+        self.spair.push_frame(shrink);
+        self.plain_n.push_frame(shrink);
+        self.seq.push_frame(shrink);
+        self.mset.push_frame(shrink);
+        self.set.push_frame(shrink);
+        self.lit.push_frame(shrink);
+    }
+
+    pub fn reset_frame(&mut self, depth: usize) {
+        // Per-column restore profiling (`SEMPER_RESTORE_PROF`), indexed as
+        // `NODE_PROF_PARTS`: the group drives restores through here now.
+        if node_prof_enabled() {
+            let mut t = std::time::Instant::now();
+            self.routing.reset_frame(depth);
+            node_prof_record(0, &mut t);
+            self.plain0.reset_frame(depth);
+            node_prof_record(1, &mut t);
+            self.plain1.reset_frame(depth);
+            node_prof_record(2, &mut t);
+            self.plain2.reset_frame(depth);
+            node_prof_record(3, &mut t);
+            self.plain3.reset_frame(depth);
+            node_prof_record(4, &mut t);
+            self.spair.reset_frame(depth);
+            node_prof_record(5, &mut t);
+            self.plain_n.reset_frame(depth);
+            node_prof_record(6, &mut t);
+            self.seq.reset_frame(depth);
+            node_prof_record(7, &mut t);
+            self.mset.reset_frame(depth);
+            node_prof_record(8, &mut t);
+            self.set.reset_frame(depth);
+            node_prof_record(9, &mut t);
+            self.lit.reset_frame(depth);
+            node_prof_record(10, &mut t);
+            return;
         }
+        self.routing.reset_frame(depth);
+        self.plain0.reset_frame(depth);
+        self.plain1.reset_frame(depth);
+        self.plain2.reset_frame(depth);
+        self.plain3.reset_frame(depth);
+        self.spair.reset_frame(depth);
+        self.plain_n.reset_frame(depth);
+        self.seq.reset_frame(depth);
+        self.mset.reset_frame(depth);
+        self.set.reset_frame(depth);
+        self.lit.reset_frame(depth);
     }
 
-    pub fn restore(&mut self, token: NodeStoreToken) {
-        self.routing.restore(token.routing);
-        self.plain0.restore(token.plain0);
-        self.plain1.restore(token.plain1);
-        self.plain2.restore(token.plain2);
-        self.plain3.restore(token.plain3);
-        self.spair.restore(token.spair);
-        self.plain_n.restore(token.plain_n);
-        self.seq.restore(token.seq);
-        self.mset.restore(token.mset);
-        self.set.restore(token.set);
-        self.lit.restore(token.lit);
+    pub fn restore_frame(&mut self, depth: usize) {
+        self.routing.restore_frame(depth);
+        self.plain0.restore_frame(depth);
+        self.plain1.restore_frame(depth);
+        self.plain2.restore_frame(depth);
+        self.plain3.restore_frame(depth);
+        self.spair.restore_frame(depth);
+        self.plain_n.restore_frame(depth);
+        self.seq.restore_frame(depth);
+        self.mset.restore_frame(depth);
+        self.set.restore_frame(depth);
+        self.lit.restore_frame(depth);
     }
-}
 
-#[derive(Clone, Copy, Debug)]
-pub struct NodeStoreToken {
-    routing: RoutingToken,
-    plain0: CacheToken,
-    plain1: CacheToken,
-    plain2: CacheToken,
-    plain3: CacheToken,
-    spair: CacheToken,
-    plain_n: PoolCacheToken,
-    seq: PoolCacheToken,
-    mset: PoolCacheToken,
-    set: PoolCacheToken,
-    lit: CacheToken,
+    pub fn pop_frame(&mut self) {
+        self.routing.pop_frame();
+        self.plain0.pop_frame();
+        self.plain1.pop_frame();
+        self.plain2.pop_frame();
+        self.plain3.pop_frame();
+        self.spair.pop_frame();
+        self.plain_n.pop_frame();
+        self.seq.pop_frame();
+        self.mset.pop_frame();
+        self.set.pop_frame();
+        self.lit.pop_frame();
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.routing.frame_depth()
+    }
 }
 
 #[cfg(test)]
@@ -682,4 +736,45 @@ mod tests {
         );
         assert!(collisions.is_empty());
     }
+}
+
+/// Per-cache restore accounting inside the node store (SEMPER_RESTORE_PROF).
+pub const NODE_PROF_PARTS: [&str; 11] = [
+    "routing", "plain0", "plain1", "plain2", "plain3", "spair", "plain_n", "seq", "mset", "set",
+    "lit",
+];
+static NODE_PROF_NS: [std::sync::atomic::AtomicU64; 11] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+fn node_prof_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SEMPER_RESTORE_PROF").is_some())
+}
+
+fn node_prof_record(part: usize, t: &mut std::time::Instant) {
+    NODE_PROF_NS[part].fetch_add(
+        t.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    *t = std::time::Instant::now();
+}
+
+/// Read and reset, indexed as [`NODE_PROF_PARTS`].
+pub fn take_node_restore_profile() -> [u64; 11] {
+    let mut out = [0u64; 11];
+    for (i, c) in NODE_PROF_NS.iter().enumerate() {
+        out[i] = c.swap(0, std::sync::atomic::Ordering::Relaxed);
+    }
+    out
 }

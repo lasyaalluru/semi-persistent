@@ -10,6 +10,7 @@
 //! `cargo test -p semi-persistent-egraph --test au_adversarial_correctness \
 //! exact_ac_vertex_oracle_finds_the_cross_matching -- --ignored --exact --nocapture`.
 
+use semi_persistent_egraph::containers::ShrinkPolicy;
 use std::collections::HashSet;
 
 use semi_persistent_egraph::EGraph31;
@@ -418,13 +419,15 @@ fn best_results_restore_recovers_pre_mark_entry() {
     let root = OrId::from_usize(0);
     assert!(results.offer(root, before, (10, 10)));
 
-    let pool_token = pool.mark();
-    let results_token = results.mark();
+    let pool_token = pool.frame_depth();
+    pool.push_frame(ShrinkPolicy::Never);
+    let results_token = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
     let after = pool.intern(TermOp::EGraph(OpId::from_usize(1)), &[]);
     assert!(results.offer(root, after, (5, 5)));
 
-    results.restore(results_token);
-    pool.restore(pool_token);
+    results.reset_frame(results_token);
+    pool.reset_frame(pool_token);
     assert_eq!(results.best_term(root), Some(before));
     assert_eq!(results.best_quality(root), (10, 10));
 }
@@ -438,14 +441,16 @@ fn best_results_restore_can_leave_a_dangling_term_id() {
     let root = OrId::from_usize(0);
     results.offer(root, before, (10, 10));
 
-    let pool_token = pool.mark();
-    let results_token = results.mark();
+    let pool_token = pool.frame_depth();
+    pool.push_frame(ShrinkPolicy::Never);
+    let results_token = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
     let after = pool.intern(TermOp::EGraph(OpId::from_usize(1)), &[]);
     results.offer(root, after, (5, 5));
 
     // This is SearchSession's restore order: results first, then terms.
-    results.restore(results_token);
-    pool.restore(pool_token);
+    results.reset_frame(results_token);
+    pool.reset_frame(pool_token);
     // After the fix: the entry reverts to the pre-mark term (not a dangling id).
     let restored = results.best_term(root).expect("entry should exist");
     assert_eq!(restored, before, "restore should revert to pre-mark term");

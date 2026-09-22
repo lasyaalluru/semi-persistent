@@ -31,7 +31,7 @@ phase-timing = []
 seek-stats = []
 
 [dependencies]
-semi-persistent-containers = { package = "semi-persistent-containers-verus", path = "../containers-verus", version = "0.3.0" }
+semi-persistent-containers = { package = "semi-persistent-containers-verus", path = "../containers-verus", version = "0.3.0", features = ["literal-types"] }
 vstd = "=0.0.0-2026-08-02-0125"
 clap = { version = "4.6.0", features = ["derive"] }
 num-bigint.workspace = true
@@ -41,6 +41,7 @@ foldhash.workspace = true
 hashbrown.workspace = true
 ordered-float.workspace = true
 rapidhash.workspace = true
+rayon.workspace = true
 smallvec = "1"
 winnow.workspace = true
 
@@ -91,4 +92,8 @@ harness = false
 
 [[bench]]
 name = "extract_bench"
+harness = false
+
+[[bench]]
+name = "store_bench"
 harness = false

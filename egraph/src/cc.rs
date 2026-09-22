@@ -56,7 +56,10 @@ where
     /// keeping only AC nodes (`ops.is_mset`), skipping subsumed nodes.
     pub fn build<L: LitVal, const TRACK: bool, const PROOFS: bool>(
         eg: &EGraph<Cfg, L, TRACK, PROOFS>,
-    ) -> Self {
+    ) -> Self
+    where
+        Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
+    {
         let mut by_op_contains: FastMap<(Cfg::O, Cfg::G), Vec<Cfg::G>> = FastMap::default();
         let mut completion_nodes: Vec<Cfg::G> = Vec::new();
 

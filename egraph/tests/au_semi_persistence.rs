@@ -11,6 +11,7 @@ use semi_persistent_egraph::au::session::{AuAlgorithm, AuConfig, anti_unify};
 use semi_persistent_egraph::au::space::{ContextStore, OrId};
 use semi_persistent_egraph::au::terms::{TermId, TermOp, TermPool};
 use semi_persistent_egraph::containers::DenseId;
+use semi_persistent_egraph::containers::ShrinkPolicy;
 use semi_persistent_egraph::id::OpId;
 use semi_persistent_egraph::literal::NiraLitVal;
 use semi_persistent_egraph::nodes::LitValId;
@@ -27,12 +28,13 @@ fn best_results_mark_restore_undoes_overwrites() {
     let t1 = TermId::from_usize(1);
 
     results.offer(or0, t0, (10, 10));
-    let token = results.mark();
+    let token = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
 
     results.offer(or0, t1, (5, 3));
     assert_eq!(results.best_quality(or0), (5, 3));
 
-    results.restore(token);
+    results.reset_frame(token);
     assert_eq!(results.best_quality(or0), (10, 10));
     assert_eq!(results.best_term(or0), Some(t0));
 }
@@ -45,12 +47,13 @@ fn best_results_mark_restore_truncates_new_entries() {
     let t0 = TermId::from_usize(0);
 
     results.offer(or0, t0, (5, 5));
-    let token = results.mark();
+    let token = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
 
     results.offer(or1, t0, (3, 3));
     assert_eq!(results.best_term(or1), Some(t0));
 
-    results.restore(token);
+    results.reset_frame(token);
     assert_eq!(results.best_term(or1), None);
     assert_eq!(results.best_term(or0), Some(t0));
 }
@@ -64,18 +67,20 @@ fn best_results_nested_marks() {
     let t2 = TermId::from_usize(2);
 
     results.offer(or0, t0, (20, 20));
-    let outer = results.mark();
+    let outer = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
 
     results.offer(or0, t1, (10, 10));
-    let inner = results.mark();
+    let inner = results.frame_depth();
+    results.push_frame(ShrinkPolicy::Never);
 
     results.offer(or0, t2, (5, 5));
     assert_eq!(results.best_quality(or0), (5, 5));
 
-    results.restore(inner);
+    results.reset_frame(inner);
     assert_eq!(results.best_quality(or0), (10, 10));
 
-    results.restore(outer);
+    results.reset_frame(outer);
     assert_eq!(results.best_quality(or0), (20, 20));
 }
 
@@ -87,13 +92,14 @@ fn term_pool_mark_restore_truncates() {
     let a = pool.intern(TermOp::EGraph(OpId::from_usize(0)), &[]);
     assert_eq!(pool.len(), 1);
 
-    let token = pool.mark();
+    let token = pool.frame_depth();
+    pool.push_frame(ShrinkPolicy::Never);
 
     let _b = pool.intern(TermOp::EGraph(OpId::from_usize(1)), &[]);
     let _f = pool.intern(TermOp::EGraph(OpId::from_usize(2)), &[a, _b]);
     assert_eq!(pool.len(), 3);
 
-    pool.restore(token);
+    pool.reset_frame(token);
     assert_eq!(pool.len(), 1);
     assert_eq!(pool.size(a), 1);
 }
@@ -102,9 +108,10 @@ fn term_pool_mark_restore_truncates() {
 fn term_pool_hash_cons_survives_restore() {
     let mut pool = TermPool::<OpId, LitValId>::new();
     let a = pool.intern(TermOp::EGraph(OpId::from_usize(0)), &[]);
-    let token = pool.mark();
+    let token = pool.frame_depth();
+    pool.push_frame(ShrinkPolicy::Never);
     let _b = pool.intern(TermOp::EGraph(OpId::from_usize(1)), &[]);
-    pool.restore(token);
+    pool.reset_frame(token);
 
     // Re-intern: same id (hash-cons survived).
     let a2 = pool.intern(TermOp::EGraph(OpId::from_usize(0)), &[]);
@@ -122,12 +129,13 @@ fn context_store_mark_restore() {
     let ctx1 = store.intern(&[c0]);
     assert_eq!(store.len(), 2); // empty + ctx1
 
-    let token = store.mark();
+    let token = store.frame_depth();
+    store.push_frame(ShrinkPolicy::Never);
 
     let _ctx2 = store.intern(&[c0, c1]);
     assert_eq!(store.len(), 3);
 
-    store.restore(token);
+    store.reset_frame(token);
     assert_eq!(store.len(), 2);
 
     // ctx1 still works.
@@ -194,41 +202,3 @@ fn anti_unify_independent_across_different_pairs() {
 }
 
 // ── Token ownership ──
-
-#[test]
-fn best_results_rejects_foreign_token() {
-    let mut source: BestResults = BestResults::new();
-    let foreign = source.mark();
-
-    let mut target: BestResults = BestResults::new();
-    let or0 = OrId::from_usize(0);
-    target.offer(or0, TermId::from_usize(0), (1, 1));
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        target.restore(foreign);
-    }));
-    assert!(
-        outcome.is_err(),
-        "a token must be bound to its originating table"
-    );
-}
-
-#[test]
-fn action_cache_rejects_foreign_token() {
-    use semi_persistent_egraph::au::actions::ActionCache;
-
-    let mut source = ActionCache::<OpId>::new(32);
-    let foreign = source.mark();
-
-    let mut target = ActionCache::<OpId>::new(32);
-    let c0 = AuClassId::from_usize(0);
-    target.insert(c0, c0, Vec::new());
-
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        target.restore(foreign);
-    }));
-    assert!(
-        outcome.is_err(),
-        "a token must be bound to its originating cache"
-    );
-}

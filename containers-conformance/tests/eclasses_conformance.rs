@@ -14,6 +14,7 @@
 //! separately where the API pins it (`merge_directed`).
 
 use semi_persistent_containers_verus as verus;
+use semi_persistent_containers_verus::group::ForkHistory;
 use verus::eclasses::EClasses;
 use verus::index_like::IndexLike;
 use verus::opt::DenseId;
@@ -142,10 +143,10 @@ fn ec_key(ec: &EC, node: CE) -> Option<usize> {
 }
 
 fn trace(seed: u64, steps: usize) {
-    let mut ec = EC::new();
+    let mut ec = ForkHistory::new(EC::new());
     let mut m = Model::default();
     let mut rng = Rng(seed | 1);
-    let mut marks: Vec<(verus::eclasses::EClassesToken, Model)> = Vec::new();
+    let mut marks: Vec<(verus::history::GroupToken, Model)> = Vec::new();
 
     for step in 0..steps {
         let n = m.parent.len();
@@ -178,10 +179,9 @@ fn trace(seed: u64, steps: usize) {
                     m.parent[ab] = s;
                     // the aggregate's key survives on the survivor.
                     let s_key = *m.key_of_root.get(&s).expect("survivor keeps its key");
-                    ec.splice_uses(
-                        ec.use_list_id(ec.repr_id(mi.survivor).unwrap()),
-                        mi.absorbed_uses,
-                    );
+                    let srep = ec.repr_id(mi.survivor).unwrap();
+                    let slist = ec.use_list_id(srep);
+                    ec.splice_uses(slist, mi.absorbed_uses);
                     let moved = std::mem::take(&mut m.uses[abs_key]);
                     m.uses[s_key].extend(moved);
                 }
@@ -209,10 +209,9 @@ fn trace(seed: u64, steps: usize) {
                     let abs_key = m.key_of_root.remove(&ab).unwrap();
                     m.parent[ab] = expect_s;
                     let s_key = m.key_of_root[&expect_s];
-                    ec.splice_uses(
-                        ec.use_list_id(ec.repr_id(mi.survivor).unwrap()),
-                        mi.absorbed_uses,
-                    );
+                    let srep = ec.repr_id(mi.survivor).unwrap();
+                    let slist = ec.use_list_id(srep);
+                    ec.splice_uses(slist, mi.absorbed_uses);
                     let moved = std::mem::take(&mut m.uses[abs_key]);
                     m.uses[s_key].extend(moved);
                 }
@@ -223,17 +222,21 @@ fn trace(seed: u64, steps: usize) {
                 let parent_node = rng.below(n);
                 let root = m.find(x);
                 let key = m.key_of_root[&root];
-                ec.add_use(ec.repr_id(ce(root)).unwrap(), ce(parent_node));
+                let erep = ec.repr_id(ce(root)).unwrap();
+                ec.add_use(erep, ce(parent_node));
                 m.uses[key].push(parent_node);
             }
             // mark
             7 => {
-                marks.push((ec.mark(ShrinkPolicy::Never), m.clone()));
+                marks.push((
+                    ec.mark(ShrinkPolicy::Never).expect("mark headroom"),
+                    m.clone(),
+                ));
             }
             // restore the innermost outstanding mark
             8 if !marks.is_empty() => {
                 let (tok, snap) = marks.pop().unwrap();
-                ec.try_restore(tok).expect("token minted by this trace");
+                assert!(ec.restore(tok), "restore: token minted by this trace");
                 m = snap;
             }
             // checks

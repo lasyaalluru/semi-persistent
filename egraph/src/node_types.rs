@@ -44,6 +44,15 @@ pub struct FixedArityNode<G: DenseId, O: DenseId, const K: usize> {
     pub global_id: G::Repr,
     pub op: O::Repr,
     pub flags: u8,
+    // The three bytes after `flags` are padding (a `u8` rounds up to the
+    // `u32` alignment of `children`). A cached 24-bit content tag was built
+    // there and MEASURED FLAT on both regimes (2026-09): as a probe
+    // pre-filter it saves a content compare only on the stale candidates,
+    // which the hint buckets average 0.19 of per probe, while costing a
+    // store per node write and a compare on every hit. Removed rather than
+    // shipped, because an unmeasurable filter that every future write path
+    // must remember to stamp is a latent trap. The space remains available
+    // if a workload ever measures probe-candidate rejection as a cost.
     pub children: [G; K],
 }
 
@@ -351,6 +360,44 @@ impl<G: DenseId, O: DenseId, V: DenseId> Tagged for LitNode<G, O, V> {
     #[inline(always)]
     fn clear_tag(stored: &mut Self) {
         G::clear_tag(&mut stored.global_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EqSpec (F2.4): spec-carrying equality for the cache node structs, so the
+// cache columns can instantiate ValueRle. TRUSTED LEAVES: this crate is not
+// verified, so these one-liners carry the obligation that they decide
+// STRUCTURAL equality. Reprs are compared through (from_repr, tag), which
+// equals repr equality on well-formed reprs by Tagged's extensionality axiom;
+// ids compare through their PartialEq (raw-word equality). A wrong answer
+// here degrades only RLE exactness on cache columns, which the cache
+// differential tests (restore == rebuild reference) catch.
+// ---------------------------------------------------------------------------
+
+impl<G: DenseId, O: DenseId, const K: usize> semi_persistent_containers::value_compressor::EqSpec
+    for FixedArityNode<G, O, K>
+{
+    fn eq_exec(&self, other: &Self) -> bool {
+        G::from_repr(&self.global_id) == G::from_repr(&other.global_id)
+            && G::tag(&self.global_id) == G::tag(&other.global_id)
+            && O::from_repr(&self.op) == O::from_repr(&other.op)
+            && O::tag(&self.op) == O::tag(&other.op)
+            && self.flags == other.flags
+            && self.children == other.children
+    }
+}
+
+impl<G: DenseId, O: DenseId> semi_persistent_containers::value_compressor::EqSpec
+    for VariableArityNode<G, O>
+{
+    fn eq_exec(&self, other: &Self) -> bool {
+        G::from_repr(&self.global_id) == G::from_repr(&other.global_id)
+            && G::tag(&self.global_id) == G::tag(&other.global_id)
+            && O::from_repr(&self.op) == O::from_repr(&other.op)
+            && O::tag(&self.op) == O::tag(&other.op)
+            && self.start == other.start
+            && self.end == other.end
+            && self.flags == other.flags
     }
 }
 

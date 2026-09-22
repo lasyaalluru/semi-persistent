@@ -10,6 +10,7 @@
 //! covers only the irreducibly-external remainder.)
 
 use semi_persistent_containers_verus::container_id::ContainerId;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::vec::{ShrinkPolicy, Vec as SpVec};
 
@@ -76,20 +77,20 @@ fn container_id_eq_via_copy() {
 #[test]
 fn cross_container_token_rejected() {
     type V = SpVec<u32, u32, ParallelStore<u32, u32>, true>;
-    let mut a = V::new();
-    let mut b = V::new();
+    let mut a = ForkHistory::new(V::new());
+    let mut b = ForkHistory::new(V::new());
     for i in 0..10u32 {
         a.try_push(i).expect("push: within index word");
         b.try_push(i + 100).expect("push: within index word");
     }
     let token_a = a
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     // a's own token is valid on a.
-    assert!(a.is_valid_token(&token_a), "a's token should be valid on a");
+    assert!(a.is_valid(token_a), "a's token should be valid on a");
     // but the SAME token must be rejected by b (different container id).
     assert!(
-        !b.is_valid_token(&token_a),
+        !b.is_valid(token_a),
         "a token from container a must be rejected by container b"
     );
     println!("cross_container_token_rejected: OK");
@@ -136,7 +137,7 @@ impl Lcg {
 fn byte_counters_are_consistent() {
     type V = SpVec<u64, u32, ParallelStore<u64, u32>, true>;
     for seed in 0..6u64 {
-        let mut v = V::new();
+        let mut v = ForkHistory::new(V::new());
         let mut rng = Lcg::new(seed ^ 0xB17E5);
         let mut prev_total = v.total_bytes();
         let mut prev_tracking = v.tracking_bytes();
@@ -164,7 +165,7 @@ fn byte_counters_are_consistent() {
 
             if rng.next().is_multiple_of(5) {
                 let _ = v
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("mark: depth bounded by this harness");
             } else {
                 v.try_push(rng.next()).expect("push: within index word");
@@ -214,30 +215,46 @@ fn push_overflow_traps_for_small_index() {
     );
 }
 
-// `restores_remaining()` reports the fork-history headroom and drops by exactly
-// one per `restore` (each restore appends one never-reclaimed fork origin).
+// `restores_remaining()` now reports depth headroom (u32::MAX - live frame
+// depth), NOT a lifetime restore count: post-H2 the container carries no
+// genealogy at all (the owning `History` does), so restores neither consume
+// headroom nor even leave a max-depth watermark. The old "drops by one per
+// restore" behavior is gone by design; so is doc 10's stamp-array watermark.
 #[test]
-fn restores_remaining_tracks_fork_history() {
+fn restores_remaining_tracks_depth_not_restore_count() {
     type V = SpVec<u32, u32, ParallelStore<u32, u32>, true>;
-    let mut v = V::new();
+    let mut v = ForkHistory::new(V::new());
     v.try_push(1).expect("push: within index word");
     v.try_push(2).expect("push: within index word");
 
-    // Fresh container: no restores taken yet, so full u32 headroom.
+    // Fresh container: depth 0, so full u32 headroom.
     let start = v.restores_remaining();
     assert_eq!(start, u32::MAX as usize);
 
-    // Each restore consumes exactly one unit of headroom.
+    // Repeatedly mark-at-depth-0, push, restore-to-depth-0. Headroom is
+    // u32::MAX - 1 while the frame is open and returns to u32::MAX after each
+    // restore — restores are unbounded and leave no per-container residue.
     for k in 1..=5usize {
         let t = v
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
-        v.try_push(100 + k as u32).expect("push: within index word");
-        v.try_restore(t).expect("restore: own token");
         assert_eq!(
             v.restores_remaining(),
-            start - k,
-            "restores_remaining must drop by one per restore (after {k})"
+            u32::MAX as usize - 1,
+            "one open frame consumes exactly one depth unit; at {k}"
+        );
+        v.try_push(100 + k as u32).expect("push: within index word");
+        assert!(v.restore(t), "restore: own token");
+        assert_eq!(
+            v.restores_remaining(),
+            u32::MAX as usize - 1,
+            "semantics B: the restored frame stays open; after {k}"
+        );
+        assert!(v.pop_scope());
+        assert_eq!(
+            v.restores_remaining(),
+            u32::MAX as usize,
+            "restores must leave NO headroom residue (genealogy on History); after {k}"
         );
     }
 }
@@ -281,7 +298,7 @@ fn shrink_preserves_vec_contents() {
         let policy = ShrinkPolicy::IfOverallocated { factor, headroom };
 
         // ParallelStore-backed
-        let mut vp: VP = VP::new();
+        let mut vp: ForkHistory<VP> = ForkHistory::new(VP::new());
         for _ in 0..keep + excess {
             vp.try_push(next()).expect("push: within index word");
         }
@@ -290,7 +307,7 @@ fn shrink_preserves_vec_contents() {
         }
         let before: Vec<u64> = (0..keep as u32).map(|i| vp.get_index(i)).collect();
         let _tok = vp
-            .try_mark(policy)
+            .mark(policy)
             .expect("mark: depth bounded by this harness"); // shrink_vec_capacity fires inside mark
         let after: Vec<u64> = (0..keep as u32).map(|i| vp.get_index(i)).collect();
         assert_eq!(
@@ -301,7 +318,7 @@ fn shrink_preserves_vec_contents() {
 
         // InlineStore-backed (u32 payloads: Tagged repr)
         let keep_i = (next() % 100) as usize;
-        let mut vi: VI = VI::new();
+        let mut vi: ForkHistory<VI> = ForkHistory::new(VI::new());
         for _ in 0..keep_i + excess {
             vi.try_push((next() as u32) & 0x7FFF_FFFF)
                 .expect("push: within index word");
@@ -311,7 +328,7 @@ fn shrink_preserves_vec_contents() {
         }
         let before: Vec<u32> = (0..keep_i as u32).map(|i| vi.get_index(i)).collect();
         let _tok = vi
-            .try_mark(policy)
+            .mark(policy)
             .expect("mark: depth bounded by this harness");
         let after: Vec<u32> = (0..keep_i as u32).map(|i| vi.get_index(i)).collect();
         assert_eq!(
@@ -339,7 +356,8 @@ fn shrink_preserves_aov_contents() {
         let factor = (next() % 5) as usize;
         let headroom = (next() % 4) as usize;
 
-        let mut v: AppendOnlyVec<u64, usize, true> = AppendOnlyVec::new();
+        let mut v: ForkHistory<AppendOnlyVec<u64, usize, true>> =
+            ForkHistory::new(AppendOnlyVec::new());
         let mut expect = Vec::with_capacity(n);
         for _ in 0..n {
             let x = next();
@@ -349,7 +367,7 @@ fn shrink_preserves_aov_contents() {
         // shrink_aov_capacity fires inside mark (AOV variant condition
         // `cap > len*factor + headroom`, target `len + headroom`).
         let _tok = v
-            .try_mark(ShrinkPolicy::IfOverallocated { factor, headroom })
+            .mark(ShrinkPolicy::IfOverallocated { factor, headroom })
             .expect("mark: depth bounded by this harness");
         assert_eq!(v.len(), expect.len(), "round {round}: length changed");
         for (i, e) in expect.iter().enumerate() {

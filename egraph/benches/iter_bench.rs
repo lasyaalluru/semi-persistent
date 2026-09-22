@@ -2,17 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 use criterion::{Criterion, criterion_group, criterion_main};
 use semi_persistent_containers::{ShrinkPolicy, VecI, VecP};
+use semi_persistent_egraph::containers::group::ForkHistory;
 
 fn bench_iteration(c: &mut Criterion) {
     let n = 100_000;
 
     // --- Bitset: has as_slice() ---
-    let mut bitset = VecP::<u32, u32>::new();
+    let mut bitset = ForkHistory::new(VecP::<u32, u32>::new());
     for i in 0..n {
         bitset.try_push(i).expect("push: within index word");
     }
     let _t = bitset
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
 
     c.bench_function("bitset/slice_iter", |b| {
@@ -38,12 +39,12 @@ fn bench_iteration(c: &mut Criterion) {
     });
 
     // --- Marked: no as_slice(), view only ---
-    let mut marked = VecI::<u32, u32>::new();
+    let mut marked = ForkHistory::new(VecI::<u32, u32>::new());
     for i in 0..n {
         marked.try_push(i).expect("push: within index word");
     }
     let _t = marked
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
 
     assert!(

@@ -28,16 +28,17 @@ verus! {
 /// Trap a violated public-API precondition with a descriptive message.
 ///
 /// `requires cond`: a verified caller proves this, so the body's check is dead
-/// for them. `external_body` lets the body use the panic-formatting machinery
-/// (which Verus does not model) and keeps the function opaque to the verifier.
-#[verifier::external_body]
+/// for them. Verified: the violating arm diverges through [`refuse`], whose `!`
+/// return means the branch carries no post-state obligation — so the runtime
+/// monitor for unverified crate-internal callers survives without this function
+/// being trusted itself.
 #[inline(always)]
-pub fn check_precondition(cond: bool, msg: &str)
+pub(crate) fn check_precondition(cond: bool, msg: &str)
     requires
         cond,
 {
     if !cond {
-        panic!("containers-verus: precondition violated: {}", msg);
+        refuse(msg);
     }
 }
 
@@ -58,13 +59,3 @@ pub fn refuse(msg: &str) -> !
 }
 
 } // verus!
-
-/// The same trap, callable from inside `external_body` diagnostic code where
-/// no proof context exists (so no `requires`). Outside `verus!{}` — never
-/// visible to the verifier; used only by debug-build mirrors of spec-level
-/// preconditions (e.g. `CircularList::splice`'s different-rings walk).
-pub fn check_precondition_erased(cond: bool, msg: &str) {
-    if !cond {
-        panic!("containers-verus: precondition violated: {}", msg);
-    }
-}

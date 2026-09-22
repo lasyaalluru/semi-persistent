@@ -44,7 +44,7 @@ fillers, and **no such filler ever survives into `view()`**. Every filler
 occupies a popped marked cell `j in [old_len, saved_len)`, and the coverage
 invariant guarantees that cell has a capture entry holding `snap[j]`; the
 replay overwrites the filler with it. This is not a separate proof obligation:
-it is *entailed by the headline theorem* `view() == snapshots[token.frame_idx]`.
+it is *entailed by the headline theorem* `view() == snapshots[token.depth]`.
 The snapshot is the deep copy of what the user saw at mark time; a fabricated
 filler was never a user value, so if one survived, `view() != snapshot` and the
 theorem would fail. Hence the theorem already rules it out.

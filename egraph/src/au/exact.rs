@@ -146,6 +146,7 @@ pub fn eager_with_memo<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: boo
 ) -> Result<(<Cfg::Au as AuIds>::Term, TermPool<Cfg::O, Cfg::V, Cfg::Au>), super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if cycle_mode == CycleMode::Pair {
         let (run, pool) = super::exact_fixed::run(snap, l_root, r_root, None, false)?;
@@ -202,6 +203,7 @@ pub(crate) fn run_exact<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
 ) -> Result<ExactRun<Cfg>, super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     snap.validate_finite_from(l_root)?;
     snap.validate_finite_from(r_root)?;
@@ -268,6 +270,7 @@ fn solve_entry<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> (<Cfg::Au as AuIds>::Or, <Cfg::Au as AuIds>::Term, bool)
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     debug_assert!(match context {
         CycleContext::Sides { left, right } =>
@@ -349,6 +352,7 @@ pub(crate) fn run_exact_at<Cfg: EGraphConfig, L: LitVal, const T: bool, const P:
 ) -> ExactAt<<Cfg::Au as AuIds>::Term>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut space: SearchSpace<Cfg::Au> = SearchSpace::new(cycle_mode);
     let mut cache: ActionCache<Cfg::O, Cfg::Au, Cfg::M> =
@@ -425,6 +429,7 @@ fn action_size_bound<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 ) -> u64
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut bound: u64 = 1;
     for &(term, count) in solved {
@@ -586,6 +591,7 @@ fn solve_iterative<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> (<Cfg::Au as AuIds>::Term, bool)
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut stack: Vec<SolveFrame<Cfg>> = Vec::new();
     let mut sub: SubsumptionState<<Cfg::Au as AuIds>::Term, ClassOf<Cfg>> = SubsumptionState::new();

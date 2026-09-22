@@ -1,0 +1,16 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Mark { shrink: false }, Restore { which: 32768 }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Restore { which: 16384 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Mark { shrink: false }, Restore { which: 32768 }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Restore { which: 16384 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Mark { shrink: false }, Restore { which: 32768 }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Restore { which: 16384 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Restore { which: 26215 }, Mark { shrink: false }, Restore { which: 32768 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Restore { which: 26215 }, Mark { shrink: false }, Restore { which: 32768 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Restore { which: 26215 }, Mark { shrink: false }, Restore { which: 32768 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Push(0), Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Mark { shrink: false }, Restore { which: 26215 }, Mark { shrink: false }, Restore { which: 32768 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }]
+cc 234c2baadb364ae54055874535bb3e6553e635918f77f56edf2435a13f0f81e8 # shrinks to ops = [Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }, Restore { which: 0 }, Mark { shrink: false }]

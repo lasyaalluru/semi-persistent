@@ -364,6 +364,7 @@ fn session_quality<
 where
     semi_persistent_egraph::canon::MSetCanon:
         semi_persistent_egraph::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: semi_persistent_egraph::config::StorePolicy<Cfg, T>,
 {
     session.pool_quality(term)
 }

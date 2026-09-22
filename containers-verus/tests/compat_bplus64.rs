@@ -4,9 +4,9 @@
 //! Same shape as `compat_bplus` but exercising the u64-backed tree across the
 //! 256- and 512-byte layouts. Gated on `compat-bplus` + `compat-ids`.
 use proptest::prelude::*;
+use semi_persistent_containers_verus::history::GroupToken;
 use semi_persistent_containers_verus::{
-    BPlusToken, BPlusTreeSet, BinarySearch, IndexLike, Layout256U64, Layout512U64, NodeLayout,
-    ShrinkPolicy,
+    BPlusTreeSet, BinarySearch, IndexLike, Layout256U64, Layout512U64, NodeLayout, ShrinkPolicy,
 };
 
 semi_persistent_containers_verus::define_id63! {
@@ -40,9 +40,11 @@ where
     L::ArenaIdx: IndexLike + Default,
     L::Node: Default,
 {
-    let mut tree: BPlusTreeSet<PropId64, L, BinarySearch, true> = BPlusTreeSet::new();
+    let mut tree: semi_persistent_containers_verus::group::ForkHistory<
+        BPlusTreeSet<PropId64, L, BinarySearch, true>,
+    > = semi_persistent_containers_verus::group::ForkHistory::new(BPlusTreeSet::new());
     let mut oracle: Vec<PropId64> = Vec::new();
-    let mut snapshots: Vec<(BPlusToken, Vec<PropId64>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Vec<PropId64>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -69,7 +71,11 @@ where
                 if snapshots.len() >= 10 {
                     continue;
                 }
-                snapshots.push((tree.mark(ShrinkPolicy::Never), oracle.clone()));
+                snapshots.push((
+                    tree.mark(ShrinkPolicy::Never)
+                        .expect("mark: depth bounded by this test"),
+                    oracle.clone(),
+                ));
             }
             Op::Restore(idx) => {
                 if snapshots.is_empty() {
@@ -77,7 +83,7 @@ where
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                tree.restore(token);
+                assert!(tree.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }

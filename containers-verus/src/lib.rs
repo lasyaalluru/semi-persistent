@@ -21,7 +21,7 @@
 //! - `parallel_store` — `ParallelStore<T,I>` impl + lemmas
 //! - `inline_store`   — `InlineStore<T,I>` impl + lemmas (T: Tagged)
 //! - `frame`          — frame stack
-//! - `fork_history`   — executable branch genealogy + validity characterization
+//! - `gen_stamps`    — depth-indexed generation stamps (reclaimed fork history)
 //! - `container_id`   — opaque per-container identity (atomics, external_body)
 //! - `vec`            — `Vec<T,I,S,TRACK>` with full proofs over the trait specs
 
@@ -39,6 +39,14 @@
     clippy::manual_map,             // explicit match is clearer alongside spec annotations
     clippy::derivable_impls,        // hand-written Default documents the niche/empty encoding
     clippy::len_without_is_empty,   // `CaptureBits::len` mirrors a DiffStore length obligation; emptiness is read via `len`
+    // `vec![..]` expands to a let expression, which verus rejects, so the
+    // suggestion is unavailable here. No machine-applicable fix exists, so
+    // this only silences the warning; it fences nothing.
+    clippy::vec_init_then_push,
+    clippy::manual_unwrap_or_default,     // `unwrap_or_default` has no vstd spec; the match is what verus reads
+    clippy::match_like_matches_macro,     // `matches!` expands to a match verus rejects in this position
+    clippy::single_match,                 // the explicit match mirrors the frame's two-case proof obligation
+    clippy::non_canonical_clone_impl,     // `Clone` for a Copy run type deliberately traps: construction must be Copy
     clippy::doc_lazy_continuation,        // doc-list wrapping in the design-heavy module comments
     clippy::doc_overindented_list_items,  // same: design-doc-style comment formatting
     // `global size_of usize == 8;` is verus syntax; clippy sees the macro expansion as braces.
@@ -92,34 +100,65 @@ pub mod bplus_tree;
 pub mod canonical_keys;
 pub mod capture_bits;
 pub mod circular_list;
+mod cold_decode;
+mod cold_encode;
+#[allow(dead_code)]
+pub mod cold_stack;
+pub mod compressed_stack;
+pub mod compression_config;
+pub mod compression_stats;
 pub mod container_id;
 pub mod dense_id;
 pub mod dense_span_map;
+pub mod diagnostics;
+pub mod diff_compress;
 pub mod diff_store;
+pub(crate) mod diff_store_ops;
+#[cfg(test)]
+mod diff_store_ops_tests;
 pub mod eclasses;
 pub mod error;
 #[cfg(feature = "literal-types")]
 pub mod external_specs;
-pub mod fork_history;
 pub mod frame;
+pub mod gen_stamps;
+pub mod group;
 pub mod guard;
 pub mod hasher_spec;
+pub mod history;
 pub mod id_factory;
+mod std_sort;
+mod trail_select;
+// Shared mathematical model used by the conditional proof and concrete adapters.
+// This adds no fields or maintained history to any runtime container.
+#[allow(dead_code)]
+#[path = "../proofs/top_down/model.rs"]
+pub(crate) mod persistence_model;
 #[macro_use]
 pub mod id_macros;
+pub mod dyn_store;
+pub mod hinted_arena;
 pub mod index_like;
 pub mod inline_store;
+pub mod layered;
 pub mod layered_span_map;
 pub mod list;
 pub mod map;
 pub mod opt;
+pub mod parallel;
 pub mod parallel_store;
 pub mod sorted_cursor;
 pub mod sorted_vec_cursor;
 pub mod sparse_set;
+pub mod store_policy;
 pub mod tagged;
+pub mod tier_policy;
+pub mod trail_store;
+pub mod two_stack_log;
 pub mod union_find;
+pub mod value_compressor;
 pub mod vec;
+pub mod vec_dyn;
 
 // ---------------------------------------------------------------------------
 // Root re-exports: production-style flat surface
@@ -127,33 +166,44 @@ pub mod vec;
 // ---------------------------------------------------------------------------
 
 pub use append_only_vec::AppendOnlyVec;
-pub use bplus::{BPlusCursor, BPlusToken, BPlusTreeSet};
+pub use bplus::{BPlusCursor, BPlusTreeSet};
 pub use bplus_layout::{
     Layout64U32, Layout128U32, Layout128U64, Layout256U32, Layout256U64, Layout512U64, NodeLayout,
 };
 pub use bplus_search::{BinarySearch, Branchless, SearchKind};
 #[cfg(feature = "literal-types")]
 pub use canonical_keys::{BitsF64, CanonicalF64, CanonicalRational};
-pub use circular_list::{CircularList, CircularListToken, RingIter};
+pub use circular_list::{CircularList, RingIter};
+pub use compressed_stack::CompressedStack;
+pub use compression_config::ColumnConfig;
+pub use compression_stats::{CalibrationPolicy, CalibrationStats, FrameStats};
 pub use container_id::ContainerId;
 pub use dense_id::{DenseId31, DenseId63};
 pub use dense_span_map::{DenseSpanMap, Span, SpanArena};
+pub use diagnostics::HeapBytes;
+pub use diff_compress::CompressionMode;
 pub use diff_store::DiffStore;
-pub use fork_history::ForkHistory;
+pub use gen_stamps::GenStamps;
 pub use id_factory::{IdFactory, IdRangeError};
 pub use id_macros::ids::{SparseSetId, UseListId, UseNodeId};
 pub use index_like::IndexLike;
 pub use inline_store::InlineStore;
 pub use layered_span_map::LayeredSpanMap;
-pub use list::{ListArena, ListArenaToken};
-pub use map::{MapToken, SpMap};
+pub use list::ListArena;
+pub use map::{Produce, SpMap, SpUniqueMap};
 pub use opt::{DenseId, Opt};
 pub use parallel_store::ParallelStore;
 pub use sorted_cursor::SortedCursor;
 pub use sorted_vec_cursor::SortedVecCursor;
-pub use sparse_set::{SparseSet, SparseSetToken};
+pub use sparse_set::SparseSet;
+pub use store_policy::{HotFirst, PlainFamily, TaggedFamily, TrailFirst};
 pub use tagged::{BoolTagged, Pair, Tagged};
-pub use vec::{ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
+pub use tier_policy::{
+    AdaptiveInput, AdaptiveReport, InvalidRatio, Ratio, ReclaimPolicy, RolloverPolicy, TierLimit,
+    TierPolicy, TierStats,
+};
+pub use two_stack_log::TwoStackLog;
+pub use vec::{MarkOptions, ShrinkPolicy, Vec, VecToken, VecView, VecViewIter};
 
 // Production-root parity: names production exports at its crate root, under
 // production's spellings (`Map`/`View`/`ViewIter` alias the renamed types).
@@ -172,7 +222,20 @@ pub mod bitset;
 
 /// Inline capture: flag stolen inside `T::Repr`. Requires `T: Tagged`.
 /// (Production's `VecI` alias, verbatim.)
-pub type VecI<T, I, const TRACK: bool = true> = Vec<T, I, InlineStore<T, I>, TRACK>;
+pub type VecI<T, I, const TRACK: bool = true, VC = crate::value_compressor::NoValueCompression> =
+    Vec<T, I, InlineStore<T, I>, TRACK, VC>;
+
+/// Trail-tracked vector (chronological capture, no runtime flags, plain
+/// diff log): the SMT-search profile. See `trail_store`.
+pub type VecT<T, I, const TRACK: bool = true> =
+    Vec<T, I, crate::trail_store::TrailStore<T, I>, TRACK>;
+/// Runtime-selectable column: the store kind is chosen at construction while
+/// capture semantics follow that store. This preserves the legacy concrete
+/// type, including equality with the defaulted five-parameter `Vec` spelling.
+pub use vec_dyn::VecD;
+
+pub use compression_config::env_diff_store_kind;
+pub use dyn_store::StoreKind;
 
 /// Parallel capture: flag in a packed side bitvector. Works with any
 /// `T: Copy`. Production's `VecP` alias accepted `T: Clone`; the verified

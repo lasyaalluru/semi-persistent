@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 use proptest::prelude::*;
 use semi_persistent_egraph::classes::EClasses;
-use semi_persistent_egraph::classes::EClassesToken;
 use semi_persistent_egraph::containers::ShrinkPolicy;
+use semi_persistent_egraph::containers::group::ForkHistory;
+use semi_persistent_egraph::containers::history::GroupToken;
 use semi_persistent_egraph::id::{EClassKey, UseListId, UseNodeId};
 use semi_persistent_egraph::{DenseId, ENodeId};
 use std::collections::{HashMap, HashSet};
@@ -87,10 +88,17 @@ impl Oracle {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut ec = EClasses::<ENodeId, EClassKey, UseListId, UseNodeId, true, false>::new();
+    let mut ec = ForkHistory::new(EClasses::<
+        ENodeId,
+        EClassKey,
+        UseListId,
+        UseNodeId,
+        true,
+        false,
+    >::new());
     let mut oracle = Oracle::new();
     let mut ids: Vec<u32> = Vec::new();
-    let mut snapshots: Vec<(EClassesToken, Oracle, Vec<u32>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Oracle, Vec<u32>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -138,7 +146,7 @@ fn run_ops(ops: Vec<Op>) {
                 if snapshots.len() >= 15 {
                     continue;
                 }
-                let tok = ec.mark(ShrinkPolicy::Never);
+                let tok = ec.mark(ShrinkPolicy::Never).expect("mark headroom");
                 snapshots.push((tok, oracle.clone(), ids.clone()));
             }
             Op::Restore(idx) => {
@@ -147,7 +155,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (tok, snap_oracle, snap_ids) = snapshots[idx].clone();
-                ec.restore(tok);
+                assert!(ec.restore(tok), "restore: the group's own live token");
                 oracle = snap_oracle;
                 ids = snap_ids;
                 snapshots.truncate(idx);

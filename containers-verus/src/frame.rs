@@ -53,3 +53,79 @@ impl<I: crate::index_like::IndexLike + core::fmt::Debug> core::fmt::Debug for Fr
             .finish()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Ruled layout (doc/tasks/mainline-shape-plus-coldstack-goal.md, 2026-09-13):
+// two frame stacks, pooled cold runs.
+
+verus! {
+
+/// A chronological trail frame: extent `[start, end)` in the container's
+/// `trail_value_pool`, plus the live vector's length at its mark.
+#[derive(Copy)]
+pub struct TrailFrame<I: IndexLike> {
+    pub(crate) saved_len: I,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl<I: IndexLike> Clone for TrailFrame<I> {
+    fn clone(&self) -> (r: Self)
+        ensures r == *self,
+    {
+        *self
+    }
+}
+
+/// A hot frame: extent [start, end) in the container's hot_value_pool, plus
+/// the live vector's saved_len at its mark.
+#[derive(Copy)]
+pub struct HotFrame<I: IndexLike> {
+    pub(crate) saved_len: I,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+}
+
+impl<I: IndexLike> Clone for HotFrame<I> {
+    fn clone(&self) -> (r: Self)
+        ensures r == *self,
+    {
+        *self
+    }
+}
+
+/// One value run of a cold frame: values cold_value_pool[start .. start+len]
+/// land at live[base ..].
+#[derive(Copy)]
+pub struct IndexRun<I: IndexLike> {
+    pub(crate) base: I,
+    pub(crate) start: usize,
+    pub(crate) len: usize,
+}
+
+impl<I: IndexLike> Clone for IndexRun<I> {
+    fn clone(&self) -> (r: Self)
+        ensures r == *self,
+    {
+        *self
+    }
+}
+
+/// A cold frame: extent [runs_start, runs_start+runs_len) in
+/// cold_index_runs, plus the live vector's saved_len at its mark.
+#[derive(Copy)]
+pub struct ColdFrameHdr<I: IndexLike> {
+    pub(crate) saved_len: I,
+    pub(crate) runs_start: usize,
+    pub(crate) runs_len: usize,
+}
+
+impl<I: IndexLike> Clone for ColdFrameHdr<I> {
+    fn clone(&self) -> (r: Self)
+        ensures r == *self,
+    {
+        *self
+    }
+}
+
+} // verus!

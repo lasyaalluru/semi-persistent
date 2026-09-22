@@ -6,6 +6,7 @@
 use proptest::prelude::*;
 use semi_persistent_containers as reference;
 use semi_persistent_containers_verus as verified;
+use semi_persistent_containers_verus::group::ForkHistory;
 
 reference::define_id31! { pub struct RefNode / StoredRefNode, "rn"; }
 reference::define_id31! { pub struct RefClassKey / StoredRefClassKey, "rc"; }
@@ -108,7 +109,7 @@ proptest! {
         ops in prop::collection::vec(uf_op(), 1..96)
     ) {
         let mut r = RefUf::new();
-        let mut v = VerUf::new();
+        let mut v = ForkHistory::new(VerUf::new());
         let mut marks = Vec::new();
         let mut n = 0usize;
 
@@ -141,14 +142,14 @@ proptest! {
                 UfOp::Mark => {
                     marks.push((
                         r.mark(reference::ShrinkPolicy::Never),
-                        v.try_mark(verified::ShrinkPolicy::Never).expect("tracked"),
+                        v.mark(verified::ShrinkPolicy::Never).expect("tracked"),
                         n,
                     ));
                 }
                 UfOp::Restore if !marks.is_empty() => {
                     let (rt, vt, marked_n) = marks.pop().unwrap();
                     r.restore(rt);
-                    v.try_restore(vt).expect("own innermost token");
+                    assert!(v.restore(vt), "restore: own innermost live token");
                     n = marked_n;
                 }
                 _ => {}
@@ -164,7 +165,7 @@ fn retained_union_find_reconstructs_the_same_proof_path() {
     type VerProofUf = verified::union_find::UnionFind<VerNode, u8, true, true>;
 
     let mut r = RefProofUf::new();
-    let mut v = VerProofUf::new();
+    let mut v = ForkHistory::new(VerProofUf::new());
     for i in 0..5 {
         r.make_set(rn(i));
         v.make_set(vn(i));
@@ -176,7 +177,7 @@ fn retained_union_find_reconstructs_the_same_proof_path() {
     v.union_justified_directed(vn(2), vn(1), 22, false);
 
     let rt = r.mark(reference::ShrinkPolicy::Never);
-    let vt = v.try_mark(verified::ShrinkPolicy::Never).expect("tracked");
+    let vt = v.mark(verified::ShrinkPolicy::Never).expect("tracked");
     r.union_justified(rn(3), rn(2), 33);
     v.union_justified(vn(3), vn(2), 33);
 
@@ -197,7 +198,7 @@ fn retained_union_find_reconstructs_the_same_proof_path() {
     assert_eq!(r_path, v_path);
 
     r.restore(rt);
-    v.try_restore(vt).expect("own token");
+    assert!(v.restore(vt), "restore: own live token");
     rb.clear();
     vb.clear();
     assert!(!r.explain(rn(0), rn(3), &mut rb));
@@ -207,7 +208,7 @@ fn retained_union_find_reconstructs_the_same_proof_path() {
 #[test]
 fn directed_union_rank_saturates_without_changing_the_partition() {
     let mut r = RefUf::new();
-    let mut v = VerUf::new();
+    let mut v = ForkHistory::new(VerUf::new());
     for i in 0..300 {
         r.make_set(rn(i));
         v.make_set(vn(i));
@@ -292,40 +293,47 @@ fn assert_classes_equal(reference: &RefClasses, verified: &VerClasses, n: usize)
 #[test]
 fn retained_nested_restore_recaptures_a_post_mark_use_list() {
     let mut r = RefClasses::new();
-    let mut v = VerClasses::new();
+    let mut v = ForkHistory::new(VerClasses::new());
     r.set_min_width(2);
     v.set_min_width(2);
 
     r.add_singleton(rn(0));
     v.add_singleton(vn(0));
     let _outer_r = r.mark(reference::ShrinkPolicy::Never);
-    let _outer_v = v.mark(verified::ShrinkPolicy::Never);
+    let _outer_v = v
+        .mark(verified::ShrinkPolicy::Never)
+        .expect("mark headroom");
 
     r.add_use(r.repr_id(rn(0)).unwrap(), rn(0));
-    v.add_use(v.repr_id(vn(0)).unwrap(), vn(0));
+    let vu0 = v.repr_id(vn(0)).unwrap();
+    v.add_use(vu0, vn(0));
     r.add_singleton(rn(1));
     v.add_singleton(vn(1));
     r.add_use(r.repr_id(rn(1)).unwrap(), rn(0));
-    v.add_use(v.repr_id(vn(1)).unwrap(), vn(0));
+    let vu1 = v.repr_id(vn(1)).unwrap();
+    v.add_use(vu1, vn(0));
 
     let rm = r.merge(rn(1), rn(0)).unwrap();
     let vm = v.merge(vn(1), vn(0)).unwrap();
     let rr = r.repr_id(rm.survivor).unwrap();
     let vr = v.repr_id(vm.survivor).unwrap();
     r.splice_uses(r.use_list_id(rr), rm.absorbed_uses);
-    v.splice_uses(v.use_list_id(vr), vm.absorbed_uses);
+    let vlist = v.use_list_id(vr);
+    v.splice_uses(vlist, vm.absorbed_uses);
     assert_eq!(r.use_list_len(rr), 2);
     assert_eq!(v.use_list_len(vr), 2);
 
     let inner_r = r.mark(reference::ShrinkPolicy::Never);
-    let inner_v = v.mark(verified::ShrinkPolicy::Never);
+    let inner_v = v
+        .mark(verified::ShrinkPolicy::Never)
+        .expect("mark headroom");
     r.add_use(rr, rn(0));
     v.add_use(vr, vn(0));
     assert_eq!(r.use_list_len(rr), 3);
     assert_eq!(v.use_list_len(vr), 3);
 
     r.restore(inner_r);
-    v.restore(inner_v);
+    assert!(v.restore(inner_v), "restore: own live token");
     let rr = r.repr_id(r.find_const(rn(0))).unwrap();
     let vr = v.repr_id(v.find_const(vn(0))).unwrap();
     assert_eq!(
@@ -345,7 +353,7 @@ fn retained_nested_restore_recaptures_a_post_mark_use_list() {
 #[test]
 fn class_keys_recycle_and_restore_with_their_full_typed_identity() {
     let mut r = RefClasses::new();
-    let mut v = VerClasses::new();
+    let mut v = ForkHistory::new(VerClasses::new());
     r.set_min_width(2);
     v.set_min_width(2);
 
@@ -357,7 +365,9 @@ fn class_keys_recycle_and_restore_with_their_full_typed_identity() {
     assert_eq!(ref_index(r_key1), ver_index(v_key1));
 
     let outer_r = r.mark(reference::ShrinkPolicy::Never);
-    let outer_v = v.mark(verified::ShrinkPolicy::Never);
+    let outer_v = v
+        .mark(verified::ShrinkPolicy::Never)
+        .expect("mark headroom");
     let rm = r.merge(rn(0), rn(1)).unwrap();
     let vm = v.merge(vn(0), vn(1)).unwrap();
     assert_eq!(rm.survivor.to_usize(), vm.survivor.to_usize());
@@ -375,7 +385,9 @@ fn class_keys_recycle_and_restore_with_their_full_typed_identity() {
     assert_eq!(ref_index(recycled_r), ver_index(recycled_v));
 
     let inner_r = r.mark(reference::ShrinkPolicy::Never);
-    let inner_v = v.mark(verified::ShrinkPolicy::Never);
+    let inner_v = v
+        .mark(verified::ShrinkPolicy::Never)
+        .expect("mark headroom");
     let r_root0 = r.find_const(rn(0));
     let v_root0 = v.find_const(vn(0));
     let r_root2 = r.find_const(rn(2));
@@ -408,13 +420,13 @@ fn class_keys_recycle_and_restore_with_their_full_typed_identity() {
     assert_classes_equal(&r, &v, 4);
 
     r.restore(inner_r);
-    v.restore(inner_v);
+    assert!(v.restore(inner_v), "restore: own live token");
     assert_classes_equal(&r, &v, 3);
     assert_eq!(r.repr_id(rn(2)), Some(recycled_r));
     assert_eq!(v.repr_id(vn(2)), Some(recycled_v));
 
     r.restore(outer_r);
-    v.restore(outer_v);
+    assert!(v.restore(outer_v), "restore: own live token");
     assert_classes_equal(&r, &v, 2);
     assert_eq!(r.repr_id(rn(0)), Some(r_key0));
     assert_eq!(v.repr_id(vn(0)), Some(v_key0));
@@ -430,7 +442,7 @@ proptest! {
         ops in prop::collection::vec(class_op(), 1..72)
     ) {
         let mut r = RefClasses::new();
-        let mut v = VerClasses::new();
+        let mut v = ForkHistory::new(VerClasses::new());
         r.set_min_width(2);
         v.set_min_width(2);
         let mut marks = Vec::new();
@@ -450,7 +462,8 @@ proptest! {
                     let rr = r.find_const(rn(child));
                     let vr = v.find_const(vn(child));
                     r.add_use(r.repr_id(rr).unwrap(), rn(parent));
-                    v.add_use(v.repr_id(vr).unwrap(), vn(parent));
+                    let vrep = v.repr_id(vr).unwrap();
+                    v.add_use(vrep, vn(parent));
                 }
                 ClassOp::Merge { a, b, directed } if n > 0 => {
                     let a = a as usize % n;
@@ -485,7 +498,8 @@ proptest! {
                         let rr = r.repr_id(rm.survivor).unwrap();
                         let vr = v.repr_id(vm.survivor).unwrap();
                         r.splice_uses(r.use_list_id(rr), rm.absorbed_uses);
-                        v.splice_uses(v.use_list_id(vr), vm.absorbed_uses);
+                        let vlist = v.use_list_id(vr);
+    v.splice_uses(vlist, vm.absorbed_uses);
                     }
                 }
                 ClassOp::SetMinimum { class, column, node } if n > 0 => {
@@ -494,26 +508,28 @@ proptest! {
                     let rr = r.find_const(rn(class));
                     let vr = v.find_const(vn(class));
                     r.set_min_monomial(r.repr_id(rr).unwrap(), column as usize, rn(node));
-                    v.set_min_monomial(v.repr_id(vr).unwrap(), column as usize, vn(node));
+                    let vrep = v.repr_id(vr).unwrap();
+                    v.set_min_monomial(vrep, column as usize, vn(node));
                 }
                 ClassOp::SetAtomic { class } if n > 0 => {
                     let class = class as usize % n;
                     let rr = r.find_const(rn(class));
                     let vr = v.find_const(vn(class));
                     r.set_atomic(r.repr_id(rr).unwrap());
-                    v.set_atomic(v.repr_id(vr).unwrap());
+                    let vrep = v.repr_id(vr).unwrap();
+                    v.set_atomic(vrep);
                 }
                 ClassOp::Mark => {
                     marks.push((
                         r.mark(reference::ShrinkPolicy::Never),
-                        v.mark(verified::ShrinkPolicy::Never),
+                        v.mark(verified::ShrinkPolicy::Never).expect("mark headroom"),
                         n,
                     ));
                 }
                 ClassOp::Restore if !marks.is_empty() => {
                     let (rt, vt, marked_n) = marks.pop().unwrap();
                     r.restore(rt);
-                    v.restore(vt);
+                    assert!(v.restore(vt), "restore: own live token");
                     n = marked_n;
                 }
                 _ => {}

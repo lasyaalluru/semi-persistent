@@ -809,6 +809,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     let mut out = Vec::with_capacity(cmds.len());
     let mut rulesets = RulesetTable::default();
@@ -842,6 +843,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     match cmd {
         SurfaceCommand::Pass(c) => sortcheck_pass(c, eg, model, globals, rulesets),
@@ -932,6 +934,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     // Declarations: register into egraph, then wrap as Decl
     match &cmd {
@@ -1070,6 +1073,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     match cmd {
         Command::Sort(name) => {
@@ -1139,6 +1143,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     crate::canon::MSetCanon: crate::canon::VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     use crate::registry::{AssocDir, Clamp, OpKind, UnitRef};
 

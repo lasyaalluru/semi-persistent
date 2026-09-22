@@ -16,6 +16,8 @@
 //! asserts fire.
 
 use semi_persistent_containers_verus::append_only_vec::AppendOnlyVec;
+use semi_persistent_containers_verus::error::ContainerError;
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::parallel_store::ParallelStore;
 use semi_persistent_containers_verus::vec::{ShrinkPolicy, Vec as SpVec};
 
@@ -31,41 +33,36 @@ fn read_back(v: &V) -> Vec<u32> {
 
 #[test]
 fn foreign_token_refuses_as_err() {
-    let mut a = V::new();
-    let mut b = V::new();
+    let mut a = ForkHistory::new(V::new());
+    let mut b = ForkHistory::new(V::new());
     a.try_push(1).expect("push: within index word");
     b.try_push(2).expect("push: within index word");
     let tok_a = a
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
-    let e = b.try_restore(tok_a).unwrap_err(); // wrong container
-    assert_eq!(
-        e,
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
+    assert!(
+        !b.restore(tok_a),
         "was: panic(token belongs to a different container)"
     );
 }
 
 #[test]
 fn foreign_token_rejected_before_mutation() {
-    let mut a = V::new();
-    let mut b = V::new();
+    let mut a = ForkHistory::new(V::new());
+    let mut b = ForkHistory::new(V::new());
     for i in 0..10 {
         a.try_push(i).expect("push: within index word");
         b.try_push(i + 100).expect("push: within index word");
     }
     let tok_a = a
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     b.try_push(999).expect("push: within index word");
     let before = (0..b.len() as usize)
         .map(|i| b.get(i as u32))
         .collect::<Vec<_>>();
 
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        b.try_restore(tok_a).expect("restore: own token");
-    }));
-    assert!(result.is_err(), "foreign restore must panic");
+    assert!(!b.restore(tok_a), "foreign restore must panic");
     let after = (0..b.len() as usize)
         .map(|i| b.get(i as u32))
         .collect::<Vec<_>>();
@@ -75,8 +72,8 @@ fn foreign_token_rejected_before_mutation() {
     assert_eq!(b.pop(), Some(1000));
 
     // And is_valid_token agrees without panicking.
-    assert!(!b.is_valid_token(&tok_a));
-    assert!(a.is_valid_token(&tok_a));
+    assert!(!b.is_valid(tok_a));
+    assert!(a.is_valid(tok_a));
 }
 
 // ---------------------------------------------------------------------------
@@ -87,44 +84,42 @@ fn foreign_token_rejected_before_mutation() {
 
 #[test]
 fn consumed_token_refuses_as_err() {
-    let mut v = V::new();
+    let mut v = ForkHistory::new(V::new());
     v.try_push(1).expect("push: within index word");
     let tok = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
-    v.try_restore(tok).expect("first restore: live frame"); // consumes the frame
-    let e = v.try_restore(tok).unwrap_err(); // frame is gone
-    assert_eq!(
-        e,
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
+    assert!(v.restore(tok), "first restore: live frame"); // semantics B: frame stays open
+    assert!(v.restore(tok), "second restore: the checkpoint is reusable");
+    assert!(v.pop_scope()); // drop the frame: now the token is dead
+    assert!(
+        !v.restore(tok),
         "was: panic(token points beyond frame stack)"
     );
 }
 
 #[test]
 fn consumed_token_reported_invalid_and_rejected_before_mutation() {
-    let mut v = V::new();
+    let mut v = ForkHistory::new(V::new());
     v.try_push(1).expect("push: within index word");
     let tok = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
-    assert!(v.is_valid_token(&tok), "live token is restorable");
-    v.try_restore(tok).expect("restore: own token");
-    // The consumed-token gap (design doc 08): the public is_valid_token must
-    // now report NOT restorable (frame liveness), even though the branch
-    // genealogy alone would still consider it on-path.
+    assert!(v.is_valid(tok), "live token is restorable");
+    assert!(v.restore(tok), "restore: own token");
+    // Semantics B (design doc 08 §1): the restored frame stays open, so the
+    // token is still restorable; only dropping the frame kills it.
+    assert!(v.is_valid(tok), "restored checkpoint stays restorable");
+    assert!(v.pop_scope());
     assert!(
-        !v.is_valid_token(&tok),
-        "consumed token must report not-restorable"
+        !v.is_valid(tok),
+        "popped frame's token must report not-restorable"
     );
 
     let before = read_back(&v);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        v.try_restore(tok).expect("restore: own token");
-    }));
-    assert!(result.is_err(), "consumed restore must panic");
+    assert!(!v.restore(tok), "consumed restore must panic");
     assert_eq!(
         before,
         read_back(&v),
@@ -134,64 +129,95 @@ fn consumed_token_reported_invalid_and_rejected_before_mutation() {
 
 // ---------------------------------------------------------------------------
 // Abandoned-future token: mark A, restore past it, mark again (new branch) —
-// A's future was cut off; its token must be rejected by genealogy.
+// A's future was cut off. Post-H2 the genealogy lives on the owning group's
+// `History` (a standalone vec is a group of one), so the rejection is the
+// history's: `is_valid` answers false for the abandoned group token, and the
+// paired discipline never hands its depth to the structural vec restore. The
+// vec-level check is structural only (frame liveness), by design.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn abandoned_future_token_refuses_as_err() {
-    let mut v = V::new();
+fn abandoned_future_rejected_by_paired_history() {
+    use semi_persistent_containers_verus::history::History;
+    let mut v = ForkHistory::new(V::new());
+    let mut h = History::new();
     v.try_push(1).expect("push: within index word");
     let base = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
+    let base_g = h.mark();
     v.try_push(2).expect("push: within index word");
-    let abandoned = v
-        .try_mark(ShrinkPolicy::Never)
+    let _abandoned = v
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness"); // depth 2 on branch 0
+    let abandoned_g = h.mark();
     v.try_push(3).expect("push: within index word");
-    v.try_restore(base).expect("restore: own token"); // cut back to depth 0 -> new branch
+    assert!(h.is_valid(base_g));
+    assert!(v.restore(base), "restore: own token"); // cut back to depth 0
+    h.restore_to(base_g); // -> new branch
     v.try_push(20).expect("push: within index word");
     let _new_frame = v
-        .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // depth 1 on the NEW branch
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this harness"); // depth 1, NEW branch
+    let _new_g = h.mark();
     v.try_push(21).expect("push: within index word");
-    // `abandoned` names depth 2 of the OLD branch: genealogy must reject it
-    // (its frame_idx=1 is within frames.len()=1? No: frames.len() is 1, so
-    // frame_idx=1 fails liveness... push another frame so liveness passes and
-    // genealogy is the deciding check).
     let _deeper = v
-        .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // frames.len()=2, frame_idx=1 live
-    assert_eq!(
-        v.try_restore(abandoned).unwrap_err(),
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
-        "was: panic — abandoned-branch future token, rejected by genealogy"
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this harness"); // frame at depth 1 live again
+    let _deeper_g = h.mark();
+    // `abandoned_g` names depth 1 of the OLD branch: even though a frame is
+    // live at that depth again, the branch cut bumped its generation.
+    assert!(
+        !h.is_valid(abandoned_g),
+        "abandoned-branch future token must be rejected by the history"
     );
 }
 
 #[test]
-fn abandoned_future_reported_invalid() {
-    let mut v = V::new();
+fn standalone_vec_refuses_abandoned_branch_token() {
+    // A standalone vec is a group of one: it owns its genealogy, so a token
+    // from an abandoned branch is refused even when a frame is live again at
+    // its index (the restore cut bumped that depth's generation), and the
+    // consumed token itself stays refused after a re-mark at its depth.
+    let mut v = ForkHistory::new(V::new());
     v.try_push(1).expect("push: within index word");
     let base = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
     let abandoned = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(3).expect("push: within index word");
-    v.try_restore(base).expect("restore: own token");
+    assert!(v.restore(base), "restore: own token");
+    assert!(v.is_valid(base), "the checkpoint stays valid (semantics B)");
+    assert!(!v.is_valid(abandoned), "the abandoned future is cut");
     v.try_push(20).expect("push: within index word");
     let _f1 = v
-        .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness");
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this harness"); // depth 1 again, fresh stamp
     let _f2 = v
-        .try_mark(ShrinkPolicy::Never)
-        .expect("mark: depth bounded by this harness"); // make frame_idx=1 live again
+        .mark(ShrinkPolicy::Never)
+        .expect("mark: depth bounded by this harness"); // depth 2
     assert!(
-        !v.is_valid_token(&abandoned),
-        "abandoned-future token must report not-restorable"
+        !v.is_valid(abandoned),
+        "abandoned-branch token must be refused after a re-mark at its depth"
+    );
+    assert!(
+        v.is_valid(base),
+        "the checkpoint stays valid across re-marks above it"
+    );
+    let len_before = v.len();
+    assert!(!v.restore(abandoned), "refused restore");
+    assert_eq!(v.len(), len_before, "a refused restore does not mutate");
+    // Provenance: a token minted by another vec is foreign, whatever its numbers.
+    let mut other = ForkHistory::new(V::new());
+    other.try_push(1).expect("push");
+    let foreign = other.mark(ShrinkPolicy::Never).expect("mark");
+    assert!(!v.is_valid(foreign), "a foreign vec's token is refused");
+    assert!(
+        other.is_valid(foreign),
+        "and still validates on its own vec"
     );
 }
 
@@ -201,24 +227,20 @@ fn abandoned_future_reported_invalid() {
 
 #[test]
 fn untracked_mark_refuses_as_err() {
-    let mut v = SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new();
+    let mut v = ForkHistory::new(SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new());
     v.try_push(1).expect("push: within index word");
-    let e = v.try_mark(ShrinkPolicy::Never).unwrap_err();
-    assert_eq!(
-        e,
-        semi_persistent_containers_verus::error::ContainerError::Untracked,
+    assert!(
+        v.mark(ShrinkPolicy::Never).is_none(),
         "was: panic(mark() called on untracked vec)"
     );
 }
 
 #[test]
 fn untracked_append_only_mark_refuses_as_err() {
-    let mut v = AppendOnlyVec::<u32, usize, false>::new();
+    let mut v = ForkHistory::new(AppendOnlyVec::<u32, usize, false>::new());
     v.try_push(1).expect("push: within index word");
-    let e = v.try_mark(ShrinkPolicy::Never).unwrap_err();
-    assert_eq!(
-        e,
-        semi_persistent_containers_verus::error::ContainerError::Untracked,
+    assert!(
+        v.mark(ShrinkPolicy::Never).is_none(),
         "was: panic(mark() called on untracked AppendOnlyVec)"
     );
 }
@@ -230,41 +252,41 @@ fn untracked_append_only_mark_refuses_as_err() {
 /// container-identity check).
 #[test]
 fn untracked_restore_refuses_as_err() {
-    let mut tracked = V::new();
+    let mut tracked = ForkHistory::new(V::new());
     tracked.try_push(1).expect("push: within index word");
     let tok = tracked
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
-    let mut untracked = SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new();
+    let mut untracked = ForkHistory::new(SpVec::<u32, u32, ParallelStore<u32, u32>, false>::new());
     untracked.try_push(1).expect("push: within index word");
-    let e = untracked.try_restore(tok).unwrap_err();
-    assert_eq!(
-        e,
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
+    assert!(
+        !untracked.restore(tok),
         "was: panic(restore() called on untracked vec); Untracked is folded into\n         InvalidToken here because is_restorable_spec includes the TRACK gate"
     );
 }
 
-/// CircularList::splice same-ring misuse: the different-rings precondition is
-/// spec-level; debug builds walk the ring and panic (release relies on caller
-/// discipline — documented divergence). This test only asserts under
-/// debug_assertions, which cargo test builds enable.
+/// CircularList::splice same-ring misuse: the public `splice` is total — it
+/// walks the absorbed node's ring and refuses (panics) when the survivor is on
+/// it, in every build profile. (The crate-private `splice_core` used by
+/// `EClasses` carries the proven precondition instead of the walk.)
 #[test]
-#[cfg(debug_assertions)]
-fn circular_splice_same_ring_panics_in_debug() {
+fn circular_splice_same_ring_refused() {
     use semi_persistent_containers_verus::circular_list::CircularList;
     use semi_persistent_containers_verus::dense_id::DenseId31;
+    use semi_persistent_containers_verus::opt::DenseId;
     let mut c = CircularList::<u32, DenseId31, true>::new();
     let a = c.try_add_singleton(1).expect("id range");
     let b = c.try_add_singleton(2).expect("id range");
     c.splice(a, b); // legal: different rings -> merged
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        c.splice(a, b); // now the SAME ring: debug guard must fire
+        c.splice(a, b); // now the SAME ring: the guard must refuse
     }));
-    assert!(
-        r.is_err(),
-        "same-ring splice must panic under debug_assertions"
-    );
+    assert!(r.is_err(), "same-ring splice must be refused");
+    // A node id past the allocated range is refused before any walk.
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        c.splice(a, DenseId31::from_usize(7));
+    }));
+    assert!(r.is_err(), "out-of-range splice must be refused");
 }
 
 #[test]
@@ -286,46 +308,48 @@ fn untracked_normal_ops_work() {
 
 #[test]
 fn aov_foreign_token_refuses_as_err() {
-    let mut a = AppendOnlyVec::<u32, usize, true>::new();
-    let mut b = AppendOnlyVec::<u32, usize, true>::new();
+    let mut a = ForkHistory::new(AppendOnlyVec::<u32, usize, true>::new());
+    let mut b = ForkHistory::new(AppendOnlyVec::<u32, usize, true>::new());
     a.try_push(1).expect("push: within index word");
     b.try_push(2).expect("push: within index word");
     let tok_a = a
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
-    assert_eq!(
-        b.try_restore(tok_a).unwrap_err(),
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
+    assert!(
+        !b.restore(tok_a),
         "was: panic(token belongs to a different container)"
     );
 }
 
 #[test]
 fn aov_consumed_token_refuses_as_err() {
-    let mut v = AppendOnlyVec::<u32, usize, true>::new();
+    let mut v = ForkHistory::new(AppendOnlyVec::<u32, usize, true>::new());
     v.try_push(1).expect("push: within index word");
     let tok = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     v.try_push(2).expect("push: within index word");
-    v.try_restore(tok).expect("first restore: live frame");
-    assert_eq!(
-        v.try_restore(tok).unwrap_err(),
-        semi_persistent_containers_verus::error::ContainerError::InvalidToken,
+    assert!(v.restore(tok), "first restore: live frame");
+    assert!(v.restore(tok), "second restore: the checkpoint is reusable");
+    assert!(v.pop_scope());
+    assert!(
+        !v.restore(tok),
         "was: panic(token points beyond frame stack)"
     );
 }
 
 #[test]
 fn aov_consumed_token_reported_invalid() {
-    let mut v = AppendOnlyVec::<u32, usize, true>::new();
+    let mut v = ForkHistory::new(AppendOnlyVec::<u32, usize, true>::new());
     v.try_push(1).expect("push: within index word");
     let tok = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
-    assert!(v.is_valid_token(&tok));
-    v.try_restore(tok).expect("restore: own token");
-    assert!(!v.is_valid_token(&tok));
+    assert!(v.is_valid(tok));
+    assert!(v.restore(tok), "restore: own token");
+    assert!(v.is_valid(tok), "semantics B: the checkpoint stays valid");
+    assert!(v.pop_scope());
+    assert!(!v.is_valid(tok));
 }
 
 // ---------------------------------------------------------------------------
@@ -335,24 +359,20 @@ fn aov_consumed_token_reported_invalid() {
 #[test]
 fn map_consumed_token_reported_invalid_and_state_preserved() {
     use semi_persistent_containers_verus::map::SpMap;
-    let mut m = SpMap::<u32, u32, usize, true>::new();
+    let mut m = ForkHistory::new(SpMap::<u32, u32, usize, true>::new());
     m.try_insert(1, 10).expect("insert: within index word");
     let tok = m
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     m.try_insert(2, 20).expect("insert: within index word");
-    assert!(m.is_valid_token(&tok));
-    m.try_restore(tok).expect("restore: own token");
-    assert!(
-        !m.is_valid_token(&tok),
-        "consumed map token must be invalid"
-    );
+    assert!(m.is_valid(tok));
+    assert!(m.restore(tok), "restore: own token");
+    assert!(m.is_valid(tok), "semantics B: the checkpoint stays valid");
+    assert!(m.pop_scope());
+    assert!(!m.is_valid(tok), "popped map token must be invalid");
 
     let before_log = m.log_len();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        m.try_restore(tok).expect("restore: own token");
-    }));
-    assert!(result.is_err());
+    assert!(!m.restore(tok), "restore: own token");
     assert_eq!(m.log_len(), before_log, "rejected restore must not mutate");
     assert_eq!(m.id_of(&1), Some(0));
 }
@@ -369,25 +389,26 @@ fn sparse_set_atomic_restore_rejects_consumed_compound() {
 
     // Privacy closeout: constructed via the public constructor (fields are
     // no longer visible outside the crate).
-    let mut s = SparseSet::<u32, DenseId31, ParallelStore<u32, DenseId31>, true>::new();
+    let mut s = ForkHistory::new(SparseSet::<
+        u32,
+        DenseId31,
+        ParallelStore<u32, DenseId31>,
+        true,
+    >::new());
     let id1 = s.try_add(100).expect("add: within id space");
     let tok = s
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     let id2 = s.try_add(200).expect("add: within id space");
-    assert!(s.is_valid_token(&tok));
+    assert!(s.is_valid(tok));
     s.restore(tok);
-    assert!(
-        !s.is_valid_token(&tok),
-        "consumed compound token must be invalid"
-    );
+    assert!(s.is_valid(tok), "semantics B: the checkpoint stays valid");
+    assert!(s.pop_scope());
+    assert!(!s.is_valid(tok), "popped compound token must be invalid");
 
     // A second restore with the consumed compound token must be rejected
     // atomically: panic fires before ANY of dense/sparse/indices restores.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        s.restore(tok);
-    }));
-    assert!(result.is_err(), "consumed compound restore must panic");
+    assert!(!s.restore(tok), "consumed compound restore is refused");
     // Set state intact and consistent: id1 present, id2 rolled back.
     assert!(s.contains(id1));
     assert!(!s.contains(id2));
@@ -401,7 +422,6 @@ fn sparse_set_atomic_restore_rejects_consumed_compound() {
 
 #[test]
 fn try_push_refuses_at_the_index_words_capacity() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type V = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
     let mut v: V = V::new();
     // can_push holds while len + 1 < 256, i.e. through len == 254.
@@ -419,7 +439,6 @@ fn try_push_refuses_at_the_index_words_capacity() {
 
 #[test]
 fn try_extend_is_all_or_nothing() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type V = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
     let mut v: V = V::new();
     v.try_extend(&[1, 2, 3]).unwrap();
@@ -436,52 +455,45 @@ fn try_extend_is_all_or_nothing() {
 
 #[test]
 fn try_mark_names_the_failed_precondition() {
-    use semi_persistent_containers_verus::error::ContainerError;
     // Untracked: refused as Untracked, not a panic (the partial mark panics).
     type U = SpVec<u32, u8, ParallelStore<u32, u8>, false>;
-    let mut u: U = U::new();
-    assert_eq!(
-        u.try_mark(ShrinkPolicy::Never).unwrap_err(),
-        ContainerError::Untracked
-    );
+    let mut u: ForkHistory<U> = ForkHistory::new(U::new());
+    assert!(u.mark(ShrinkPolicy::Never).is_none());
     // Tracked and in range: succeeds and round-trips through try_restore.
     type T = SpVec<u32, u8, ParallelStore<u32, u8>, true>;
-    let mut t: T = T::new();
+    let mut t: ForkHistory<T> = ForkHistory::new(T::new());
     t.try_push(1).unwrap();
-    let tok = t.try_mark(ShrinkPolicy::Never).unwrap();
+    let tok = t.mark(ShrinkPolicy::Never).unwrap();
     t.try_push(2).unwrap();
-    t.try_restore(tok).unwrap();
+    assert!(t.restore(tok), "restore: own token");
     assert_eq!(t.len(), 1);
 }
 
 #[test]
 fn try_restore_rejects_a_foreign_token_as_err() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type T = SpVec<u32, u8, ParallelStore<u32, u8>, true>;
-    let mut a: T = T::new();
-    let mut b: T = T::new();
+    let mut a: ForkHistory<T> = ForkHistory::new(T::new());
+    let mut b: ForkHistory<T> = ForkHistory::new(T::new());
     a.try_push(1).unwrap();
     b.try_push(9).unwrap();
-    let tok_a = a.try_mark(ShrinkPolicy::Never).unwrap();
-    assert_eq!(
-        b.try_restore(tok_a).unwrap_err(),
-        ContainerError::InvalidToken,
+    let tok_a = a.mark(ShrinkPolicy::Never).unwrap();
+    assert!(
+        !b.restore(tok_a),
         "a foreign token is an Err on the total surface (the partial core panics)"
     );
     assert_eq!(b.len(), 1, "refused restore leaves the container unchanged");
     // Consumed token: valid once, then Err.
-    a.try_restore(tok_a).unwrap();
-    assert_eq!(
-        a.try_restore(tok_a).unwrap_err(),
-        ContainerError::InvalidToken
+    assert!(a.restore(tok_a), "restore: own token");
+    assert!(
+        a.restore(tok_a),
+        "semantics B: the checkpoint restores again"
     );
 }
 
 #[test]
 fn aov_total_shell_refuses_and_round_trips() {
-    use semi_persistent_containers_verus::error::ContainerError;
     type A = AppendOnlyVec<String, u8, true>;
-    let mut a: A = A::new();
+    let mut a: ForkHistory<A> = ForkHistory::new(A::new());
     while a.can_push() {
         a.try_push("x".to_string()).unwrap();
     }
@@ -489,11 +501,10 @@ fn aov_total_shell_refuses_and_round_trips() {
         a.try_push("y".to_string()).unwrap_err(),
         ContainerError::CapacityExhausted
     );
-    let tok = a.try_mark(ShrinkPolicy::Never).unwrap();
-    assert_eq!(a.try_restore(tok), Ok(()), "fresh token restores");
-    assert_eq!(
-        a.try_restore(tok).unwrap_err(),
-        ContainerError::InvalidToken,
-        "consumed token refuses as Err"
-    );
+    let tok = a.mark(ShrinkPolicy::Never).unwrap();
+    assert!(a.restore(tok), "fresh token restores");
+    assert!(a.restore(tok), "the checkpoint restores again");
+    assert!(a.pop_scope(), "the frame drops");
+    assert!(!a.restore(tok), "a popped frame's token refuses as Err");
+    assert!(!a.pop_scope(), "no open frame");
 }

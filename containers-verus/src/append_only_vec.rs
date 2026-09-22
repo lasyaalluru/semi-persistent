@@ -17,8 +17,6 @@ use vstd::prelude::*;
 
 verus! {
 
-use crate::container_id::ContainerId;
-use crate::fork_history::ForkHistory;
 use crate::index_like::IndexLike;
 use crate::vec::{ShrinkPolicy, VecToken};
 
@@ -33,8 +31,6 @@ use crate::vec::{ShrinkPolicy, VecToken};
 pub struct AppendOnlyVec<T, I: IndexLike = usize, const TRACK: bool = true> {
     pub(crate) data: std::vec::Vec<T>,
     pub(crate) frames: std::vec::Vec<I>,
-    pub(crate) forks: ForkHistory,
-    pub(crate) id: ContainerId,
     /// Ghost snapshot stack: `snapshots[k]` is `data@` as of frame `k`'s mark,
     /// i.e. the length-`frames[k]` prefix. Parallel to `frames`.
     pub(crate) snapshots: Ghost<Seq<Seq<T>>>,
@@ -56,10 +52,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.frames@.len()
     }
 
-    /// Lifetime restore count (fork-history origins length).
-    pub open(crate) spec fn fork_count_spec(&self) -> nat {
-        self.forks.origins@.len()
-    }
 
     /// Well-formedness:
     ///  - the element count fits the index word, so every position — the index
@@ -84,30 +76,18 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 (#[trigger] frames[k]).as_nat() <= (#[trigger] frames[k + 1]).as_nat())
         &&& (forall|k: int| 0 <= k < frames.len() ==>
                 #[trigger] snaps[k] == data.subrange(0, frames[k].as_nat() as int))
-        &&& self.forks.wf()
+        &&& true
     }
 
-    /// Token validity (same as `Vec`): same container AND on the live branch
-    /// path within its depth bound. The `restore` precondition.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: VecToken) -> bool {
-        &&& token.container_id.id() == self.id.id()
-        &&& crate::fork_history::fork_valid(
-                self.forks.origins@,
-                self.forks.current_branch_id as nat,
-                self.frames@.len() as nat,
-                token.branch_id as nat,
-                token.depth as nat)
+
+
+    /// The mark-depth quantity the depth-headroom contracts are phrased over.
+    /// Post-H2 the container tracks no genealogy, so this is the live frame
+    /// depth (the stamp-array length it used to be lived on `GenStamps`).
+    pub open(crate) spec fn fork_count_spec(&self) -> nat {
+        self.frames@.len()
     }
 
-    /// The full runtime-checkable precondition of `restore`, which is what the
-    /// public `is_valid_token` answers.
-    pub open(crate) spec fn is_restorable_spec(&self, token: VecToken) -> bool {
-        &&& TRACK
-        &&& self.is_token_valid_spec(token)
-        &&& token.frame_idx < self.frames@.len()
-        &&& self.frames@.len() < u32::MAX
-        &&& self.forks.origins@.len() + 1 <= u32::MAX
-    }
 
     /// Empty append-only vec.
     pub fn new() -> (v: Self)
@@ -117,8 +97,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         AppendOnlyVec {
             data: std::vec::Vec::new(),
             frames: std::vec::Vec::new(),
-            forks: ForkHistory::new(),
-            id: ContainerId::new(),
             snapshots: Ghost(Seq::empty()),
         }
     }
@@ -129,6 +107,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// this cannot fail for a well-formed vec — the same protocol as
     /// `InlineStore::len` (`inline_store.rs`), and the reason `push` guards the
     /// *new* length rather than the returned index.
+    #[inline(always)]
     pub fn len(&self) -> (n: I)
         requires self.wf(),
         ensures n.as_nat() == self.view().len(),
@@ -155,6 +134,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// Contiguous read access to all elements (production parity; also the
     /// safe replacement for egraph's `from_raw_parts` contiguity assumption).
     /// The backing store IS a `std::vec::Vec`, so the slice is the view.
+    #[inline(always)]
     pub fn as_slice(&self) -> (r: &[T])
         ensures r@ == self.view(),
     {
@@ -168,6 +148,7 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
     /// returned index: `wf` has to hold on exit, and it is what makes `len` and
     /// `mark` infallible. Requiring only `view().len() < I::max_nat()` would admit
     /// a final push whose successor length falls outside `I`.
+    #[inline(always)]
     pub(crate) fn push(&mut self, val: T) -> (idx: I)
         requires
             old(self).wf(),
@@ -208,33 +189,29 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
         self.frames.len()
     }
 
-    /// How many more `restore`s this container can accept before the
-    /// fork-history branch counter saturates `u32` (saturating at 0). While
-    /// `> 0`, `restore`'s `origins.len() + 1 <= u32::MAX` precondition holds.
+    /// Remaining mark-depth headroom before the `u32::MAX` frame cap (the
+    /// genealogy lives on the owning `History`; see `Vec::restores_remaining`).
     pub fn restores_remaining(&self) -> (r: usize)
         requires self.wf(),
         ensures
-            self.fork_count_spec() < u32::MAX ==>
-                r as nat == (u32::MAX - self.fork_count_spec()) as nat,
-            self.fork_count_spec() >= u32::MAX ==> r == 0,
+            self.depth_spec() < u32::MAX ==>
+                r as nat == (u32::MAX - self.depth_spec()) as nat,
+            self.depth_spec() >= u32::MAX ==> r == 0,
     {
-        let used = self.forks.origins.len();
-        (u32::MAX as usize).saturating_sub(used)
+        (u32::MAX as usize).saturating_sub(self.frames.len())
     }
 
-    /// Mark: save the current length, returning a token. The new frame records
-    /// `data.len()` (>= every prior frame, since data only grew), keeping
-    /// `frames` monotone.
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: VecToken)
+    /// Push a frame without minting: the structural half of `mark` (what a
+    /// typed group drives; the group's `History` mints the token). The new
+    /// frame records `data.len()`, keeping `frames` monotone.
+    pub(crate) fn push_frame(&mut self, shrink: ShrinkPolicy)
         requires
             old(self).wf(),
-            // Production permits marks only when tracking is enabled.
             TRACK,
             old(self).depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).view() == old(self).view(),
-            token.frame_idx_spec() == old(self).depth_spec(),
             final(self).depth_spec() == old(self).depth_spec() + 1,
             final(self).snapshots_view() == old(self).snapshots_view().push(old(self).view()),
     {
@@ -255,10 +232,6 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 shrink_aov_capacity(&mut self.data, factor, headroom);
             }
         }
-
-        let token_branch = self.forks.current_branch();
-        let token_depth = self.frames.len() as u32;
-        let token_container = self.id;
 
         // The saved length is a position, so it is stored as `I`; the conversion
         // is infallible by `wf`.
@@ -300,20 +273,15 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 }
             }
         }
-
-        VecToken {
-            frame_idx: self.frames.len() - 1,
-            branch_id: token_branch,
-            depth: token_depth,
-            container_id: token_container,
-        }
     }
+
 
     // ------------------------------------------------------------------
     // Total-operation shell, matching Vec's pattern.
     // ------------------------------------------------------------------
 
     /// Exec counterpart of `push`'s capacity precondition.
+    #[inline(always)]
     pub fn can_push(&self) -> (b: bool)
         requires self.wf(),
         ensures b == (self.view().len() + 1 < I::max_nat()),
@@ -331,6 +299,13 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
 
     /// Total push: refuses at the index word's capacity, returns the new
     /// element's index on success.
+    ///
+    /// One read of the length serves the capacity test, the returned index and
+    /// the append, and the whole path is inlined into the caller: the append
+    /// loop a node store or a log writer runs is then a compare, a branch to the
+    /// cold growth call, and a store — the same instructions as a bare
+    /// `Vec::push` loop — with nothing for the optimiser to hoist or guess.
+    #[inline(always)]
     pub fn try_push(&mut self, val: T) -> (r: Result<I, crate::error::ContainerError>)
         requires old(self).wf(),
         ensures
@@ -341,187 +316,82 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
             final(self).snapshots_view() == old(self).snapshots_view(),
             r matches Err(e) ==> e == crate::error::ContainerError::CapacityExhausted,
     {
-        if self.can_push() {
-            Ok(self.push(val))
+        let n = self.data.len();
+        let cap = <I as crate::index_like::IndexLike>::max().as_usize();
+        proof {
+            <I as crate::index_like::IndexLike>::lemma_max_nat_positive();
+            <I as crate::index_like::IndexLike>::lemma_max_as_nat();
+            <I as crate::index_like::IndexLike>::lemma_max_nat_fits_usize();
+            assert(cap as nat == I::max_nat() - 1);
+        }
+        if n < cap {
+            // `n < cap` puts `n` inside `I`, so the conversion cannot fail.
+            let idx = match I::try_from_usize(n) {
+                Some(i) => i,
+                None => crate::guard::refuse("append-only vec: length inside the index word"),
+            };
+            let ghost old_data = self.data@;
+            self.data.push(val);
+            proof {
+                let data = self.data@;
+                assert(data == old_data.push(val));
+                assert forall|k: int| 0 <= k < self.frames@.len() implies
+                    #[trigger] self.snapshots@[k] == data.subrange(0, self.frames@[k].as_nat() as int)
+                by {
+                    assert(old(self).snapshots@[k]
+                        == old_data.subrange(0, self.frames@[k].as_nat() as int));
+                    assert(self.frames@[k].as_nat() <= old_data.len());
+                    assert(data.subrange(0, self.frames@[k].as_nat() as int)
+                        =~= old_data.subrange(0, self.frames@[k].as_nat() as int));
+                }
+            }
+            Ok(idx)
         } else {
             Err(crate::error::ContainerError::CapacityExhausted)
         }
     }
 
-    /// Total mark: the error names which precondition failed.
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<VecToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).view() == old(self).view()
-                &&& token.frame_idx_spec() == old(self).depth_spec()
-                &&& final(self).depth_spec() == old(self).depth_spec() + 1
-                &&& final(self).snapshots_view()
-                    == old(self).snapshots_view().push(old(self).view())
-            },
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if !(self.frames.len() < (u32::MAX as usize)) {
-            return Err(crate::error::ContainerError::DepthLimit);
-        }
-        Ok(self.mark(shrink))
-    }
 
-    /// Total restore: `is_valid_token` answers exactly "would `restore`
-    /// succeed right now", so the wrapper is the check.
-    pub fn try_restore(&mut self, token: VecToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r is Ok ==> final(self).view()
-                == old(self).snapshots_view()[token.frame_idx_spec() as int]
-                && final(self).depth_spec() == token.frame_idx_spec()
-                && final(self).snapshots_view()
-                    == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
-            r is Err ==> final(self).view() == old(self).view()
-                && final(self).depth_spec() == old(self).depth_spec()
-                && final(self).snapshots_view() == old(self).snapshots_view(),
-    {
-        if self.is_valid_token(&token) {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
-        }
-    }
 
-    /// The public token-validity check. True iff `restore(token)` would
-    /// succeed at this moment. Borrows the token, matching production.
-    pub fn is_valid_token(&self, token: &VecToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        if !TRACK {
-            return false;
-        }
-        let same_container = token.container_id.eq(self.id);
-        if !same_container {
-            return false;
-        }
-        if token.frame_idx >= self.frames.len() {
-            return false;
-        }
-        if self.frames.len() >= u32::MAX as usize {
-            return false;
-        }
-        if self.forks.origins.len() >= u32::MAX as usize {
-            return false;
-        }
-        let cur_depth = self.frames.len() as u32;
-        self.forks.is_valid(token.branch_id, token.depth, cur_depth)
-    }
 
-    /// Restore to the state the token names: truncate `data` to the saved
-    /// length and the frame/snapshot stacks to the target, then record the
-    /// branch cut. Reproduces `snapshots[token.frame_idx]` exactly.
-    pub(crate) fn restore(&mut self, token: VecToken)
+
+    /// The structural core of a pop-style restore (the SMT-LIB `pop`, the
+    /// group path): reconstruct to frame `target` and drop frames
+    /// `target..`; the cut starts at `target` (that frame's token dies).
+    pub(crate) fn restore_frame(&mut self, target: usize)
         requires
             old(self).wf(),
             TRACK,
-            old(self).is_token_valid_spec(token),
-            token.frame_idx_spec() < old(self).depth_spec(),
-            old(self).depth_spec() < u32::MAX,
-            old(self).fork_count_spec() + 1 <= u32::MAX,
+            (target as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
-            final(self).view() == old(self).snapshots_view()[token.frame_idx_spec() as int],
-            final(self).depth_spec() == token.frame_idx_spec(),
-            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, token.frame_idx_spec() as int),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int),
     {
-        // Check the full restorable predicate, mirroring the proven requires
-        // for unverified callers, before reading
-        // frames[token.frame_idx] or mutating anything. Production message
-        // parity for the token cases.
-        crate::guard::check_precondition(TRACK, "restore() called on untracked AppendOnlyVec");
-        crate::guard::check_precondition(
-            token.container_id.eq(self.id),
-            "token belongs to a different container",
-        );
-        crate::guard::check_precondition(
-            token.frame_idx < self.frames.len(),
-            "token points beyond frame stack",
-        );
-        crate::guard::check_precondition(
-            self.frames.len() < u32::MAX as usize,
-            "AppendOnlyVec::restore: frame-stack depth would overflow u32",
-        );
-        crate::guard::check_precondition(
-            self.forks.origins.len() < u32::MAX as usize,
-            "AppendOnlyVec::restore: fork history exhausted (too many restores)",
-        );
-        crate::guard::check_precondition(
-            {
-                let cur_depth = self.frames.len() as u32;
-                self.forks.is_valid(token.branch_id, token.depth, cur_depth)
-            },
-            "invalid token (abandoned future)",
-        );
-
-        let target = token.frame_idx;
         let saved_len = self.frames[target].as_usize();
-
         let ghost old_data = self.data@;
         let ghost old_frames = self.frames@;
         let ghost old_snaps = self.snapshots@;
-        let ghost forks_origins0 = self.forks.origins@;
-        let ghost forks_branch0 = self.forks.current_branch_id;
-
-        // Establish fork()'s precondition (branch <= origins.len()) from
-        // validity, while self is pristine.
         proof {
-            crate::fork_history::lemma_fork_valid_characterization(
-                self.forks.origins@, self.forks.current_branch_id as nat,
-                self.frames@.len() as nat, token.branch_id as nat, token.depth as nat);
-            crate::fork_history::lemma_reaches_in_range(
-                self.forks.origins@, self.forks.current_branch_id as nat,
-                token.branch_id as nat);
-            assert(token.branch_id as nat <= forks_origins0.len());
-            // target frame length, for the result.
             assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
             assert(saved_len <= old_data.len());
         }
-
         self.data.truncate(saved_len);
         self.frames.truncate(target);
         self.snapshots = Ghost(self.snapshots@.subrange(0, target as int));
-
-        proof {
-            assert(self.forks.origins@ == forks_origins0);
-            assert(self.forks.current_branch_id == forks_branch0);
-            assert(token.branch_id as nat <= self.forks.origins@.len());
-        }
-        self.forks.fork(token.branch_id, token.depth);
-
         proof {
             let data = self.data@;
             let frames = self.frames@;
             let snaps = self.snapshots@;
-            // view == old data prefix [0, saved_len) == old snapshot[target].
             assert(data =~= old_data.subrange(0, saved_len as int));
             assert(data =~= old_snaps[target as int]);
             assert(snaps =~= old_snaps.subrange(0, target as int));
             assert(frames =~= old_frames.subrange(0, target as int));
-            // wf of the truncated stacks: prefixes of the old (still-valid)
-            // facts; each surviving frame's length <= saved_len == data.len(),
-            // and its prefix is unchanged by the data truncation.
             assert forall|k: int| 0 <= k < frames.len() implies
                 #[trigger] frames[k].as_nat() <= data.len() by {
                 assert(frames[k] == old_frames[k]);
                 assert(k < target);
-                // old monotone: frames[k] <= old_frames[target] == saved_len.
                 lemma_aov_frames_le(old_frames, k, target as int);
             }
             assert forall|k: int| 0 <= k < frames.len() implies
@@ -530,13 +400,90 @@ impl<T, I: IndexLike, const TRACK: bool> AppendOnlyVec<T, I, TRACK> {
                 assert(old_snaps[k] == old_data.subrange(0, frames[k].as_nat() as int));
                 lemma_aov_frames_le(old_frames, k, target as int);
                 assert(frames[k].as_nat() <= saved_len);
-                // data == old_data prefix [0,saved_len); for m < frames[k] <= saved_len
-                // the two prefixes agree.
                 assert(data.subrange(0, frames[k].as_nat() as int)
                     =~= old_data.subrange(0, frames[k].as_nat() as int));
             }
         }
     }
+
+    /// Semantics B (design doc 08 §1): reconstruct to frame `target` and keep
+    /// that frame open — frames `target + 1..` are gone, frame `target` stays
+    /// (its saved length is the restored length), so its token stays valid and
+    /// every later token dies (the cut starts at `target + 1`).
+    pub(crate) fn reset_frame(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
+        ensures
+            final(self).wf(),
+            final(self).view() == old(self).snapshots_view()[target as int],
+            final(self).depth_spec() == target as nat + 1,
+            final(self).snapshots_view() == old(self).snapshots_view().subrange(0, target as int + 1),
+    {
+        let saved_len = self.frames[target].as_usize();
+        let ghost old_data = self.data@;
+        let ghost old_frames = self.frames@;
+        let ghost old_snaps = self.snapshots@;
+        proof {
+            assert(old_snaps[target as int] == old_data.subrange(0, saved_len as int));
+            assert(saved_len <= old_data.len());
+        }
+        self.data.truncate(saved_len);
+        self.frames.truncate(target + 1);
+        self.snapshots = Ghost(self.snapshots@.subrange(0, target as int + 1));
+        proof {
+            let data = self.data@;
+            let frames = self.frames@;
+            let snaps = self.snapshots@;
+            assert(data =~= old_data.subrange(0, saved_len as int));
+            assert(data =~= old_snaps[target as int]);
+            assert(snaps =~= old_snaps.subrange(0, target as int + 1));
+            assert(frames =~= old_frames.subrange(0, target as int + 1));
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] frames[k].as_nat() <= data.len() by {
+                assert(frames[k] == old_frames[k]);
+                assert(k <= target);
+                lemma_aov_frames_le(old_frames, k, target as int);
+            }
+            assert forall|k: int| 0 <= k < frames.len() implies
+                #[trigger] snaps[k] == data.subrange(0, frames[k].as_nat() as int) by {
+                assert(snaps[k] == old_snaps[k]);
+                assert(old_snaps[k] == old_data.subrange(0, frames[k].as_nat() as int));
+                lemma_aov_frames_le(old_frames, k, target as int);
+                assert(frames[k].as_nat() <= saved_len);
+                assert(data.subrange(0, frames[k].as_nat() as int)
+                    =~= old_data.subrange(0, frames[k].as_nat() as int));
+            }
+        }
+    }
+
+    /// Drop the open top frame, undoing its appends (the SMT-LIB `pop`); that
+    /// frame's token dies. Refuses on an empty frame stack.
+    pub(crate) fn pop_frame(&mut self)
+        requires
+            old(self).wf(),
+            TRACK,
+        ensures
+            final(self).wf(),
+            old(self).depth_spec() >= 1 ==> {
+                &&& final(self).view() == old(self).snapshots_view()[old(self).depth_spec() - 1]
+                &&& final(self).depth_spec() == old(self).depth_spec() - 1
+                &&& final(self).snapshots_view()
+                    == old(self).snapshots_view().subrange(0, old(self).depth_spec() - 1)
+            },
+    {
+        let d = self.frames.len();
+        if !(d >= 1) {
+            crate::guard::refuse("AppendOnlyVec::pop_scope: no open frame");
+        }
+        self.restore_frame(d - 1);
+    }
+
+
+
+
 }
 
 /// In a monotone non-decreasing frame-length sequence, `frames[k] <=

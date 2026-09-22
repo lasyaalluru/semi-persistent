@@ -20,9 +20,11 @@
 //!   - `S: SearchKind` — the in-node search (binary search);
 //!   - `const TRACK` — semi-persistence on/off.
 //!
-//! The arena is an `InlineStore`-backed `Vec` (production's `VecI`): the node is
-//! [`Tagged`], its semi-persistence capture bit stolen into the packed repr, so
-//! `mark`/`restore` compose for free.
+//! The arena is a `Vec` whose store the policy parameter `P` chooses
+//! (`crate::store_policy`; the default `HotFirst` gives `InlineStore`,
+//! production's `VecI`): the node is [`Tagged`], so under that default its
+//! semi-persistence capture bit is stolen into the packed repr, and
+//! `mark`/`restore` compose for free. The proofs use only the `Vec` contract.
 //!
 //! The verified surface includes the generic tree model, search, insertion and
 //! split propagation, bulk loading, cursors, and semi-persistent mark/restore.
@@ -35,8 +37,8 @@ use crate::bplus_layout::NodeLayout;
 use crate::bplus_search::SearchKind;
 use crate::bplus_tree::Tree;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
 use crate::opt::DenseId;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::tagged::Tagged;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
@@ -178,16 +180,17 @@ pub open(crate) spec fn forest_links_to<L: NodeLayout>(arena: Seq<L::Node>, kids
     }
 }
 
-/// The semi-persistent B+tree set. `nodes` is the `InlineStore`-backed arena,
+/// The semi-persistent B+tree set. `nodes` is the policy-chosen arena,
 /// `root` the root's arena index, `nkeys` the cached key count, and `tree` the
 /// ghost recursive model `wf`/`model` are stated over.
-pub struct BPlusTreeSet<K, L = crate::bplus_layout::Layout64U32, S = crate::bplus_search::BinarySearch, const TRACK: bool = true>
+pub struct BPlusTreeSet<K, L = crate::bplus_layout::Layout64U32, S = crate::bplus_search::BinarySearch, const TRACK: bool = true, P = HotFirst>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
-    pub(crate) nodes: SpVec<L::Node, L::ArenaIdx, InlineStore<L::Node, L::ArenaIdx>, TRACK>,
+    pub(crate) nodes: SpVec<L::Node, L::ArenaIdx, <P as TaggedFamily<L::Node, L::ArenaIdx, TRACK>>::Store, TRACK>,
     /// Arena index of the root node.
     pub(crate) root: L::ArenaIdx,
     /// Number of keys (cached; equals `model().len()`). Mirrors production's
@@ -374,6 +377,109 @@ pub open(crate) spec fn node_word_keys<L: NodeLayout>(n: L::Node) -> Seq<nat> {
     Seq::new(L::keys_view(n).len(), |i: int| L::keys_view(n)[i].as_nat())
 }
 
+/// The rightmost leaf of a subtree after an insert: the fresh right leaf when
+/// the subtree's rightmost leaf split (`last == Some(id)`), else the one it had.
+pub open(crate) spec fn last_after<L: NodeLayout>(last: Option<L::ArenaIdx>, cur: Tree) -> nat {
+    match last {
+        Option::Some(id) => id.as_nat(),
+        Option::None => crate::bplus_tree::last_leaf_id(cur),
+    }
+}
+
+/// The split-or-not result reported one level up: the child's report when the
+/// child was the last one, else nothing (the rightmost leaf did not move).
+pub open(crate) spec fn last_lift<L: NodeLayout>(
+    clast: Option<L::ArenaIdx>, cp: int, nkids: int,
+) -> Option<L::ArenaIdx> {
+    if cp == nkids - 1 { clast } else { Option::None }
+}
+
+/// Rightmost leaf after absorbing the child's result at position `cp`: the
+/// child at `cp` became `ncl` (no child split).
+proof fn lemma_last_after_absorb<L: NodeLayout>(
+    gid: nat, gseps: Seq<nat>, gkids: Seq<Tree>, cp: int, ncl: Tree,
+    clast: Option<L::ArenaIdx>,
+)
+    requires
+        gkids.len() >= 1,
+        0 <= cp < gkids.len(),
+        crate::bplus_tree::last_leaf_id(ncl) == last_after::<L>(clast, gkids[cp]),
+    ensures
+        crate::bplus_tree::last_leaf_id(Tree::Inner { id: gid, seps: gseps, kids: gkids.update(cp, ncl) })
+            == last_after::<L>(last_lift::<L>(clast, cp, gkids.len() as int),
+                Tree::Inner { id: gid, seps: gseps, kids: gkids }),
+{
+    let nkids = gkids.update(cp, ncl);
+    let m = gkids.len() - 1;
+    assert(nkids.len() == gkids.len());
+    if cp == m {
+        assert(nkids[m] == ncl);
+    } else {
+        assert(nkids[m] == gkids[m]);
+    }
+}
+
+/// Rightmost leaf after absorbing a child split at `cp`: the child became
+/// `ncl` and its right half `ncr` was spliced in at `cp + 1`.
+proof fn lemma_last_after_child_split<L: NodeLayout>(
+    gid: nat, gseps: Seq<nat>, nseps: Seq<nat>, gkids: Seq<Tree>, cp: int, ncl: Tree, ncr: Tree,
+    clast: Option<L::ArenaIdx>,
+)
+    requires
+        gkids.len() >= 1,
+        0 <= cp < gkids.len(),
+        crate::bplus_tree::last_leaf_id(ncr) == last_after::<L>(clast, gkids[cp]),
+    ensures
+        crate::bplus_tree::last_leaf_id(Tree::Inner {
+            id: gid, seps: nseps, kids: gkids.update(cp, ncl).insert(cp + 1, ncr) })
+            == last_after::<L>(last_lift::<L>(clast, cp, gkids.len() as int),
+                Tree::Inner { id: gid, seps: gseps, kids: gkids }),
+{
+    let nkids = gkids.update(cp, ncl).insert(cp + 1, ncr);
+    let m = gkids.len() - 1;
+    assert(nkids.len() == gkids.len() + 1);
+    if cp == m {
+        assert(nkids[m + 1] == ncr);
+    } else {
+        assert(nkids[m + 1] == gkids[m]);
+    }
+}
+
+/// Rightmost leaf of the right half of a parent split: the right half keeps
+/// the combined children's tail, so its rightmost leaf is the combined
+/// arrangement's.
+proof fn lemma_last_after_parent_split<L: NodeLayout>(
+    gid: nat, gseps: Seq<nat>, gkids: Seq<Tree>, cp: int, ncl: Tree, ncr: Tree,
+    rid: nat, rseps: Seq<nat>, imid: int, clast: Option<L::ArenaIdx>,
+)
+    requires
+        gkids.len() >= 1,
+        0 <= cp < gkids.len(),
+        0 <= imid,
+        imid + 1 < gkids.len() + 1,
+        crate::bplus_tree::last_leaf_id(ncr) == last_after::<L>(clast, gkids[cp]),
+    ensures
+        ({
+            let ckids = gkids.update(cp, ncl).insert(cp + 1, ncr);
+            crate::bplus_tree::last_leaf_id(Tree::Inner {
+                id: rid, seps: rseps, kids: ckids.subrange(imid + 1, ckids.len() as int) })
+                == last_after::<L>(last_lift::<L>(clast, cp, gkids.len() as int),
+                    Tree::Inner { id: gid, seps: gseps, kids: gkids })
+        }),
+{
+    let ckids = gkids.update(cp, ncl).insert(cp + 1, ncr);
+    let rk = ckids.subrange(imid + 1, ckids.len() as int);
+    let m = gkids.len() - 1;
+    assert(ckids.len() == gkids.len() + 1);
+    assert(rk.len() >= 1);
+    assert(rk[rk.len() - 1] == ckids[m + 1]);
+    if cp == m {
+        assert(ckids[m + 1] == ncr);
+    } else {
+        assert(ckids[m + 1] == gkids[m]);
+    }
+}
+
 // ===========================================================================
 // B3 support: map a (leaf, position-in-leaf) pair to a flat model index.
 //
@@ -396,11 +502,12 @@ pub open(crate) spec fn chain_offset<L: NodeLayout>(arena: Seq<L::Node>, lids: S
     }
 }
 
-impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
     /// The arena's abstract node sequence.
     pub open(crate) spec fn arena(&self) -> Seq<L::Node> {
@@ -450,15 +557,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         self.tree_snapshots@
     }
 
-    /// Token validity, delegated to the arena component.
-    pub open(crate) spec fn is_token_valid_spec(&self, token: BPlusToken) -> bool {
-        self.nodes.is_token_valid_spec(token.nodes)
-    }
 
-    /// "Restorable now", delegated to the arena component.
-    pub open(crate) spec fn is_restorable_spec(&self, token: BPlusToken) -> bool {
-        self.nodes.is_restorable_spec(token.nodes)
-    }
 
     /// Well-formedness. The arena is a valid `Vec`; the ghost root id matches
     /// `root`; the arena realizes the ghost tree (`binds`); the ghost tree is a
@@ -518,7 +617,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         // stack — see circular_list's wf comment for the matching-loop
         // rationale): each archived (header, ghost tree) pair describes its
         // archived arena snapshot.
-        &&& tree_archive_agrees::<K, L, S, TRACK>(
+        &&& tree_archive_agrees::<K, L, S, TRACK, P>(
                 self.header_archive@, self.tree_snapshots@, self.nodes.snapshots_view())
     }
 
@@ -545,12 +644,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
     pub fn new() -> (t: Self)
         ensures t.wf(), t.model() == Seq::<nat>::empty(),
     {
-        let mut nodes = SpVec::<
-            L::Node,
-            L::ArenaIdx,
-            InlineStore<L::Node, L::ArenaIdx>,
-            TRACK,
-        >::new();
+        let mut nodes = SpVec::with_store(
+            <P as TaggedFamily<L::Node, L::ArenaIdx, TRACK>>::empty(),
+        );
         // root index = current length (0), captured before the push.
         let root = nodes.len();
         let leaf = L::new_leaf();
@@ -611,18 +707,6 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         self.nkeys
     }
 
-    /// How many more `restore`s this tree can accept before the arena's
-    /// fork-history branch counter saturates `u32` (saturating at 0). Delegates
-    /// to the inner arena `Vec`, whose fork history governs token validity.
-    pub fn restores_remaining(&self) -> (r: usize)
-        requires self.wf(),
-        ensures
-            self.arena_fork_count_spec() < u32::MAX ==>
-                r as nat == (u32::MAX - self.arena_fork_count_spec()) as nat,
-            self.arena_fork_count_spec() >= u32::MAX ==> r == 0,
-    {
-        self.nodes.restores_remaining()
-    }
 
     /// Exec `ArenaIdx` for an in-range `usize`. `try_from_usize` succeeds exactly
     /// when `v < max_nat`, which every caller here proves; the `None` arm is
@@ -717,10 +801,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
     /// `link` becomes the finished leaf's forward chain pointer (the next leaf's
     /// arena id, or NIL for the last), so the chain is built in this single pass.
     ///
-    /// Each `leaf_insert_at` targets position `count`, i.e. the current end, so it
-    /// is a push and never shifts. This also fuses key-to-word conversion into
-    /// the fill instead of allocating a conversion scratch vector. Current
-    /// constant-factor comparisons belong in the Criterion bulk-build benchmark.
+    /// The leaf is written in one `leaf_fill_keys` pass with the key-to-word
+    /// conversion fused into the copy, so `leaf_push`'s per-key precondition
+    /// check is paid once per leaf and no conversion scratch vector exists.
     fn bulk_fill_leaf(keys: &[K], at: usize, take: usize, link: L::ArenaIdx) -> (node: L::Node)
         requires
             take <= L::leaf_cap_spec(),
@@ -733,71 +816,21 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             L::link_view(node) == link.as_nat(),
             node_word_keys::<L>(node)
                 == Seq::new(take as nat, |i: int| keys@[at + i].id_nat()),
-            // `model_bounded`'s per-key obligation, collected here because
-            // `lemma_id_nat_bounded` needs the exec key, which only exists in
-            // this loop (the same reason `fast_append` collects it inline).
+            // `model_bounded`'s per-key obligation, collected by the fill (which
+            // holds the exec keys), the same way `fast_append` collects it inline.
             forall|i: int| 0 <= i < take ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
     {
         let mut node = L::new_leaf();
-        proof {
-            L::lemma_keys_view_len(node);
-            assert(node_word_keys::<L>(node) =~= Seq::new(0nat, |i: int| keys@[at + i].id_nat()));
-        }
-        let mut j: usize = 0;
-        while j < take
-            invariant
-                take <= L::leaf_cap_spec(),
-                at + take <= keys@.len(),
-                keys@.len() <= usize::MAX,
-                0 <= j <= take,
-                L::is_leaf_spec(node),
-                L::node_wf(node),
-                L::count_spec(node) == j,
-                L::link_view(node) == nil_link::<L>(),
-                node_word_keys::<L>(node)
-                    == Seq::new(j as nat, |i: int| keys@[at + i].id_nat()),
-                forall|i: int| 0 <= i < j ==> #[trigger] keys@[at + i].id_nat() < K::id_bound(),
-            decreases take - j,
-        {
-            // `slice_get`, not `keys[at + j]`: the index bound is the loop
-            // invariant's (`at + take <= keys.len()`, `j < take`), so the emitted
-            // `cmp/jae panic` was dead code in the loader's innermost loop.
-            let k: K = crate::bplus_layout::slice_get(keys, at + j);
-            proof { k.lemma_id_nat_bounded(); }
-            let kw: L::Word = k.to_index();
-            let ghost pre = node_word_keys::<L>(node);
-            let ghost pre_view = L::keys_view(node);
-            proof { L::lemma_keys_view_len(node); }
-            // `leaf_push`, not `leaf_insert_at(.., j, ..)`: position == count here,
-            // so the shift is empty — but only the specialized signature lets LLVM
-            // see that and drop `arr_shift_up`'s length dispatch. See `leaf_push`.
-            L::leaf_push(&mut node, kw);
-            proof {
-                L::lemma_keys_view_len(node);
-                let want = Seq::new((j + 1) as nat, |i: int| keys@[at + i].id_nat());
-                assert(L::keys_view(node) == pre_view.push(kw));
-                assert(pre_view.push(kw) == pre_view.insert(j as int, kw));
-                assert(node_word_keys::<L>(node) =~= want) by {
-                    let got = node_word_keys::<L>(node);
-                    assert(got.len() == j + 1);
-                    assert forall|i: int| 0 <= i < got.len() implies got[i] == want[i] by {
-                        if i < j as int {
-                            // insert at the end leaves every earlier slot put.
-                            assert(L::keys_view(node)[i] == pre_view[i]);
-                            assert(got[i] == pre[i]);
-                        } else {
-                            assert(L::keys_view(node)[i] == kw);
-                        }
-                    }
-                }
-            }
-            j = j + 1;
-        }
+        L::leaf_fill_keys::<K>(&mut node, keys, at, take);
         // The chain, written HERE rather than in a second pass: the loader knows
         // each leaf's successor id before it fills the leaf (a level's ids are
         // contiguous), so production's separate link pass — one extra whole-node
         // read plus write per leaf — is unnecessary.
         L::set_link(&mut node, link);
+        proof {
+            assert(node_word_keys::<L>(node)
+                =~= Seq::new(take as nat, |i: int| keys@[at + i].id_nat()));
+        }
         node
     }
 
@@ -1841,12 +1874,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             t.tree_snapshots@.len() == 0,
     {
         BPlusTreeSet {
-            nodes: SpVec::<
-                L::Node,
-                L::ArenaIdx,
-                InlineStore<L::Node, L::ArenaIdx>,
-                TRACK,
-            >::new(),
+            nodes: SpVec::with_store(
+                <P as TaggedFamily<L::Node, L::ArenaIdx, TRACK>>::empty(),
+            ),
             root: <L::ArenaIdx as IndexLike>::min(),
             nkeys: 0,
             tree: Ghost(Tree::Leaf { id: 0, keys: Seq::empty() }),
@@ -2257,27 +2287,39 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             crate::guard::refuse("BPlusTreeSet::from_sorted: too many keys");
         }
         if keys.len() > 1 {
+            // Strict-order check as a branch-free reduction (no early exit, so
+            // the loop vectorizes); the single refusal follows the loop.
+            let klen = keys.len();
+            let mut ok = true;
             let mut ci: usize = 1;
-            while ci < keys.len()
+            while ci < klen
                 invariant
-                    1 <= ci <= keys@.len(),
+                    1 <= ci <= klen,
+                    klen == keys@.len(),
                     keys@.len() < usize::MAX,
-                    forall|a: int, b: int| 0 <= a < b < ci
+                    ok ==> forall|a: int, b: int| 0 <= a < b < ci
                         ==> (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat(),
-                decreases keys@.len() - ci,
+                decreases klen - ci,
             {
-                if !(keys[ci - 1].to_usize() < keys[ci].to_usize()) {
-                    crate::guard::refuse("BPlusTreeSet::from_sorted: keys not strictly ascending");
-                }
+                let prev: K = crate::bplus_layout::slice_get(keys, ci - 1);
+                let cur: K = crate::bplus_layout::slice_get(keys, ci);
+                let lt = prev.to_usize() < cur.to_usize();
+                let ghost was_ok = ok;
+                ok = if lt { ok } else { false };
                 proof {
-                    assert forall|a: int, b: int| 0 <= a < b < ci + 1
-                        implies (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat() by {
-                        if b == ci as int && a < ci - 1 {
-                            assert(keys@[a].id_nat() < keys@[ci - 1].id_nat());
+                    if ok {
+                        assert forall|a: int, b: int| 0 <= a < b < ci + 1
+                            implies (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat() by {
+                            if b == ci as int && a < ci - 1 {
+                                assert(keys@[a].id_nat() < keys@[ci - 1].id_nat());
+                            }
                         }
                     }
                 }
                 ci += 1;
+            }
+            if !ok {
+                crate::guard::refuse("BPlusTreeSet::from_sorted: keys not strictly ascending");
             }
         }
         if keys.len() == 0 {
@@ -2306,9 +2348,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
 
     /// A fresh cursor over this tree (production `tree.cursor()` parity;
     /// delegates to `BPlusCursor::new` — exhausted until `seek`/`seek_first`).
-    pub fn cursor(&self) -> (c: BPlusCursor<'_, K, L, S, TRACK>)
+    pub fn cursor(&self) -> (c: BPlusCursor<'_, K, L, S, TRACK, P>)
         requires self.wf(),
-        ensures c.tree_ref() == self, c.cursor_wf(), c.idx() == c.model().len(),
+        ensures c.tree_ref() == self, c.cursor_ok(), c.idx() == c.model().len(),
     {
         BPlusCursor::new(self)
     }
@@ -2644,7 +2686,7 @@ pub(crate) proof fn lemma_forest_links_compose<L: NodeLayout>(
 /// `a1` (pre-push) and `a2 == a1.push(new_root)` are two snapshots of the single
 /// arena; nl/nr already bind in a1 (the recursion's result) and a tail push
 /// preserves that.
-pub(crate) proof fn lemma_insert_new_root<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_insert_new_root<K, L, S, const TRACK: bool, P>(
     a1: Ghost<Seq<L::Node>>,
     a2: Ghost<Seq<L::Node>>,
     old_model: Ghost<Seq<nat>>,
@@ -2662,6 +2704,7 @@ pub(crate) proof fn lemma_insert_new_root<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         // the two halves are wf (non-root) at height h in a1, chained nl -> nr -> NIL.
         BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a1@, nl@, h@,
@@ -2885,7 +2928,7 @@ pub(crate) proof fn lemma_child_ids_subset_tree<L: NodeLayout>(t: Tree, cp: int,
 /// the child's region. Conclude the parent `Inner{gid, gseps, gkids.update(cp,
 /// ncl)}` is `subtree_wf(arena2, _, h, succ)`, with model = old ∪ {key} and root
 /// id `gid`. Pure assembly of the landed forest-update + frame + ordering lemmas.
-pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -2905,6 +2948,7 @@ pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -3034,7 +3078,7 @@ pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool>(
     assert(crate::bplus_tree::tree_wf(nt, h@, L::leaf_cap_spec(), L::key_cap_spec(), is_root@));
 
     // (3) leaf_links_to(a2, nt, succ): compose over the updated children.
-    reconstruct_absorb_links::<K, L, S, TRACK>(arena1, arena2, cur, ncl, gid, gseps, gkids, cp, h, succ, child_succ);
+    reconstruct_absorb_links::<K, L, S, TRACK, P>(arena1, arena2, cur, ncl, gid, gseps, gkids, cp, h, succ, child_succ);
 
     // (4) tree_disjoint(nt): disjoint_update with the GROWN child. The bound is
     // arena1.len(): every old forest id is < arena1.len() (binds(a1, cur) puts
@@ -3099,7 +3143,7 @@ pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool>(
     crate::bplus_tree::lemma_forest_keys_update(gkids@, cp@, ncl@);
     crate::bplus_tree::lemma_forest_keys_split(gkids@, cp@ + 1);
     crate::bplus_tree::lemma_forest_keys_split(gkids@, cp@);
-    reconstruct_absorb_model::<K, L, S, TRACK>(cur, ncl, gkids, cp, key);
+    reconstruct_absorb_model::<K, L, S, TRACK, P>(cur, ncl, gkids, cp, key);
 }
 
 /// Frame for the split branch: slots `< arena1.len()` outside `tree_ids(cur)`
@@ -3107,7 +3151,7 @@ pub(crate) proof fn reconstruct_absorb<K, L, S, const TRACK: bool>(
 /// only inside `tree_ids(gkids[cp]) ⊆ tree_ids(cur)` plus fresh tail slots, and
 /// the parent's `set(idx, …)` is at `gid ∈ tree_ids(cur)`. So every sibling slot
 /// is preserved.
-pub(crate) proof fn reconstruct_split_frame<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_split_frame<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -3118,6 +3162,7 @@ pub(crate) proof fn reconstruct_split_frame<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ is Inner,
         cur@->Inner_kids == gkids@,
@@ -3228,7 +3273,7 @@ pub(crate) proof fn lemma_left_right_disjoint_cp<L: NodeLayout>(cur: Tree, cp: i
 /// and frame to `a2` (their footprints are disjoint from `gkids[cp]` and from
 /// `gid`, all slots unchanged). Then `binds` distributes over the concatenation
 /// `left ++ [ncl, ncr] ++ right`.
-pub(crate) proof fn lemma_splice_children_bind<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_splice_children_bind<K, L, S, const TRACK: bool, P>(
     a1: Seq<L::Node>,
     a2: Seq<L::Node>,
     cur: Tree,
@@ -3243,6 +3288,7 @@ pub(crate) proof fn lemma_splice_children_bind<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur == (Tree::Inner { id: gid, seps: gseps, kids: gkids }),
         0 <= cp < gkids.len(),
@@ -3296,7 +3342,7 @@ pub(crate) proof fn lemma_splice_children_bind<K, L, S, const TRACK: bool>(
 /// (tree_wf + model) plus the arena layers: `binds` over the spliced children
 /// (`lemma_forest_binds_concat` of the three pieces), the leaf-link chain, and
 /// `tree_disjoint`. No assumes.
-pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -3319,6 +3365,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -3436,7 +3483,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
     // recursion, siblings framed from a1.
     assert(binds::<L>(a2, ncl@));
     assert(binds::<L>(a2, ncr@));
-    lemma_splice_children_bind::<K, L, S, TRACK>(a1, a2, cur_t, gid@, gseps@, kids, cp@, ncl@, ncr@);
+    lemma_splice_children_bind::<K, L, S, TRACK, P>(a1, a2, cur_t, gid@, gseps@, kids, cp@, ncl@, ncr@);
     assert(forest_binds_l::<L>(a2, nkids));
     // binds(a2, nt) Inner arm: the parent node `pnode` at gid, its keys_view and
     // child_view match nseps / nkids' root ids.
@@ -3447,7 +3494,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
         L::lemma_keys_view_len(a1[gid@ as int]);
         assert(L::count_spec(a1[gid@ as int]) == gseps@.len());  // binds(a1,cur) Inner arm
     }
-    lemma_child_split_binds_node::<K, L, S, TRACK>(
+    lemma_child_split_binds_node::<K, L, S, TRACK, P>(
         a1, a2, gid@, gseps@, kids, cp@, ncl@, ncr@, sep, rid, pnode@);
     assert(binds::<L>(a2, nt));
 
@@ -3465,7 +3512,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
         // id != gid: gid ∉ forest_ids(gkids) (tree_disjoint(cur)).
         assert(!crate::bplus_tree::forest_ids(gkids@).contains(gid@));
     }
-    reconstruct_child_split_links::<K, L, S, TRACK>(
+    reconstruct_child_split_links::<K, L, S, TRACK, P>(
         arena1, arena2, cur, ncl, ncr, gid, gseps, gkids, cp, h, succ, child_succ,
         Ghost(sep.as_nat()), Ghost(rid.as_nat()));
 
@@ -3475,7 +3522,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
     assert(crate::bplus_tree::tree_disjoint(ncl@));  // subtree_wf(ncl)
     assert(crate::bplus_tree::tree_disjoint(ncr@));  // subtree_wf(ncr)
     crate::bplus_tree::lemma_tree_leaf_ids_nonempty(ncl@, (h@ - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), false);
-    reconstruct_child_split_disjoint::<K, L, S, TRACK>(
+    reconstruct_child_split_disjoint::<K, L, S, TRACK, P>(
         arena1, cur, ncl, ncr, gid, gseps, gkids, cp, h, succ, Ghost(sep.as_nat()));
     assert(crate::bplus_tree::tree_disjoint(nt));
     assert(crate::bplus_tree::tree_ids(cur@).subset_of(crate::bplus_tree::tree_ids(nt)));
@@ -3487,7 +3534,7 @@ pub(crate) proof fn reconstruct_child_split_absorb<K, L, S, const TRACK: bool>(
 /// at `gid` has `keys_view == nseps` and `child_view(i) == root id of nkids[i]`.
 /// The `internal_insert_at` postconditions on `pnode` (keys inserted at cp, child
 /// cp+1 == rid, others shifted) line up exactly with the spliced `nseps`/`nkids`.
-pub(crate) proof fn lemma_child_split_binds_node<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_child_split_binds_node<K, L, S, const TRACK: bool, P>(
     a1: Seq<L::Node>,
     a2: Seq<L::Node>,
     gid: nat,
@@ -3504,6 +3551,7 @@ pub(crate) proof fn lemma_child_split_binds_node<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         0 <= cp < gkids.len(),
         gkids.len() == gseps.len() + 1,
@@ -3578,7 +3626,7 @@ pub(crate) proof fn lemma_child_split_binds_node<K, L, S, const TRACK: bool>(
 /// the ORIGINAL parent node (binds `gkids`' root ids); `ncl`/`ncr` carry the new
 /// children's root ids (`gkids[cp]`'s and `rid`). This is the bridge that lets
 /// the parent-split halves' `binds` reduce to the already-bound `ckids`.
-pub(crate) proof fn lemma_isplit_cchild_is_ckid<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_isplit_cchild_is_ckid<K, L, S, const TRACK: bool, P>(
     a1: Seq<L::Node>,
     gid: nat,
     gseps: Seq<nat>,
@@ -3594,6 +3642,7 @@ pub(crate) proof fn lemma_isplit_cchild_is_ckid<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         0 <= cp < gkids.len(),
         0 <= j < gkids.len() + 1,  // ckids has one more child
@@ -3636,7 +3685,7 @@ pub(crate) proof fn lemma_isplit_cchild_is_ckid<K, L, S, const TRACK: bool>(
 /// is the actual stored separator (`internal_split_at`'s `new_sep`); `binds`
 /// reads only that the node's `keys_view` projects to it, so the value is
 /// otherwise unconstrained; it need not equal `ncr_first(ncr)`.
-pub(crate) proof fn lemma_parent_split_half_binds<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_parent_split_half_binds<K, L, S, const TRACK: bool, P>(
     a1: Seq<L::Node>,
     a2: Seq<L::Node>,
     gid: nat,
@@ -3657,6 +3706,7 @@ pub(crate) proof fn lemma_parent_split_half_binds<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         0 <= cp < gkids.len(),
         gkids.len() == gseps.len() + 1,
@@ -3711,7 +3761,7 @@ pub(crate) proof fn lemma_parent_split_half_binds<K, L, S, const TRACK: bool>(
     //   == tree_root_id(ckids[off+j]) == tree_root_id(hkids[j]).
     assert forall|j: int| 0 <= j < hkids.len() implies
         L::child_view(pn, j) == crate::bplus_tree::tree_root_id(#[trigger] hkids[j]) by {
-        lemma_isplit_cchild_is_ckid::<K, L, S, TRACK>(a1, gid, gseps, gkids, cp, ncl, ncr, rid, pnode, off + j);
+        lemma_isplit_cchild_is_ckid::<K, L, S, TRACK, P>(a1, gid, gseps, gkids, cp, ncl, ncr, rid, pnode, off + j);
         assert(hkids[j] == ckids[off + j]);
     }
     // half's children bind: subrange of forest_binds_l(a2, ckids).
@@ -3729,7 +3779,7 @@ pub open(crate) spec fn ncr_first<L: NodeLayout>(ncr: Tree) -> nat {
 /// the child-split splice: a thin arena-side wrapper that supplies the freshness
 /// `bound = arena1.len()` (every old id is in range, every new id is a fresh tail
 /// slot) to the pure-ghost `lemma_child_split_absorb_ids`.
-pub(crate) proof fn reconstruct_child_split_disjoint<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_child_split_disjoint<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
     ncl: Ghost<Tree>,
@@ -3746,6 +3796,7 @@ pub(crate) proof fn reconstruct_child_split_disjoint<K, L, S, const TRACK: bool>
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -3798,7 +3849,7 @@ pub(crate) proof fn reconstruct_child_split_disjoint<K, L, S, const TRACK: bool>
 /// Decompose `cur`'s chain to `forest_links_to(a1, gkids, succ)`, splice in the
 /// two halves (`lemma_forest_links_splice`), then compose back to a whole-subtree
 /// chain (`lemma_forest_links_compose`).
-pub(crate) proof fn reconstruct_child_split_links<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_child_split_links<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -3818,6 +3869,7 @@ pub(crate) proof fn reconstruct_child_split_links<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -3896,13 +3948,13 @@ pub(crate) proof fn reconstruct_child_split_links<K, L, S, const TRACK: bool>(
 /// `crid` (== ncr's root) is the recursion's right-half id; it is NOT `rid` (rt's
 /// root, the fresh push slot) — the two are deliberately distinct params.
 ///
-/// `rlimit(50)`: this composes eight building-block lemmas (tree_wf, two
-/// half_binds, the link splice + half_links, two half_ids, footprint, disjoint)
-/// in one body; the bump over the default covers the combined query (raised
-/// 30→50 when the Vec wf gained the `!TRACK ⟹ no frames` conjunct, which
-/// enlarges the ambient context this instantiates against).
-#[verifier::rlimit(50)]
-pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
+/// Composes the building blocks in three queries so each stays at the default
+/// resource limit on every CI machine: this body does tree_wf and the two
+/// half_binds, [`reconstruct_parent_split_links`] the link splice + half_links,
+/// [`reconstruct_parent_split_ids`] the two half_ids, footprint and disjoint.
+/// (The single-body version needed `rlimit(70)` and still timed out on the
+/// Linux runner once the Vec wf grew its per-frame conjuncts.)
+pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena_rec: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
@@ -3930,6 +3982,7 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -4131,7 +4184,7 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         assert(i < ar.len());    // a1.len() <= ar.len()
         assert(a2[i] == ar[i]);  // i != gid, i < ar.len()
     }
-    lemma_splice_children_bind::<K, L, S, TRACK>(a1, a2, cur_t, gid@, gseps@, kids, cp@, ncl@, ncr@);
+    lemma_splice_children_bind::<K, L, S, TRACK, P>(a1, a2, cur_t, gid@, gseps@, kids, cp@, ncl@, ncr@);
     assert(forest_binds_l::<L>(a2, ckids));
 
     // binds(a2, lt): the half node pl at gid, via lemma_parent_split_half_binds.
@@ -4163,21 +4216,141 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         (#[trigger] L::keys_view(pr@)[i]).as_nat() == cseps[(imid + 1) + i] by {
         assert(L::keys_view(pr@)[i] == cwords[imid + 1 + i]);  // subrange(imid+1, ..)
     }
-    lemma_parent_split_half_binds::<K, L, S, TRACK>(
+    lemma_parent_split_half_binds::<K, L, S, TRACK, P>(
         a1, a2, gid@, gseps@, kids, cp@, ncl@, ncr@, sep.as_nat(), crid, pnode@,
         gid@, pl@, 0, imid);
     assert(binds::<L>(a2, lt@));
     // binds(a2, rt): the half node pr at rid (== new_int), off == imid+1, slen ==
     // key_cap-imid. The isplit_cchild new_child arg is `crid` (ncr's root), not rid.
-    lemma_parent_split_half_binds::<K, L, S, TRACK>(
+    lemma_parent_split_half_binds::<K, L, S, TRACK, P>(
         a1, a2, gid@, gseps@, kids, cp@, ncl@, ncr@, sep.as_nat(), crid, pnode@,
         rid.as_nat(), pr@, imid + 1, (L::key_cap_spec() - imid) as int);
     assert(binds::<L>(a2, rt@));
 
     // ---- (3) leaf_links_to(a2, lt, rt's first leaf) and leaf_links_to(a2, rt, succ). ----
-    // First build forest_links_to(a2, ckids, succ) via the child-split splice
-    // (identical to reconstruct_child_split_links' middle step), then split it at
-    // m == imid+1 into the two halves.
+    // The ar/a2 agreements on ncl/ncr and the a1/a2 agreement outside child cp
+    // were discharged above; the links sub-lemma splices and splits the chains.
+    reconstruct_parent_split_links::<K, L, S, TRACK, P>(
+        arena1, arena_rec, arena2, cur, gseps, gkids, cp, ncl, ncr, child_succ, lt, rt,
+        Ghost(sep.as_nat()), gid, Ghost(rid.as_nat()), h, succ);
+    assert(leaf_links_to::<L>(a2, lt@, crate::bplus_tree::tree_leaf_ids(rt@)[0]));
+    assert(leaf_links_to::<L>(a2, rt@, succ@));
+
+    // ---- (4) footprint / disjoint / first-leaf. ----
+    assert(crate::bplus_tree::tree_disjoint(ncl@));  // subtree_wf(ar, ncl)
+    assert(crate::bplus_tree::tree_disjoint(ncr@));  // subtree_wf(ar, ncr)
+    reconstruct_parent_split_ids::<K, L, S, TRACK, P>(
+        arena1, arena_rec, arena2, cur, gseps, gkids, cp, ncl, ncr, lt, rt,
+        Ghost(sep.as_nat()), gid, Ghost(rid.as_nat()), h, succ);
+    assert(crate::bplus_tree::tree_disjoint(lt@));
+    assert(crate::bplus_tree::tree_disjoint(rt@));
+    assert(crate::bplus_tree::tree_ids(lt@).disjoint(crate::bplus_tree::tree_ids(rt@)));
+    assert(crate::bplus_tree::tree_leaf_ids(lt@)[0] == crate::bplus_tree::tree_leaf_ids(cur_t)[0]);
+
+    // ---- (5) subtree_wf assembly + the global frame ensures. ----
+    assert(BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a2, lt@, h@, crate::bplus_tree::tree_leaf_ids(rt@)[0], false));
+    assert(BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a2, rt@, h@, succ@, false));
+    // global frame: slots < a1.len() outside tree_ids(cur) are unchanged in a2.
+    assert forall|i: int| 0 <= i < a1.len()
+        && !crate::bplus_tree::tree_ids(cur_t).contains(i as nat)
+        implies a2[i] == a1[i] by {
+        // i != gid (gid ∈ tree_ids(cur)); i outside child cp ⟹ ar[i]==a1[i]; i<ar.len.
+        assert(i != gid@);
+        if crate::bplus_tree::tree_ids(gkids@[cp@]).contains(i as nat) {
+            crate::bplus_tree::lemma_child_ids_in_forest(kids, cp@, i as nat);
+            assert(crate::bplus_tree::tree_ids(cur_t).contains(i as nat));  // contradiction
+        }
+        assert(ar[i] == a1[i]);
+        assert(i < ar.len());
+        assert(a2[i] == ar[i]);
+    }
+}
+
+/// Leaf-link sub-step of [`reconstruct_parent_split`]: the chains of the two
+/// halves in `a2`. Builds `forest_links_to(a2, ckids, succ)` by decomposing
+/// `cur`'s chain in `a1` and splicing in `ncl`/`ncr` (framed from `arena_rec`),
+/// then splits the chain at `imid + 1`. Split out of the parent so each solver
+/// query stays small: the parent composes only the binds and footprint facts.
+pub(crate) proof fn reconstruct_parent_split_links<K, L, S, const TRACK: bool, P>(
+    arena1: Ghost<Seq<L::Node>>,
+    arena_rec: Ghost<Seq<L::Node>>,
+    arena2: Ghost<Seq<L::Node>>,
+    cur: Ghost<Tree>,
+    gseps: Ghost<Seq<nat>>,
+    gkids: Ghost<Seq<Tree>>,
+    cp: Ghost<int>,
+    ncl: Ghost<Tree>,
+    ncr: Ghost<Tree>,
+    child_succ: Ghost<nat>,
+    lt: Ghost<Tree>,
+    rt: Ghost<Tree>,
+    sep: Ghost<nat>,
+    gid: Ghost<nat>,
+    rid: Ghost<nat>,
+    h: Ghost<nat>,
+    succ: Ghost<nat>,
+)
+    where
+        K: DenseId,
+        L: NodeLayout<Word = K::Index>,
+        S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
+    requires
+        cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
+        h@ == crate::bplus_tree::tree_height(cur@),
+        h@ >= 1,
+        0 <= cp@ < gkids@.len(),
+        gseps@.len() == L::key_cap_spec(),
+        BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(arena1@, cur@, h@, succ@, true),
+        BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(arena_rec@, ncl@, (h@ - 1) as nat,
+            crate::bplus_tree::tree_leaf_ids(ncr@)[0], false),
+        BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(arena_rec@, ncr@, (h@ - 1) as nat, child_succ@, false),
+        child_succ@ == (if cp@ + 1 < gkids@.len() {
+            crate::bplus_tree::tree_leaf_ids(gkids@[cp@ + 1])[0]
+        } else { succ@ }),
+        crate::bplus_tree::tree_leaf_ids(ncl@).len() >= 1,
+        crate::bplus_tree::tree_leaf_ids(ncl@)[0] == crate::bplus_tree::tree_leaf_ids(gkids@[cp@])[0],
+        ({
+            let cseps = gseps@.insert(cp@, sep@);
+            let ckids = gkids@.update(cp@, ncl@).insert(cp@ + 1, ncr@);
+            let imid = L::isplit_mid_spec() as int;
+            &&& lt@ == (Tree::Inner { id: gid@, seps: cseps.subrange(0, imid), kids: ckids.subrange(0, imid + 1) })
+            &&& rt@ == (Tree::Inner { id: rid@, seps: cseps.subrange(imid + 1, cseps.len() as int),
+                    kids: ckids.subrange(imid + 1, ckids.len() as int) })
+        }),
+        // arena agreements, discharged by the caller: a2 == arena_rec on ncl/ncr's
+        // footprints, and a2 == a1 on old slots outside child cp and the parent.
+        (forall|id: nat| #![trigger arena_rec@[id as int]] #![trigger arena2@[id as int]]
+            crate::bplus_tree::tree_ids(ncl@).contains(id)
+            ==> arena_rec@[id as int] == arena2@[id as int]),
+        (forall|id: nat| #![trigger arena_rec@[id as int]] #![trigger arena2@[id as int]]
+            crate::bplus_tree::tree_ids(ncr@).contains(id)
+            ==> arena_rec@[id as int] == arena2@[id as int]),
+        (forall|i: int| 0 <= i < arena1@.len()
+            && !crate::bplus_tree::tree_ids(gkids@[cp@]).contains(i as nat)
+            && i != gid@
+            ==> arena2@[i] == arena1@[i]),
+    ensures
+        leaf_links_to::<L>(arena2@, lt@, crate::bplus_tree::tree_leaf_ids(rt@)[0]),
+        leaf_links_to::<L>(arena2@, rt@, succ@),
+        // each old child and each spliced child is non-empty (reused by the caller).
+        (forall|i: int| 0 <= i < gkids@.len() ==>
+            #[trigger] crate::bplus_tree::tree_leaf_ids(gkids@[i]).len() >= 1),
+        (forall|i: int| 0 <= i < gkids@.update(cp@, ncl@).insert(cp@ + 1, ncr@).len() ==>
+            #[trigger] crate::bplus_tree::tree_leaf_ids(gkids@.update(cp@, ncl@).insert(cp@ + 1, ncr@)[i]).len() >= 1),
+{
+    let a1 = arena1@; let ar = arena_rec@; let a2 = arena2@;
+    let kids = gkids@;
+    let cseps = gseps@.insert(cp@, sep@);
+    let ckids = kids.update(cp@, ncl@).insert(cp@ + 1, ncr@);
+    let imid = L::isplit_mid_spec() as int;
+    let cur_t = cur@;
+    L::lemma_isplit_mid();  // imid == key_cap/2, 1 <= imid < key_cap
+    assert(crate::bplus_tree::tree_wf(cur_t, h@, L::leaf_cap_spec(), L::key_cap_spec(), true));
+    assert(kids.len() == gseps@.len() + 1);
+    assert(cseps.len() == L::key_cap_spec() + 1);
+    assert(ckids.len() == cseps.len() + 1);
+
     crate::bplus_tree::lemma_tree_leaf_ids_nonempty(ncr@, (h@ - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), false);
     crate::bplus_tree::lemma_tree_leaf_ids_nonempty(ncl@, (h@ - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), false);
     // each old child non-empty.
@@ -4186,9 +4359,7 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         crate::bplus_tree::lemma_forest_wf_at(kids, (h@ - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), i);
         crate::bplus_tree::lemma_tree_leaf_ids_nonempty(kids[i], (h@ - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), false);
     }
-    // ncl/ncr's chains in a2 (framed from ar; subtree_wf(ar, ncl, .., ncr[0]) gives
-    // the chain, and a2 agrees with ar on their footprints — discharge agreement
-    // BEFORE the frame call). These reuse the agreements proven above for binds.
+    // ncl/ncr's chains in a2 (framed from ar; the agreements are preconditions).
     lemma_leaf_links_frame::<L>(ar, a2, ncl@, crate::bplus_tree::tree_leaf_ids(ncr@)[0]);
     lemma_leaf_links_frame::<L>(ar, a2, ncr@, child_succ@);
     assert(leaf_links_to::<L>(a2, ncl@, crate::bplus_tree::tree_leaf_ids(ncr@)[0]));
@@ -4196,6 +4367,7 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
     // decompose cur's chain in a1, splice in ncl/ncr to get forest_links_to(a2, ckids).
     crate::bplus_tree::lemma_forest_ids_cons(kids);
     lemma_forest_links_decompose::<L>(a1, gid@, gseps@, kids, succ@);
+    assert(crate::bplus_tree::tree_disjoint(cur_t));  // subtree_wf(a1, cur)
     assert forall|id: nat| #![trigger crate::bplus_tree::forest_ids(kids).contains(id)] #![trigger a1[id as int]] #![trigger a2[id as int]] crate::bplus_tree::forest_ids(kids).contains(id)
         && !crate::bplus_tree::tree_ids(kids[cp@]).contains(id)
         implies a1[id as int] == a2[id as int] by {
@@ -4218,7 +4390,7 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         else { assert(ckids[i] == kids[i - 1]); }
     }
     // split the chain at m == imid+1 into the two halves' chains.
-    lemma_parent_split_half_links::<L>(a2, ckids, gid@, rid.as_nat(),
+    lemma_parent_split_half_links::<L>(a2, ckids, gid@, rid@,
         cseps.subrange(0, imid), cseps.subrange(imid + 1, cseps.len() as int), succ@, imid + 1);
     // the half-links lemma states the chains for Inner nodes with ckids subranges;
     // those ARE lt/rt (same id, seps, kids).
@@ -4229,8 +4401,102 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
     }
     assert(leaf_links_to::<L>(a2, lt@, crate::bplus_tree::tree_leaf_ids(rt@)[0]));
     assert(leaf_links_to::<L>(a2, rt@, succ@));
+}
 
-    // ---- (4) footprint / disjoint / first-leaf. ----
+/// Footprint sub-step of [`reconstruct_parent_split`]: `tree_disjoint` of each
+/// half, disjointness of the two halves, footprint subset/freshness against
+/// `cur`, and `lt`'s leftmost leaf. Pure id reasoning over `ckids`, plus the
+/// in-range facts from `binds` (every spliced child id is below `arena_rec`'s
+/// length, so the fresh slot `rid` is outside all of them). Split out of the
+/// parent so each solver query stays small.
+pub(crate) proof fn reconstruct_parent_split_ids<K, L, S, const TRACK: bool, P>(
+    arena1: Ghost<Seq<L::Node>>,
+    arena_rec: Ghost<Seq<L::Node>>,
+    arena2: Ghost<Seq<L::Node>>,
+    cur: Ghost<Tree>,
+    gseps: Ghost<Seq<nat>>,
+    gkids: Ghost<Seq<Tree>>,
+    cp: Ghost<int>,
+    ncl: Ghost<Tree>,
+    ncr: Ghost<Tree>,
+    lt: Ghost<Tree>,
+    rt: Ghost<Tree>,
+    sep: Ghost<nat>,
+    gid: Ghost<nat>,
+    rid: Ghost<nat>,
+    h: Ghost<nat>,
+    succ: Ghost<nat>,
+)
+    where
+        K: DenseId,
+        L: NodeLayout<Word = K::Index>,
+        S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
+    requires
+        cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
+        h@ == crate::bplus_tree::tree_height(cur@),
+        h@ >= 1,
+        0 <= cp@ < gkids@.len(),
+        gseps@.len() == L::key_cap_spec(),
+        BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(arena1@, cur@, h@, succ@, true),
+        binds::<L>(arena_rec@, ncl@),
+        binds::<L>(arena_rec@, ncr@),
+        crate::bplus_tree::tree_disjoint(ncl@),
+        crate::bplus_tree::tree_disjoint(ncr@),
+        crate::bplus_tree::tree_leaf_ids(ncl@).len() >= 1,
+        crate::bplus_tree::tree_leaf_ids(ncl@)[0] == crate::bplus_tree::tree_leaf_ids(gkids@[cp@])[0],
+        (forall|id: nat| #[trigger] crate::bplus_tree::tree_ids(ncl@).contains(id)
+            ==> crate::bplus_tree::tree_ids(gkids@[cp@]).contains(id) || id >= arena1@.len()),
+        (forall|id: nat| #[trigger] crate::bplus_tree::tree_ids(ncr@).contains(id)
+            ==> crate::bplus_tree::tree_ids(gkids@[cp@]).contains(id) || id >= arena1@.len()),
+        (forall|id: nat| #![trigger crate::bplus_tree::tree_ids(ncl@).contains(id)] #![trigger crate::bplus_tree::tree_ids(ncr@).contains(id)] crate::bplus_tree::tree_ids(gkids@[cp@]).contains(id)
+            ==> crate::bplus_tree::tree_ids(ncl@).contains(id) || crate::bplus_tree::tree_ids(ncr@).contains(id)),
+        crate::bplus_tree::tree_ids(ncl@).disjoint(crate::bplus_tree::tree_ids(ncr@)),
+        arena1@.len() <= arena_rec@.len(),
+        rid@ == arena_rec@.len(),
+        arena2@.len() == arena_rec@.len() + 1,
+        forest_binds_l::<L>(arena2@, gkids@.update(cp@, ncl@).insert(cp@ + 1, ncr@)),
+        (forall|i: int| 0 <= i < gkids@.len() ==>
+            #[trigger] crate::bplus_tree::tree_leaf_ids(gkids@[i]).len() >= 1),
+        ({
+            let cseps = gseps@.insert(cp@, sep@);
+            let ckids = gkids@.update(cp@, ncl@).insert(cp@ + 1, ncr@);
+            let imid = L::isplit_mid_spec() as int;
+            &&& lt@ == (Tree::Inner { id: gid@, seps: cseps.subrange(0, imid), kids: ckids.subrange(0, imid + 1) })
+            &&& rt@ == (Tree::Inner { id: rid@, seps: cseps.subrange(imid + 1, cseps.len() as int),
+                    kids: ckids.subrange(imid + 1, ckids.len() as int) })
+        }),
+    ensures
+        crate::bplus_tree::tree_disjoint(lt@),
+        crate::bplus_tree::tree_disjoint(rt@),
+        crate::bplus_tree::tree_ids(lt@).disjoint(crate::bplus_tree::tree_ids(rt@)),
+        (forall|id: nat| crate::bplus_tree::tree_ids(lt@).contains(id)
+            ==> crate::bplus_tree::tree_ids(cur@).contains(id) || id >= arena1@.len()),
+        (forall|id: nat| crate::bplus_tree::tree_ids(rt@).contains(id)
+            ==> crate::bplus_tree::tree_ids(cur@).contains(id) || id >= arena1@.len()),
+        (forall|id: nat| crate::bplus_tree::tree_ids(cur@).contains(id)
+            ==> crate::bplus_tree::tree_ids(lt@).contains(id) || crate::bplus_tree::tree_ids(rt@).contains(id)),
+        crate::bplus_tree::tree_leaf_ids(lt@).len() >= 1,
+        crate::bplus_tree::tree_leaf_ids(lt@)[0] == crate::bplus_tree::tree_leaf_ids(cur@)[0],
+{
+    let a1 = arena1@; let ar = arena_rec@; let a2 = arena2@;
+    let kids = gkids@;
+    let cseps = gseps@.insert(cp@, sep@);
+    let ckids = kids.update(cp@, ncl@).insert(cp@ + 1, ncr@);
+    let imid = L::isplit_mid_spec() as int;
+    let cur_t = cur@;
+    L::lemma_isplit_mid();  // imid == key_cap/2, 1 <= imid < key_cap
+    assert(crate::bplus_tree::tree_wf(cur_t, h@, L::leaf_cap_spec(), L::key_cap_spec(), true));
+    assert(kids.len() == gseps@.len() + 1);
+    assert(cseps.len() == L::key_cap_spec() + 1);
+    assert(ckids.len() == cseps.len() + 1);
+
+    // gid ∈ tree_ids(cur), gid < a1.len().
+    crate::bplus_tree::lemma_node_id_not_in_child::<>(cur_t, cp@);
+    lemma_tree_id_in_range::<L>(a1, cur_t, gid@);
+    assert(crate::bplus_tree::tree_ids(cur_t).contains(gid@));
+    assert(gid@ < a1.len());
+
     let lkids = ckids.subrange(0, imid + 1);
     let rkids = ckids.subrange(imid + 1, ckids.len() as int);
     assert(lkids + rkids =~= ckids) by {
@@ -4244,10 +4510,8 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
     assert forall|id: nat| #[trigger] crate::bplus_tree::tree_ids(cur_t).contains(id) implies id < a1.len() by {
         lemma_tree_id_in_range::<L>(a1, cur_t, id);
     }
-    assert(crate::bplus_tree::tree_disjoint(ncl@));  // subtree_wf(ar, ncl)
-    assert(crate::bplus_tree::tree_disjoint(ncr@));  // subtree_wf(ar, ncr)
     crate::bplus_tree::lemma_child_split_absorb_ids(
-        gid@, gseps@, kids, cp@, ncl@, ncr@, sep.as_nat(), a1.len());
+        gid@, gseps@, kids, cp@, ncl@, ncr@, sep@, a1.len());
     assert(crate::bplus_tree::tree_disjoint(combined));  // == lemma's `nt`
     assert(!crate::bplus_tree::forest_ids(ckids).contains(gid@));  // tree_disjoint(combined)
     assert(crate::bplus_tree::forest_disjoint(ckids));
@@ -4287,11 +4551,9 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
         // ckids[m] binds in a2 (forest_binds_l(a2, ckids)); a tree id < a2.len() == ar.len()+1.
         lemma_forest_binds_at::<L>(a2, ckids, m);
         lemma_tree_id_in_range::<L>(a2, ckids[m], id);  // id < a2.len() == ar.len()+1
-        // and id != rid (== ar.len()): rid is gid-or-fresh root of rt, the slot pr,
-        // which is NOT a child root inside ckids (ckids roots are gkids/ncl/ncr).
-        if id == rid.as_nat() {
-            // rid == ar.len() is the freshly pushed pr slot; no ckids child has it
-            // as an id (ncl/ncr ids are < ar.len(): they bind in arena_rec).
+        // and id != rid (== ar.len()): rid is the freshly pushed slot, which is NOT
+        // a child root inside ckids (ckids roots are gkids/ncl/ncr).
+        if id == rid@ {
             assert(id < ar.len()) by {
                 if crate::bplus_tree::tree_ids(ncl@).contains(id) { lemma_tree_id_in_range::<L>(ar, ncl@, id); }
                 else if crate::bplus_tree::tree_ids(ncr@).contains(id) { lemma_tree_id_in_range::<L>(ar, ncr@, id); }
@@ -4305,55 +4567,38 @@ pub(crate) proof fn reconstruct_parent_split<K, L, S, const TRACK: bool>(
             }
         }
     }
-    assert(!crate::bplus_tree::forest_ids(ckids).contains(gid@)) by {
-        // gid ∉ forest_ids(ckids) was shown via tree_disjoint(combined) above.
-    }
     // disjoint footprints of lt and rt (distinct roots gid (< ar.len()), rid (== ar.len())).
-    crate::bplus_tree::lemma_parent_split_disjoint(gid@, rid.as_nat(), ckids, lt@, rt@, lkids, rkids, ar.len());
+    crate::bplus_tree::lemma_parent_split_disjoint(gid@, rid@, ckids, lt@, rt@, lkids, rkids, ar.len());
     // tree_disjoint of each half (subrange of forest_disjoint(ckids) + pairwise; the
     // half root gid/rid ∉ its children's footprints). lemma_parent_split_half_ids
     // gives it for the empty-seps Inner, which has the SAME tree_ids as lt/rt (seps-
     // independent), so tree_disjoint transfers.
     crate::bplus_tree::lemma_parent_split_half_ids(ckids, gid@, 0, imid, ar.len());
-    crate::bplus_tree::lemma_parent_split_half_ids(ckids, rid.as_nat(), imid + 1,
+    crate::bplus_tree::lemma_parent_split_half_ids(ckids, rid@, imid + 1,
         (L::key_cap_spec() - imid) as int, ar.len());
     assert(crate::bplus_tree::tree_disjoint(lt@)) by {
         assert(crate::bplus_tree::tree_disjoint(Tree::Inner { id: gid@, seps: Seq::<nat>::empty(), kids: lkids }));
         // tree_disjoint reads only id + kids, and lt has id==gid, kids==lkids.
     }
     assert(crate::bplus_tree::tree_disjoint(rt@)) by {
-        assert(crate::bplus_tree::tree_disjoint(Tree::Inner { id: rid.as_nat(), seps: Seq::<nat>::empty(), kids: rkids }));
+        assert(crate::bplus_tree::tree_disjoint(Tree::Inner { id: rid@, seps: Seq::<nat>::empty(), kids: rkids }));
     }
     // footprint subset/freshness/first-leaf via lemma_parent_split_footprint.
+    // lkids[0] == ckids[0] is ncl (cp == 0, whose first leaf is kids[0]'s) or
+    // kids[0]; either way its first leaf is cur's.
+    crate::bplus_tree::lemma_forest_leaf_ids_cons(kids);
+    assert(crate::bplus_tree::tree_leaf_ids(cur_t)[0] == crate::bplus_tree::tree_leaf_ids(kids[0])[0]);
+    assert(lkids[0] == ckids[0]);
+    if cp@ == 0 { assert(ckids[0] == ncl@); } else { assert(ckids[0] == kids[0]); }
     crate::bplus_tree::lemma_parent_split_footprint(
-        cur_t, gid@, rid.as_nat(), kids, lt@, rt@, lkids, rkids, ckids, a1.len());
-    assert(crate::bplus_tree::tree_ids(lt@).disjoint(crate::bplus_tree::tree_ids(rt@)));
-    assert(crate::bplus_tree::tree_leaf_ids(lt@)[0] == crate::bplus_tree::tree_leaf_ids(cur_t)[0]);
-
-    // ---- (5) subtree_wf assembly + the global frame ensures. ----
-    assert(BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a2, lt@, h@, crate::bplus_tree::tree_leaf_ids(rt@)[0], false));
-    assert(BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a2, rt@, h@, succ@, false));
-    // global frame: slots < a1.len() outside tree_ids(cur) are unchanged in a2.
-    assert forall|i: int| 0 <= i < a1.len()
-        && !crate::bplus_tree::tree_ids(cur_t).contains(i as nat)
-        implies a2[i] == a1[i] by {
-        // i != gid (gid ∈ tree_ids(cur)); i outside child cp ⟹ ar[i]==a1[i]; i<ar.len.
-        assert(i != gid@);
-        if crate::bplus_tree::tree_ids(gkids@[cp@]).contains(i as nat) {
-            crate::bplus_tree::lemma_child_ids_in_forest(kids, cp@, i as nat);
-            assert(crate::bplus_tree::tree_ids(cur_t).contains(i as nat));  // contradiction
-        }
-        assert(ar[i] == a1[i]);
-        assert(i < ar.len());
-        assert(a2[i] == ar[i]);
-    }
+        cur_t, gid@, rid@, kids, lt@, rt@, lkids, rkids, ckids, a1.len());
 }
 
 /// Leaf-link sub-step of [`reconstruct_absorb`]: `leaf_links_to(a2, nt, succ)`
 /// via `forest_links_to` over the updated children, then `lemma_forest_links_
 /// compose`. The child `cp`'s chain (to `child_succ`) is the recursion's result;
 /// the others are framed from `cur`'s chain.
-pub(crate) proof fn reconstruct_absorb_links<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_absorb_links<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -4370,6 +4615,7 @@ pub(crate) proof fn reconstruct_absorb_links<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: gid@, seps: gseps@, kids: gkids@ }),
         h@ == crate::bplus_tree::tree_height(cur@),
@@ -4444,7 +4690,7 @@ pub(crate) proof fn reconstruct_absorb_links<K, L, S, const TRACK: bool>(
     // forest_links_to(a1, kids, succ) (decompose cur's chain), then build for a2.
     let gid = cur_t->Inner_id;
     lemma_forest_links_decompose::<L>(a1, gid, gseps@, kids, succ@);
-    lemma_build_forest_links::<K, L, S, TRACK>(arena1, arena2, cur, ncl, gkids, cp, h, succ, child_succ);
+    lemma_build_forest_links::<K, L, S, TRACK, P>(arena1, arena2, cur, ncl, gkids, cp, h, succ, child_succ);
     lemma_forest_links_compose::<L>(a2, gid, gseps@, nkids, succ@);
 }
 
@@ -4524,7 +4770,7 @@ pub(crate) proof fn lemma_links_drop_first<L: NodeLayout>(
 /// Build `forest_links_to(a2, nkids, succ)` for the absorb update from
 /// `forest_links_to(a1, kids, succ)` plus the recursion's child-cp chain and the
 /// frame (other children's footprints unchanged in a2). Inducts on the kids.
-pub(crate) proof fn lemma_build_forest_links<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_build_forest_links<K, L, S, const TRACK: bool, P>(
     arena1: Ghost<Seq<L::Node>>,
     arena2: Ghost<Seq<L::Node>>,
     cur: Ghost<Tree>,
@@ -4539,6 +4785,7 @@ pub(crate) proof fn lemma_build_forest_links<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ == (Tree::Inner { id: cur@->Inner_id, seps: cur@->Inner_seps, kids: gkids@ }),
         0 <= cp@ < gkids@.len(),
@@ -5108,7 +5355,7 @@ spec fn child_succ_for(kids: Seq<Tree>, cp: int, succ: nat) -> nat {
 
 /// Model sub-step of [`reconstruct_absorb`]: the parent's in-order keys gain
 /// exactly `key`. Pure `Seq`/`Set` algebra over the `forest_keys` split.
-pub(crate) proof fn reconstruct_absorb_model<K, L, S, const TRACK: bool>(
+pub(crate) proof fn reconstruct_absorb_model<K, L, S, const TRACK: bool, P>(
     cur: Ghost<Tree>,
     ncl: Ghost<Tree>,
     gkids: Ghost<Seq<Tree>>,
@@ -5119,6 +5366,7 @@ pub(crate) proof fn reconstruct_absorb_model<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         cur@ is Inner,
         cur@->Inner_kids == gkids@,
@@ -5233,7 +5481,7 @@ pub(crate) proof fn lemma_leaf_links_project<L: NodeLayout>(
 /// Extract child `cp`'s `subtree_wf` from the parent `cur`'s. binds via
 /// `lemma_inner_binds_child`, `tree_wf` via `lemma_forest_wf_at`, leaf-links via
 /// `lemma_leaf_links_project`, disjoint via `lemma_forest_disjoint_at`.
-pub(crate) proof fn lemma_inner_child_subtree_wf<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_inner_child_subtree_wf<K, L, S, const TRACK: bool, P>(
     arena: Seq<L::Node>,
     cur: Tree,
     h: nat,
@@ -5244,6 +5492,7 @@ pub(crate) proof fn lemma_inner_child_subtree_wf<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         // root-form (weakest) input: this reads only the Inner arm's forest_wf to
         // project a CHILD's wf (always non-root), so is_root is irrelevant.
@@ -5391,7 +5640,7 @@ pub(crate) proof fn lemma_leaf_links_frame<L: NodeLayout>(
 /// then `binds` and `leaf_links_to` transfer; `tree_wf` and `tree_disjoint` are
 /// pure ghost (no arena), so the whole `subtree_wf` carries. The frame step for
 /// a sibling subtree untouched by a mutation in another subtree's region.
-pub(crate) proof fn lemma_subtree_wf_frame<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_subtree_wf_frame<K, L, S, const TRACK: bool, P>(
     a1: Seq<L::Node>,
     a2: Seq<L::Node>,
     t: Tree,
@@ -5403,6 +5652,7 @@ pub(crate) proof fn lemma_subtree_wf_frame<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(a1, t, h, succ, is_root),
         a1.len() <= a2.len(),
@@ -5420,7 +5670,7 @@ pub(crate) proof fn lemma_subtree_wf_frame<K, L, S, const TRACK: bool>(
 /// `subtree_wf(arena.update(id_slot, v), t, …)`. The agreement (slot `id_slot`
 /// is the only change, and it's outside `t`) is discharged once here, so callers
 /// don't fight the `id != id_slot` quantifier reasoning.
-pub(crate) proof fn lemma_subtree_wf_frame_update<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_subtree_wf_frame_update<K, L, S, const TRACK: bool, P>(
     arena: Seq<L::Node>,
     t: Tree,
     id_slot: nat,
@@ -5432,6 +5682,7 @@ pub(crate) proof fn lemma_subtree_wf_frame_update<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         BPlusTreeSet::<K, L, S, TRACK>::subtree_wf(arena, t, h, succ, false),
         id_slot < arena.len(),
@@ -5452,7 +5703,7 @@ pub(crate) proof fn lemma_subtree_wf_frame_update<K, L, S, const TRACK: bool>(
         assert(id != id_slot);
         assert(a2[id as int] == arena[id as int]);  // update at id_slot != id
     }
-    lemma_subtree_wf_frame::<K, L, S, TRACK>(arena, a2, t, h, succ, false);
+    lemma_subtree_wf_frame::<K, L, S, TRACK, P>(arena, a2, t, h, succ, false);
 }
 
 /// Rebuild `forest_binds_l` after replacing child `cp` by a new subtree `nc` in
@@ -5690,7 +5941,7 @@ pub(crate) proof fn lemma_forest_binds_concat<L: NodeLayout>(a: Seq<L::Node>, x:
 /// if `cur == Leaf{id, keys}` binds in `arena` and `0 <= i < keys.len()`, the
 /// arena node's `i`-th word projects to `keys[i]`. The recursion's leaf scan
 /// uses this (it has `subtree_wf`'s `binds`, not a root-form `tree_wf`).
-pub(crate) proof fn lemma_leaf_binds_key_at<K, L, S, const TRACK: bool>(
+pub(crate) proof fn lemma_leaf_binds_key_at<K, L, S, const TRACK: bool, P>(
     arena: Seq<L::Node>,
     cur: Tree,
     id: nat,
@@ -5700,6 +5951,7 @@ pub(crate) proof fn lemma_leaf_binds_key_at<K, L, S, const TRACK: bool>(
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         binds::<L>(arena, cur),
         cur == (Tree::Leaf { id, keys: crate::bplus_tree::tree_keys(cur) }),
@@ -5718,11 +5970,12 @@ pub(crate) proof fn lemma_leaf_binds_key_at<K, L, S, const TRACK: bool>(
 }
 
 /// The model of a leaf-root tree is strictly sorted (`tree_wf`'s leaf arm).
-pub(crate) proof fn lemma_leaf_sorted<K, L, S, const TRACK: bool>(t: &BPlusTreeSet<K, L, S, TRACK>)
+pub(crate) proof fn lemma_leaf_sorted<K, L, S, const TRACK: bool, P>(t: &BPlusTreeSet<K, L, S, TRACK, P>)
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         L::is_leaf_spec(t.arena()[t.root.as_nat() as int]),
@@ -5746,11 +5999,12 @@ pub(crate) proof fn lemma_leaf_sorted<K, L, S, const TRACK: bool>(t: &BPlusTreeS
 /// node-well-formed and its key count equals the ghost model length. Both
 /// follow from `binds`'s leaf arm (count == keys.len()) and `tree_wf`'s leaf
 /// arm (keys.len() <= leaf_cap ⟹ node_wf).
-pub(crate) proof fn lemma_leaf_facts<K, L, S, const TRACK: bool>(t: &BPlusTreeSet<K, L, S, TRACK>)
+pub(crate) proof fn lemma_leaf_facts<K, L, S, const TRACK: bool, P>(t: &BPlusTreeSet<K, L, S, TRACK, P>)
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         L::is_leaf_spec(t.arena()[t.root.as_nat() as int]),
@@ -5783,14 +6037,15 @@ pub(crate) proof fn lemma_leaf_facts<K, L, S, const TRACK: bool>(t: &BPlusTreeSe
 /// `binds` at a leaf root, instantiated at one key index: the arena node's
 /// `i`-th key word projects (`as_nat`) to the ghost key `gkeys[i]`. Pulls the
 /// leaf arm of `binds` out so `contains`' loop can use it per element.
-pub(crate) proof fn lemma_leaf_binds_key<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>,
+pub(crate) proof fn lemma_leaf_binds_key<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>,
     i: int,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         L::is_leaf_spec(t.arena()[t.root.as_nat() as int]),
@@ -5820,11 +6075,12 @@ pub(crate) proof fn lemma_leaf_binds_key<K, L, S, const TRACK: bool>(
     }
 }
 
-impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
 
     /// The arena never overflows. From `wf` alone (plus the static fact that
@@ -5920,7 +6176,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         proof { self.lemma_arena_never_overflows(); }
         let ghost root_id = self.root.as_nat() as int;
         let ghost gkeys = crate::bplus_tree::tree_keys(self.tree@);
-        proof { lemma_leaf_facts::<K, L, S, TRACK>(self); }
+        proof { lemma_leaf_facts::<K, L, S, TRACK, P>(self); }
 
         let mut leaf = self.nodes.get_index(self.root);
         let n = L::count(&leaf);
@@ -5939,10 +6195,10 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         proof {
             assert(pos as nat <= gkeys.len());
             assert forall|j: int| 0 <= j < pos implies gkeys[j] < key.id_nat() by {
-                lemma_leaf_binds_key::<K, L, S, TRACK>(self, j);
+                lemma_leaf_binds_key::<K, L, S, TRACK, P>(self, j);
             }
             assert forall|j: int| pos <= j < n implies key.id_nat() <= gkeys[j] by {
-                lemma_leaf_binds_key::<K, L, S, TRACK>(self, j);
+                lemma_leaf_binds_key::<K, L, S, TRACK, P>(self, j);
             }
         }
 
@@ -5955,7 +6211,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             proof {
                 <L::Word as IndexLike>::lemma_order_is_as_nat(ki, kw);
                 assert(L::count_spec(self.arena()[root_id]) == n as nat);
-                lemma_leaf_binds_key::<K, L, S, TRACK>(self, pos as int);
+                lemma_leaf_binds_key::<K, L, S, TRACK, P>(self, pos as int);
                 assert(ki == L::keys_view(leaf)[pos as int]);
                 assert(ki.as_nat() == gkeys[pos as int]);
             }
@@ -5978,7 +6234,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         //   [pos..n)  > k  (boundary gkeys[pos] >= k and absence ⟹ >, lifted by
         //                   sortedness).
         proof {
-            lemma_leaf_sorted::<K, L, S, TRACK>(self);  // gkeys strictly sorted
+            lemma_leaf_sorted::<K, L, S, TRACK, P>(self);  // gkeys strictly sorted
             assert(forall|j: int| 0 <= j < pos ==> gkeys[j] < key.id_nat());
             // boundary: if pos < n then gkeys[pos] >= k; with absence, > k.
             // sortedness lifts gkeys[pos] <= gkeys[j], so k < gkeys[j] for j >= pos.
@@ -5996,7 +6252,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         proof {
             L::lemma_keys_view_len(leaf);  // old_kview.len() == count == n == gkeys.len()
             assert forall|j: int| 0 <= j < gkeys.len() implies old_kview[j].as_nat() == #[trigger] gkeys[j] by {
-                lemma_leaf_binds_key::<K, L, S, TRACK>(self, j);
+                lemma_leaf_binds_key::<K, L, S, TRACK, P>(self, j);
                 assert(L::keys_view(self.arena()[root_id])[j] == old_kview[j]);
             }
         }
@@ -6131,7 +6387,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
     {
         let ll = self.last_leaf;
         proof {
-            lemma_last_leaf_binds::<K, L, S, TRACK>(self);
+            lemma_last_leaf_binds::<K, L, S, TRACK, P>(self);
             L::lemma_arena_capacity();
         }
         let leaf = self.nodes.get_index(ll);
@@ -6287,32 +6543,53 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             return Err(crate::error::ContainerError::CapacityExhausted);
         }
         if keys.len() > 1 {
+            // Branch-free strict-order reduction (see `from_sorted`).
+            let klen = keys.len();
+            let mut ok = true;
             let mut i: usize = 1;
-            while i < keys.len()
+            while i < klen
                 invariant
-                    1 <= i <= keys@.len(),
+                    1 <= i <= klen,
+                    klen == keys@.len(),
                     keys@.len() < usize::MAX,
-                    forall|a: int, b: int| 0 <= a < b < i
+                    ok ==> forall|a: int, b: int| 0 <= a < b < i
                         ==> (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat(),
-                decreases keys@.len() - i,
+                decreases klen - i,
             {
-                if !(keys[i - 1].to_usize() < keys[i].to_usize()) {
-                    return Err(crate::error::ContainerError::NotSorted);
-                }
+                let prev: K = crate::bplus_layout::slice_get(keys, i - 1);
+                let cur: K = crate::bplus_layout::slice_get(keys, i);
+                let lt = prev.to_usize() < cur.to_usize();
+                ok = if lt { ok } else { false };
                 proof {
-                    assert forall|a: int, b: int| 0 <= a < b < i + 1
-                        implies (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat() by {
-                        if b == i as int && a < i - 1 {
-                            assert(keys@[a].id_nat() < keys@[i - 1].id_nat());
+                    if ok {
+                        assert forall|a: int, b: int| 0 <= a < b < i + 1
+                            implies (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat() by {
+                            if b == i as int && a < i - 1 {
+                                assert(keys@[a].id_nat() < keys@[i - 1].id_nat());
+                            }
                         }
                     }
                 }
                 i += 1;
             }
+            if !ok {
+                return Err(crate::error::ContainerError::NotSorted);
+            }
         }
-        Ok(Self::from_sorted(keys))
+        // The order check above is the one `from_sorted` would repeat; go to
+        // the loader directly.
+        proof {
+            assert forall|a: int, b: int| 0 <= a < b < keys@.len()
+                implies (#[trigger] keys@[a]).id_nat() < (#[trigger] keys@[b]).id_nat() by {
+            }
+        }
+        if keys.len() == 0 {
+            return Ok(Self::new());
+        }
+        Ok(Self::bulk_load(keys))
     }
 
+    #[verifier::rlimit(100)]
     pub fn insert(&mut self, key: K) -> (added: bool)
         requires
             old(self).wf(),
@@ -6375,7 +6652,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             assert(crate::bplus_tree::strictly_sorted(old_model));
         }
         let ghost cur_call = self.tree@;
-        let (added, split, nl, nr) =
+        let (added, split, nl, nr, last) =
             self.insert_rec(root, key, kw, self.tree, Ghost(h), Ghost(nil_link::<L>()), Ghost(true));
         // Recursion delta against insert_general's own old(self): nothing
         // mutated self between entry and the call, so the recursion's old-state
@@ -6426,11 +6703,18 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                     assert(self.tree@ == nl@);
                     assert(self.arena().len() == crate::bplus_tree::node_count(self.tree@));
                 }
-                // A split BELOW the root may have moved the rightmost leaf
-                // (`insert_rec` preserves the leftmost, not the rightmost — see
-                // `rightmost_leaf_of`), so recompute the cache. SLOW path only:
-                // the fast path returns long before reaching here.
-                self.last_leaf = self.rightmost_leaf_of(root, Ghost(self.tree@));
+                // A split BELOW the root may have moved the rightmost leaf: the
+                // recursion names the fresh right leaf when the rightmost leaf
+                // split; otherwise the cached one still stands (no descent).
+                match last {
+                    Some(id) => { self.last_leaf = id; }
+                    None => {}
+                }
+                proof {
+                    assert(crate::bplus_tree::last_leaf_id(nl@) == last_after::<L>(last, old(self).tree@));
+                    assert(old(self).last_leaf.as_nat() == crate::bplus_tree::last_leaf_id(old(self).tree@));
+                    assert(self.last_leaf.as_nat() == crate::bplus_tree::last_leaf_id(self.tree@));
+                }
                 added
             }
             Some((sep, rid)) => {
@@ -6475,7 +6759,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                     // nr's leaf-id sequence is non-empty (wf at h non-root ⟹ >= 1 leaf).
                     L::lemma_arena_capacity();
                     crate::bplus_tree::lemma_tree_leaf_ids_nonempty(nr@, h, L::leaf_cap_spec(), L::key_cap_spec(), false);
-                    lemma_insert_new_root::<K, L, S, TRACK>(
+                    lemma_insert_new_root::<K, L, S, TRACK, P>(
                         Ghost(arena_pre), Ghost(self.arena()), Ghost(old_model),
                         Ghost(nl@), Ghost(nr@), sep, Ghost(root.as_nat()), rid,
                         Ghost(new_root_idx.as_nat()), Ghost(new_root), Ghost(h), key);
@@ -6524,9 +6808,19 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                     assert(self.arena().len() == arena_pre.len() + 1);
                     assert(self.arena().len() == crate::bplus_tree::node_count(self.tree@));
                 }
-                // The root split moved the rightmost leaf into `nr`; recompute from
-                // the NEW root (slow path only, as in the `None` arm).
-                self.last_leaf = self.rightmost_leaf_of(new_root_idx, Ghost(self.tree@));
+                // The rightmost leaf is now inside `nr`: the fresh right leaf if
+                // the old rightmost leaf split, else the old one (no descent).
+                match last {
+                    Some(id) => { self.last_leaf = id; }
+                    None => {}
+                }
+                proof {
+                    assert(crate::bplus_tree::last_leaf_id(nr@) == last_after::<L>(last, old(self).tree@));
+                    assert(seq![nl@, nr@][1] == nr@);
+                    assert(crate::bplus_tree::last_leaf_id(self.tree@) == crate::bplus_tree::last_leaf_id(nr@));
+                    assert(old(self).last_leaf.as_nat() == crate::bplus_tree::last_leaf_id(old(self).tree@));
+                    assert(self.last_leaf.as_nat() == crate::bplus_tree::last_leaf_id(self.tree@));
+                }
                 added
             }
         }
@@ -6968,7 +7262,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         h: Ghost<nat>,
         succ: Ghost<nat>,
         is_root: Ghost<bool>,
-    ) -> (res: (bool, Option<(L::Word, L::ArenaIdx)>, Ghost<Tree>, Ghost<Tree>))
+    ) -> (res: (bool, Option<(L::Word, L::ArenaIdx)>, Ghost<Tree>, Ghost<Tree>, Option<L::ArenaIdx>))
         requires
             old(self).nodes.wf(),
             // `cur` is wf at the caller's root-ness; the absorb (None) output is
@@ -6985,6 +7279,19 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             old(self).arena().len() + 2 < <L::ArenaIdx as IndexLike>::max_nat(),
         ensures
             final(self).nodes.wf(),
+            final(self).last_leaf == old(self).last_leaf,
+            // Rightmost-leaf tracking: the fifth component names the fresh right
+            // leaf iff this subtree's rightmost leaf split, so the root can
+            // update `last_leaf` without a descent.
+            ({
+                let (added, split, nl, nr, last) = res;
+                match split {
+                    Option::None =>
+                        crate::bplus_tree::last_leaf_id(nl@) == last_after::<L>(last, cur@),
+                    Option::Some(_) =>
+                        crate::bplus_tree::last_leaf_id(nr@) == last_after::<L>(last, cur@),
+                }
+            }),
             // only the arena (self.nodes) is touched; the cached count, root index,
             // and ghost tree are unchanged (the caller frames its bookkeeping).
             final(self).nkeys == old(self).nkeys,
@@ -7005,7 +7312,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             // in total node count. For a leaf both cur and the result(s) are leaves
             // (node_count 1 each), so None is +0 and a split is +1 == 1+1-1.
             ({
-                let (added, split, nl, nr) = res;
+                let (added, split, nl, nr, _last) = res;
                 match split {
                     Option::None =>
                         final(self).arena().len() + crate::bplus_tree::node_count(cur@)
@@ -7018,7 +7325,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                 }
             }),
             ({
-                let (added, split, nl, nr) = res;
+                let (added, split, nl, nr, _last) = res;
                 match split {
                     Option::None => {
                         &&& Self::subtree_wf(final(self).arena(), nl@, h@, succ@, is_root@)
@@ -7122,10 +7429,10 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         proof {
             assert(pos as nat <= gkeys.len());
             assert forall|j: int| 0 <= j < pos implies gkeys[j] < key.id_nat() by {
-                lemma_leaf_binds_key_at::<K, L, S, TRACK>(self.arena(), cur@, lid, j);
+                lemma_leaf_binds_key_at::<K, L, S, TRACK, P>(self.arena(), cur@, lid, j);
             }
             assert forall|j: int| pos <= j < n implies key.id_nat() <= gkeys[j] by {
-                lemma_leaf_binds_key_at::<K, L, S, TRACK>(self.arena(), cur@, lid, j);
+                lemma_leaf_binds_key_at::<K, L, S, TRACK, P>(self.arena(), cur@, lid, j);
             }
         }
 
@@ -7139,7 +7446,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             let le = ki.le(kw);
             proof {
                 <L::Word as IndexLike>::lemma_order_is_as_nat(ki, kw);
-                lemma_leaf_binds_key_at::<K, L, S, TRACK>(self.arena(), cur@, lid, pos as int);
+                lemma_leaf_binds_key_at::<K, L, S, TRACK, P>(self.arena(), cur@, lid, pos as int);
                 assert(ki == L::keys_view(*leaf)[pos as int]);
                 assert(ki.as_nat() == gkeys[pos as int]);
             }
@@ -7151,7 +7458,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
 
         if present {
             proof { assert(gkeys.contains(key.id_nat())); }
-            return (false, None, cur, cur);
+            return (false, None, cur, cur, None);
         }
 
         // absent: establish the find-position characterization.
@@ -7169,7 +7476,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         proof {
             L::lemma_keys_view_len(*leaf);
             assert forall|j: int| 0 <= j < gkeys.len() implies old_kview[j].as_nat() == #[trigger] gkeys[j] by {
-                lemma_leaf_binds_key_at::<K, L, S, TRACK>(self.arena(), cur@, lid, j);
+                lemma_leaf_binds_key_at::<K, L, S, TRACK, P>(self.arena(), cur@, lid, j);
             }
             // subtree leaf-link: this leaf's link is `succ` (single-leaf chain).
             let lids = crate::bplus_tree::tree_leaf_ids(cur@);
@@ -7224,8 +7531,10 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                 assert(crate::bplus_tree::tree_disjoint(nl));
                 // model set: new_keys.to_set() == gkeys.to_set() ∪ {key}.
                 assert(new_keys.to_set() =~= gkeys.to_set().insert(key.id_nat()));
+                assert(crate::bplus_tree::last_leaf_id(nl) == lid);
+                assert(crate::bplus_tree::last_leaf_id(cur@) == lid);
             }
-            return (true, None, Ghost(nl), cur);
+            return (true, None, Ghost(nl), cur, None);
         }
 
         // -- split: full leaf, allocate a right sibling, return Some ---------
@@ -7340,8 +7649,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             assert(right_idx.as_nat() == old(self).arena().len());
             // Only cross-half ordering is required for `sep`.
             assert(crate::bplus_tree::tree_keys(nl) == left_keys);
+            assert(crate::bplus_tree::last_leaf_id(nr) == right_idx.as_nat());
         }
-        (true, Some((sep, right_idx)), Ghost(nl), Ghost(nr))
+        (true, Some((sep, right_idx)), Ghost(nl), Ghost(nr), Some(right_idx))
     }
 
     /// Recursive insert into the subtree at `idx` (ghost `cur`, height `h`,
@@ -7359,7 +7669,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         h: Ghost<nat>,
         succ: Ghost<nat>,
         is_root: Ghost<bool>,
-    ) -> (res: (bool, Option<(L::Word, L::ArenaIdx)>, Ghost<Tree>, Ghost<Tree>))
+    ) -> (res: (bool, Option<(L::Word, L::ArenaIdx)>, Ghost<Tree>, Ghost<Tree>, Option<L::ArenaIdx>))
         requires
             old(self).nodes.wf(),
             // `cur` is wf at the caller's root-ness. The absorb (None) output is
@@ -7382,6 +7692,19 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             old(self).arena().len() + h@ + 2 < <L::ArenaIdx as IndexLike>::max_nat(),
         ensures
             final(self).nodes.wf(),
+            final(self).last_leaf == old(self).last_leaf,
+            // Rightmost-leaf tracking: the fifth component names the fresh right
+            // leaf iff this subtree's rightmost leaf split, so the root can
+            // update `last_leaf` without a descent.
+            ({
+                let (added, split, nl, nr, last) = res;
+                match split {
+                    Option::None =>
+                        crate::bplus_tree::last_leaf_id(nl@) == last_after::<L>(last, cur@),
+                    Option::Some(_) =>
+                        crate::bplus_tree::last_leaf_id(nr@) == last_after::<L>(last, cur@),
+                }
+            }),
             // only the arena (self.nodes) is touched; the cached count, root index,
             // and ghost tree are unchanged (the caller frames its bookkeeping).
             final(self).nkeys == old(self).nkeys,
@@ -7407,7 +7730,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             // what makes `arena.len() == node_count(tree@)` a standing wf invariant,
             // hence the arena never overflows.
             ({
-                let (added, split, nl, nr) = res;
+                let (added, split, nl, nr, _last) = res;
                 match split {
                     Option::None =>
                         final(self).arena().len() + crate::bplus_tree::node_count(cur@)
@@ -7420,7 +7743,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                 }
             }),
             ({
-                let (added, split, nl, nr) = res;
+                let (added, split, nl, nr, _last) = res;
                 match split {
                     Option::None => {
                         &&& Self::subtree_wf(final(self).arena(), nl@, h@, succ@, is_root@)
@@ -7579,7 +7902,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             if !is_root@ {
                 crate::bplus_tree::lemma_tree_wf_relax_root(cur@, h@, L::leaf_cap_spec(), L::key_cap_spec());
             }
-            lemma_inner_child_subtree_wf::<K, L, S, TRACK>(self.arena(), cur@, h@, succ@, cp as int);
+            lemma_inner_child_subtree_wf::<K, L, S, TRACK, P>(self.arena(), cur@, h@, succ@, cp as int);
             // tree_height(gc) == h-1 (child wf at h-1 ⟹ its height is h-1).
             crate::bplus_tree::lemma_forest_wf_at(gkids, (h@ - 1) as nat,
                 L::leaf_cap_spec(), L::key_cap_spec(), cp as int);
@@ -7596,8 +7919,15 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             assert(h@ >= 1);  // internal node ⟹ height >= 1
         }
         // the child is genuinely non-root, so it carries the stronger non-root wf.
-        let (added, csplit, ncl, ncr) = self.insert_rec(child_idx, key, kw,
+        let (added, csplit, ncl, ncr, clast) = self.insert_rec(child_idx, key, kw,
             Ghost(gc), Ghost((h@ - 1) as nat), Ghost(child_succ), Ghost(false));
+        // The rightmost leaf of THIS subtree can only have split inside the last
+        // child; a split anywhere else leaves it where it was.
+        let last: Option<L::ArenaIdx> = if cp == n { clast } else { None };
+        proof {
+            assert(gkids.len() == n as nat + 1);
+            assert(last == last_lift::<L>(clast, cp as int, gkids.len() as int));
+        }
         let ghost arena2 = self.arena();
         proof {
             // child grew the arena by at most (h-1)+1 == h.
@@ -7631,7 +7961,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         lemma_tree_id_in_range::<L>(arena1, cur@, id);
                     }
                     // No child-minimum bridge is required.
-                    reconstruct_absorb::<K, L, S, TRACK>(
+                    reconstruct_absorb::<K, L, S, TRACK, P>(
                         Ghost(arena1), Ghost(arena2), Ghost(cur@), Ghost(ncl@),
                         Ghost(gid), Ghost(gseps), Ghost(gkids), Ghost(cp as int),
                         Ghost(h@), Ghost(succ@), Ghost(child_succ), key, Ghost(node), is_root);
@@ -7682,8 +8012,10 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         == 1 + crate::bplus_tree::forest_node_count(gkids));
                     assert(self.arena().len() + crate::bplus_tree::node_count(cur@)
                         == old(self).arena().len() + crate::bplus_tree::node_count(nt));
+
+                    lemma_last_after_absorb::<L>(gid, gseps, gkids, cp as int, ncl@, clast);
                 }
-                (added, None, Ghost(nt), cur)
+                (added, None, Ghost(nt), cur, last)
             }
             Some((sep, rid)) => {
                 // child cp split into (ncl@ at idx, ncr@ at rid), separated by
@@ -7740,9 +8072,9 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         assert(!crate::bplus_tree::tree_ids(ncr@).contains(gid));
                         // frame ncl/ncr's subtree_wf across the single-slot set
                         // (gid ∉ their footprints), via the dedicated update-frame lemma.
-                        lemma_subtree_wf_frame_update::<K, L, S, TRACK>(arena_rec, ncl@, gid, pnode,
+                        lemma_subtree_wf_frame_update::<K, L, S, TRACK, P>(arena_rec, ncl@, gid, pnode,
                             (h@ - 1) as nat, crate::bplus_tree::tree_leaf_ids(ncr@)[0]);
-                        lemma_subtree_wf_frame_update::<K, L, S, TRACK>(arena_rec, ncr@, gid, pnode,
+                        lemma_subtree_wf_frame_update::<K, L, S, TRACK, P>(arena_rec, ncr@, gid, pnode,
                             (h@ - 1) as nat, child_succ);
                         assert(self.arena() =~= arena_rec.update(gid as int, pnode));
                     }
@@ -7757,7 +8089,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         crate::bplus_tree::lemma_tree_keys_nonempty(ncl@, (h@ - 1) as nat,
                             L::leaf_cap_spec(), L::key_cap_spec());
                         // No child-minimum bridge is required.
-                        reconstruct_child_split_absorb::<K, L, S, TRACK>(
+                        reconstruct_child_split_absorb::<K, L, S, TRACK, P>(
                             Ghost(arena1), Ghost(self.arena()), Ghost(cur@),
                             Ghost(ncl@), Ghost(ncr@), Ghost(gid), Ghost(gseps), Ghost(gkids),
                             Ghost(cp as int), Ghost(h@), Ghost(succ@), Ghost(child_succ),
@@ -7765,7 +8097,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         // frame: slots outside tree_ids(cur) unchanged. The recursion
                         // touched only inside tree_ids(gkids[cp]) ⊆ tree_ids(cur) plus
                         // the fresh rid (>= old len, outside the i<old.len guard).
-                        reconstruct_split_frame::<K, L, S, TRACK>(
+                        reconstruct_split_frame::<K, L, S, TRACK, P>(
                             Ghost(arena1), Ghost(self.arena()), Ghost(cur@), Ghost(gkids), Ghost(cp as int));
                         assert(self.arena().len() <= old(self).arena().len() + h@ + 1);
                         // The `None`-arm postcondition for nt follows from
@@ -7797,8 +8129,10 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                             == 1 + crate::bplus_tree::forest_node_count(gkids));
                         assert(self.arena().len() + crate::bplus_tree::node_count(cur@)
                             == old(self).arena().len() + crate::bplus_tree::node_count(nt));
+
+                        lemma_last_after_child_split::<L>(gid, gseps, nseps, gkids, cp as int, ncl@, ncr@, clast);
                     }
-                    (added, None, Ghost(nt), cur)
+                    (added, None, Ghost(nt), cur, last)
                 } else {
                     // parent full: split it. internal_split_at distributes the
                     // combined (seps+sep, children with ncl@cp replaced & ncr at
@@ -7860,7 +8194,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         // internal_split_at's tuple ensures relate pl/pr to keys_view(pnode).
                         // insert(cp, sep) — restate the count/keys/child views the lemma wants.
                         L::lemma_isplit_mid();
-                        reconstruct_parent_split::<K, L, S, TRACK>(
+                        reconstruct_parent_split::<K, L, S, TRACK, P>(
                             Ghost(arena1), Ghost(arena_rec), Ghost(self.arena()), Ghost(cur@),
                             Ghost(gseps), Ghost(gkids), Ghost(cp as int), Ghost(ncl@), Ghost(ncr@),
                             Ghost(child_succ), Ghost(lt), Ghost(rt), sep, rid,
@@ -7897,8 +8231,12 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                             == old(self).arena().len()
                                 + crate::bplus_tree::node_count(lt)
                                 + crate::bplus_tree::node_count(rt));
+
+                        assert(imid + 1 < gkids.len() + 1);
+                        lemma_last_after_parent_split::<L>(gid, gseps, gkids, cp as int, ncl@, ncr@,
+                            new_int.as_nat(), rt->Inner_seps, imid as int, clast);
                     }
-                    (added, Some((promoted, new_int)), Ghost(lt), Ghost(rt))
+                    (added, Some((promoted, new_int)), Ghost(lt), Ghost(rt), last)
                 }
             }
         }
@@ -7981,17 +8319,22 @@ pub(crate) proof fn lemma_seek_target_idx_unique(model: Seq<nat>, t: nat, r: int
 /// chain exists. `node == NIL` marks "exhausted". TEST-FIRST exec; the
 /// in-order-enumeration theorem (sound for leapfrog) is proven once the insert
 /// proof lands.
-pub struct BPlusCursor<'a, K, L, S, const TRACK: bool>
+pub struct BPlusCursor<'a, K, L, S, const TRACK: bool, P = HotFirst>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
-    pub(crate) tree: &'a BPlusTreeSet<K, L, S, TRACK>,
+    pub(crate) tree: &'a BPlusTreeSet<K, L, S, TRACK, P>,
     /// Current leaf arena index, or NIL (`max_nat - 1`) when exhausted.
     pub(crate) node: L::ArenaIdx,
     /// Position within the current leaf.
     pub(crate) pos: usize,
+    /// Copy of the leaf the cursor stands on (meaningful while `node != NIL`),
+    /// refreshed only when `node` changes, so `key`/`step` read the leaf without
+    /// fetching it from the arena on every call.
+    pub(crate) leaf: L::Node,
     /// Ghost: the cursor's position in the IN-ORDER MODEL. `(node, pos)` is the
     /// executable realization of model index `gidx`; `gidx == model.len()` marks
     /// "exhausted" (`node == NIL`). The cursor's `wf` ties the two together, so
@@ -8099,11 +8442,12 @@ pub(crate) proof fn lemma_chain_keys_eq_model_forest<L: NodeLayout>(arena: Seq<L
 /// so the enumerated key sequence is the set in ascending order, no gaps/dups.
 /// The first leaf is `tree_leaf_ids(tree@)[0]` and the chain is NIL-terminated
 /// (`leaf_links_ok`), so a client walk reproduces this exact sequence.
-pub(crate) proof fn lemma_chain_yields_sorted_model<K, L, S, const TRACK: bool>(t: &BPlusTreeSet<K, L, S, TRACK>)
+pub(crate) proof fn lemma_chain_yields_sorted_model<K, L, S, const TRACK: bool, P>(t: &BPlusTreeSet<K, L, S, TRACK, P>)
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires t.wf(),
     ensures
         chain_keys::<L>(t.arena(), crate::bplus_tree::tree_leaf_ids(t.tree@)) == crate::bplus_tree::tree_keys(t.tree@),
@@ -8322,14 +8666,15 @@ pub(crate) proof fn lemma_tree_wf_sorted_seps_view<L: NodeLayout>(arena: Seq<L::
 /// leaf_id_offset(kids,cp), acc' == acc + forest_keys(kids[0..cp]).len(). Composes
 /// lemma_seek_idx_descent (model split) + lemma_chain_offset_child (acc law) +
 /// the pointwise alignment carry via lemma_forest_leaf_ids_slice.
-pub(crate) proof fn seek_descend_step<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>, cur: Tree, node: L::Node, word: L::Word,
+pub(crate) proof fn seek_descend_step<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>, cur: Tree, node: L::Node, word: L::Word,
     cp: int, gm: int, acc: int, lids: Ghost<Seq<nat>>,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         lids@ == crate::bplus_tree::tree_leaf_ids(t.tree@),
@@ -8502,14 +8847,15 @@ pub(crate) proof fn lemma_chain_offset_aligned_block<L: NodeLayout>(
 /// global `seek_target_idx(model, word)`, and `cur`'s leaf id is `lids[gm]`.
 /// Uses leaf_find_ge's split (== seek_target_idx(tree_keys(cur)) by uniqueness)
 /// and the loop's `acc + seek_target_idx(tree_keys(cur)) == seek_target_idx(model)`.
-pub(crate) proof fn seek_leaf_finish<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>, cur: Tree, node: L::Node, word: L::Word,
+pub(crate) proof fn seek_leaf_finish<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>, cur: Tree, node: L::Node, word: L::Word,
     p: usize, gm: int, acc: int, lids: Ghost<Seq<nat>>,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         lids@ == crate::bplus_tree::tree_leaf_ids(t.tree@),
@@ -8592,13 +8938,14 @@ pub(crate) proof fn seek_target_idx_unique_call(model: Seq<nat>, t: nat, r: int)
 /// `tree_leaf_ids(tree@).len() >= 2`, the tree is an Inner node, so every leaf is
 /// non-root and `tree_wf` forces `>= ceil(cap/2) >= 1` keys. (Bridges to
 /// `leaf_word_keys` via `lemma_chain_leaf_binds`'s binding + the keys count.)
-pub(crate) proof fn lemma_cursor_next_leaf_nonempty<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>, m: int,
+pub(crate) proof fn lemma_cursor_next_leaf_nonempty<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>, m: int,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         0 <= m < crate::bplus_tree::tree_leaf_ids(t.tree@).len(),
@@ -8705,13 +9052,14 @@ pub(crate) proof fn lemma_chain_leaf_keys_nonempty_forest<L: NodeLayout>(arena: 
 /// Recursing on the rightmost spine would duplicate `lemma_chain_leaf_binds`;
 /// instead this composes it at the chain's last position, which
 /// `lemma_last_leaf_id` identifies with `last_leaf`.
-pub(crate) proof fn lemma_last_leaf_binds<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>,
+pub(crate) proof fn lemma_last_leaf_binds<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires t.wf(),
     ensures
         t.last_leaf.as_nat() < t.arena().len(),
@@ -9075,11 +9423,12 @@ pub(crate) proof fn lemma_chain_leaf_binds_forest<L: NodeLayout>(arena: Seq<L::N
 /// `cursor_wf`: `node == lids[gleaf]` is the in-order leaf at position `gleaf`,
 /// so `lemma_chain_leaf_binds` gives `is_leaf` + `node_wf` + in-range. Lets the
 /// cursor call `L::key`/`L::count` (which require `node_wf`).
-pub(crate) proof fn lemma_cursor_node_wf<K, L, S, const TRACK: bool>(c: &BPlusCursor<K, L, S, TRACK>)
+pub(crate) proof fn lemma_cursor_node_wf<K, L, S, const TRACK: bool, P>(c: &BPlusCursor<K, L, S, TRACK, P>)
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         c.cursor_wf(),
         c.node.as_nat() != nil_link::<L>(),
@@ -9103,13 +9452,14 @@ pub(crate) proof fn lemma_cursor_node_wf<K, L, S, const TRACK: bool>(c: &BPlusCu
 /// Leaf-at-chain-index `gm` facts for `seek`: from `t.wf()` and a valid chain
 /// index, `arena[lids[gm]]` is a wf leaf in range with `count == |leaf gm|`. The
 /// `gm`-parameterized analogue of `lemma_cursor_node_wf` (which reads `c.gleaf`).
-pub(crate) proof fn lemma_cursor_node_wf_at<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>, gm: int,
+pub(crate) proof fn lemma_cursor_node_wf_at<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>, gm: int,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         0 <= gm < crate::bplus_tree::tree_leaf_ids(t.tree@).len(),
@@ -9132,13 +9482,14 @@ pub(crate) proof fn lemma_cursor_node_wf_at<K, L, S, const TRACK: bool>(
 /// the cursor set to `(node := lids[gm], pos, gleaf := gm, gidx := ti)`,
 /// `cursor_wf` holds and `idx == ti`. The positioned arm, with the node != NIL
 /// fact from the real-id bound.
-pub(crate) proof fn seek_finish_in_leaf<K, L, S, const TRACK: bool>(
-    c: &BPlusCursor<K, L, S, TRACK>, oldc: &BPlusCursor<K, L, S, TRACK>, gm: int, pos: usize, tgt: nat,
+pub(crate) proof fn seek_finish_in_leaf<K, L, S, const TRACK: bool, P>(
+    c: &BPlusCursor<K, L, S, TRACK, P>, oldc: &BPlusCursor<K, L, S, TRACK, P>, gm: int, pos: usize, tgt: nat,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         oldc.cursor_wf(),
         c.tree == oldc.tree,
@@ -9157,7 +9508,7 @@ pub(crate) proof fn seek_finish_in_leaf<K, L, S, const TRACK: bool>(
     let arena = c.tree.arena();
     let lids = crate::bplus_tree::tree_leaf_ids(c.tree.tree@);
     // node != nil_link: lids[gm] is a real leaf id (< arena.len() < max_nat).
-    lemma_cursor_node_wf_at::<K, L, S, TRACK>(c.tree, gm);
+    lemma_cursor_node_wf_at::<K, L, S, TRACK, P>(c.tree, gm);
     assert(c.node.as_nat() < arena.len());
     assert(c.node.as_nat() != nil_link::<L>());     // wf arena bound
     // gidx in range: ti == chain_offset(gm)+pos < chain_offset(gm)+|leaf gm| ==
@@ -9173,13 +9524,14 @@ pub(crate) proof fn seek_finish_in_leaf<K, L, S, const TRACK: bool>(
 /// chain_offset(gm)+|leaf gm| == chain_offset(gm+1)) or NIL (exhausted, ti ==
 /// |model|). Either way `cursor_wf` holds with `idx == ti`. Mirrors `step`'s
 /// link-follow.
-pub(crate) proof fn seek_finish_over_end<K, L, S, const TRACK: bool>(
-    c: &BPlusCursor<K, L, S, TRACK>, oldc: &BPlusCursor<K, L, S, TRACK>, node: L::Node, gm: int, tgt: nat,
+pub(crate) proof fn seek_finish_over_end<K, L, S, const TRACK: bool, P>(
+    c: &BPlusCursor<K, L, S, TRACK, P>, oldc: &BPlusCursor<K, L, S, TRACK, P>, node: L::Node, gm: int, tgt: nat,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         oldc.cursor_wf(),
         c.tree == oldc.tree,
@@ -9206,14 +9558,14 @@ pub(crate) proof fn seek_finish_over_end<K, L, S, const TRACK: bool>(
     assert(c.gidx@ == chain_offset::<L>(arena, lids, gm + 1));
     // leaf_links_ok: link(arena[lids[gm]]) == lids[gm+1] (m+1<len) | nil_link (last).
     assert(leaf_links_ok::<L>(arena, c.tree.tree@));
-    lemma_cursor_node_wf_at::<K, L, S, TRACK>(c.tree, gm);
+    lemma_cursor_node_wf_at::<K, L, S, TRACK, P>(c.tree, gm);
     assert(L::link_view(arena[lids[gm] as int])
         == (if gm + 1 < lids.len() { lids[gm + 1] } else { nil_link::<L>() }));
     if gm + 1 < lids.len() {
         // positioned at leaf gm+1, pos 0. node == lids[gm+1] (real id), non-empty.
         assert(c.node.as_nat() == lids[gm + 1]);
         assert(lids.len() >= 2);
-        lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK>(c.tree, gm + 1);
+        lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK, P>(c.tree, gm + 1);
         assert(c.node.as_nat() != nil_link::<L>());
         assert(c.gleaf@ == gm + 1);   // caller set it
         lemma_chain_keys_slice::<L>(arena, lids, gm + 1);
@@ -9231,11 +9583,12 @@ pub(crate) proof fn seek_finish_over_end<K, L, S, const TRACK: bool>(
 /// A positioned cursor reads the model: `keys_view(arena[node])[pos].as_nat() ==
 /// model[gidx]`. Composes `lemma_chain_keys_slice` (chain reading at the leaf's
 /// slice == that leaf's pos-th key) with B2 (`chain_keys == tree_keys == model`).
-pub(crate) proof fn lemma_cursor_key_at<K, L, S, const TRACK: bool>(c: &BPlusCursor<K, L, S, TRACK>)
+pub(crate) proof fn lemma_cursor_key_at<K, L, S, const TRACK: bool, P>(c: &BPlusCursor<K, L, S, TRACK, P>)
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         c.cursor_wf(),
         c.node.as_nat() != nil_link::<L>(),
@@ -9263,13 +9616,14 @@ pub(crate) proof fn lemma_cursor_key_at<K, L, S, const TRACK: bool>(c: &BPlusCur
 /// Every model value is within `K::id_bound` — directly from `wf`'s
 /// `model_bounded` clause (the refinement re-asserted there). This is what lets
 /// the cursor's `from_usize(word.as_usize())` reconstruct the exact `K`.
-pub(crate) proof fn lemma_model_value_bounded<K, L, S, const TRACK: bool>(
-    t: &BPlusTreeSet<K, L, S, TRACK>, i: int,
+pub(crate) proof fn lemma_model_value_bounded<K, L, S, const TRACK: bool, P>(
+    t: &BPlusTreeSet<K, L, S, TRACK, P>, i: int,
 )
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
     requires
         t.wf(),
         0 <= i < crate::bplus_tree::tree_keys(t.tree@).len(),
@@ -9281,11 +9635,12 @@ pub(crate) proof fn lemma_model_value_bounded<K, L, S, const TRACK: bool>(
 }
 
 
-impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
 
     // Overflow safety of the seek path:
@@ -9312,112 +9667,6 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
     // So the seek path is overflow-safe both structurally (bounds) and by machine
     // proof (Verus's overflow check on the verifying exec bodies).
 
-    /// Walk the rightmost spine and return the rightmost leaf's arena index —
-    /// i.e. recompute `last_leaf` from scratch, in O(depth).
-    ///
-    /// Needed because `insert_rec`'s contract preserves a subtree's *leftmost*
-    /// leaf (a split always splices the new node to the RIGHT) but not its
-    /// rightmost, which moves whenever the split lands on the rightmost spine.
-    /// Strengthening `insert_rec` to track the last leaf would mean threading a
-    /// new clause through ~1500 lines of split/absorb proof; recomputing costs one
-    /// extra descent on a path that already performed one — and only on the SLOW
-    /// path, since the fast path returns before ever reaching it. Production sets
-    /// the field incrementally instead (`if old_link == nil { set_last_leaf(...) }`
-    /// at `containers/src/bplus.rs:706`), which is cheaper but is exactly the
-    /// bookkeeping the proof would have to mirror.
-    ///
-    /// Stated over an explicit subtree rather than `self.wf()`: the callers invoke
-    /// it precisely when `last_leaf_ok` is the one `wf` clause not yet
-    /// re-established (they are computing the value that will restore it).
-    fn rightmost_leaf_of(&self, idx0: L::ArenaIdx, t: Ghost<Tree>) -> (r: L::ArenaIdx)
-        requires
-            self.nodes.wf(),
-            binds::<L>(self.arena(), t@),
-            crate::bplus_tree::tree_wf(t@, crate::bplus_tree::tree_height(t@),
-                L::leaf_cap_spec(), L::key_cap_spec(), true),
-            idx0.as_nat() == crate::bplus_tree::tree_root_id(t@),
-        ensures r.as_nat() == crate::bplus_tree::last_leaf_id(t@),
-    {
-        let mut idx = idx0;
-        let ghost mut cur = t@;
-        let ghost mut is_root = true;
-        proof {
-            L::lemma_arena_capacity();
-            L::lemma_geometry();
-        }
-        loop
-            invariant
-                self.nodes.wf(),
-                binds::<L>(self.arena(), cur),
-                crate::bplus_tree::tree_wf(cur, crate::bplus_tree::tree_height(cur),
-                    L::leaf_cap_spec(), L::key_cap_spec(), is_root),
-                idx.as_nat() == crate::bplus_tree::tree_root_id(cur),
-                // the answer for the whole tree is the answer for the current
-                // spine node: descending rightward never changes it.
-                crate::bplus_tree::last_leaf_id(cur) == crate::bplus_tree::last_leaf_id(t@),
-                L::leaf_cap_spec() >= 1,
-            decreases crate::bplus_tree::tree_height(cur),
-        {
-            let ghost hc = crate::bplus_tree::tree_height(cur);
-            // `lemma_inner_facts` wants the root form, which is the WEAKER one (it
-            // drops the minimum-occupancy bound); lift a descended child into it.
-            proof {
-                if !is_root {
-                    crate::bplus_tree::lemma_tree_wf_relax_root(
-                        cur, hc, L::leaf_cap_spec(), L::key_cap_spec());
-                }
-            }
-            // in range: `binds` states `id < arena.len()` in both arms, and
-            // `idx == tree_root_id(cur)`.
-            proof { assert(idx.as_nat() < self.arena().len()); }
-            let node = self.nodes.get_index(idx);
-            if L::is_leaf(&node) {
-                // a leaf IS its own rightmost leaf.
-                proof {
-                    match cur {
-                        Tree::Leaf { id, .. } => { assert(id == idx.as_nat()); }
-                        Tree::Inner { id, .. } => {
-                            // binds' Inner arm says arena[id] is NOT a leaf.
-                            assert(!L::is_leaf_spec(self.arena()[id as int]));
-                            assert(false);
-                        }
-                    }
-                }
-                return idx;
-            }
-            // internal: descend to the LAST child (index `count`, one past the
-            // last separator — the child with no upper separator bound).
-            let n = L::count(&node);
-            proof {
-                match cur {
-                    Tree::Leaf { id, .. } => {
-                        assert(L::is_leaf_spec(self.arena()[id as int]));
-                        assert(false);
-                    }
-                    Tree::Inner { id, seps, kids } => {
-                        lemma_inner_facts::<L>(self.arena(), id, seps, kids, hc);
-                        assert(n as nat == seps.len());
-                        assert(kids.len() == seps.len() + 1);
-                        lemma_inner_binds_child::<L>(self.arena(), id, seps, kids, n as int);
-                        crate::bplus_tree::lemma_forest_wf_at(
-                            kids, (hc - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), n as int);
-                        crate::bplus_tree::lemma_tree_wf_height(
-                            kids[n as int], (hc - 1) as nat, L::leaf_cap_spec(), L::key_cap_spec(), false);
-                    }
-                }
-            }
-            let child = L::child(&node, n);
-            proof {
-                let kids = cur->Inner_kids;
-                // last_leaf_id(Inner) is definitionally last_leaf_id of the LAST
-                // child, which is kids[seps.len()] == kids[n].
-                assert(kids.len() - 1 == n as int);
-                cur = kids[n as int];
-                is_root = false;
-            }
-            idx = child;
-        }
-    }
 
     /// `find_ge` over a leaf node's keys: first index `r` with `keys[r] >= word`.
     /// Dispatches to `S::find_ge` on the node's live key prefix (production's
@@ -9599,7 +9848,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             let cp = self.find_child(&node, word);
             proof {
                 // find_child's separator characterization feeds the descent step.
-                seek_descend_step::<K, L, S, TRACK>(self, cur, node, word, cp as int, gm, acc, Ghost(lids));
+                seek_descend_step::<K, L, S, TRACK, P>(self, cur, node, word, cp as int, gm, acc, Ghost(lids));
             }
             let ghost new_acc = acc + crate::bplus_tree::forest_keys(kids.subrange(0, cp as int)).len() as int;
             let ghost new_gm = gm + crate::bplus_tree::leaf_id_offset(kids, cp as int) as int;
@@ -9638,18 +9887,19 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
         let p = self.leaf_find_ge(&node, word);
         ret_pos = p;
         proof {
-            seek_leaf_finish::<K, L, S, TRACK>(self, cur, node, word, p, gm, acc, Ghost(lids));
+            seek_leaf_finish::<K, L, S, TRACK, P>(self, cur, node, word, p, gm, acc, Ghost(lids));
         }
         (idx, ret_pos, Ghost(gm))
     }
 }
 
 
-impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
+impl<'a, K, L, S, const TRACK: bool, P> BPlusCursor<'a, K, L, S, TRACK, P>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
     /// NIL leaf sentinel (`max_nat - 1` == `max_spec`), matching `new_leaf`'s
     /// terminator (`link == max_nat - 1`). `IndexLike::max()` is exactly that
@@ -9666,13 +9916,13 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     /// `seek_first` can be called right away. (Production says "positioned
     /// nowhere"; modeling it as the well-formed exhausted state is what lets the
     /// fast path in `seek` trust `node != NIL` ⟹ positioned.)
-    pub fn new(tree: &'a BPlusTreeSet<K, L, S, TRACK>) -> (c: Self)
+    pub fn new(tree: &'a BPlusTreeSet<K, L, S, TRACK, P>) -> (c: Self)
         requires tree.wf(),
-        ensures c.tree_ref() == tree, c.cursor_wf(), c.idx() == c.model().len(),
+        ensures c.tree_ref() == tree, c.cursor_ok(), c.idx() == c.model().len(),
     {
         let nilv = Self::nil();   // nilv.as_nat() == nil_link
         let c = BPlusCursor {
-            tree, node: nilv, pos: 0,
+            tree, node: nilv, pos: 0, leaf: L::new_leaf(),
             gidx: Ghost(crate::bplus_tree::tree_keys(tree.tree@).len() as int),
             gleaf: Ghost(0),
             _k: core::marker::PhantomData,
@@ -9690,7 +9940,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
 
     /// The tree this cursor walks (spec counterpart; the field is `pub(crate)` —
     /// privacy closeout).
-    pub open(crate) spec fn tree_ref(self) -> &'a BPlusTreeSet<K, L, S, TRACK> {
+    pub open(crate) spec fn tree_ref(self) -> &'a BPlusTreeSet<K, L, S, TRACK, P> {
         self.tree
     }
 
@@ -9715,6 +9965,19 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
             })
     }
 
+    /// The cached leaf is the arena node the cursor stands on (vacuous when
+    /// exhausted).
+    pub open(crate) spec fn leaf_cached(self) -> bool {
+        self.node.as_nat() != nil_link::<L>()
+            ==> self.leaf == self.tree.arena()[self.node.as_nat() as int]
+    }
+
+    /// The cursor's full invariant: positioned correctly and holding the leaf
+    /// it stands on.
+    pub open(crate) spec fn cursor_ok(self) -> bool {
+        self.cursor_wf() && self.leaf_cached()
+    }
+
     /// Position at the first model key `>= target` (leapfrog `seek`): establishes
     /// `cursor_wf` with `idx() == seek_target_idx(model, target)`. Verified via the
     /// root-descent `seek_leaf`, which returns the chain leaf `gm` and within-leaf
@@ -9728,12 +9991,13 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     /// observable result is identical; the fast path is exercised by the property
     /// tests on the production-shaped exec.)
     pub fn seek(&mut self, target: K)
-        requires old(self).cursor_wf(),
+        requires old(self).cursor_ok(),
         ensures
-            final(self).cursor_wf(),
+            final(self).cursor_ok(),
             final(self).tree_ref() == old(self).tree_ref(),
             final(self).idx() == seek_target_idx(final(self).model(), target.id_nat()),
     {
+        let nil = Self::nil();
         let word: L::Word = target.to_index();    // word.as_nat() == target.id_nat()
         let ghost lids = crate::bplus_tree::tree_leaf_ids(self.tree.tree@);
         let ghost ti = seek_target_idx(self.model(), target.id_nat());
@@ -9741,7 +10005,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
         // seek_leaf: leaf == lids[gm@], pos <= |leaf gm@|, chain_offset(gm@)+pos == ti.
         proof {
             // leaf == lids[gm@] is a real leaf id, so it is in arena range (for get).
-            lemma_cursor_node_wf_at::<K, L, S, TRACK>(self.tree, gm@);
+            lemma_cursor_node_wf_at::<K, L, S, TRACK, P>(self.tree, gm@);
             assert(leaf.as_nat() == lids[gm@]);
             assert(leaf.as_nat() < self.tree.arena().len());
         }
@@ -9753,12 +10017,13 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
         }
         if pos < cnt {
             // target falls within leaf gm@ at pos: position there, idx == ti.
+            self.leaf = node;
             self.node = leaf;
             self.pos = pos;
             proof {
                 self.gleaf@ = gm@;
                 self.gidx@ = ti;
-                seek_finish_in_leaf::<K, L, S, TRACK>(self, old(self), gm@, pos, target.id_nat());
+                seek_finish_in_leaf::<K, L, S, TRACK, P>(self, old(self), gm@, pos, target.id_nat());
             }
         } else {
             // pos == |leaf gm@|: target is past leaf gm@'s keys. Advance over the
@@ -9769,7 +10034,14 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
             proof {
                 self.gidx@ = ti;
                 self.gleaf@ = gm@ + 1;   // the next chain leaf (ignored when exhausted)
-                seek_finish_over_end::<K, L, S, TRACK>(self, old(self), node, gm@, target.id_nat());
+                seek_finish_over_end::<K, L, S, TRACK, P>(self, old(self), node, gm@, target.id_nat());
+            }
+            if self.node.as_usize() != nil.as_usize() {
+                proof {
+                    assert(self.node.as_nat() != nil_link::<L>());
+                    lemma_cursor_node_wf::<K, L, S, TRACK, P>(self);  // node in arena range
+                }
+                self.leaf = self.tree.nodes.get_index(self.node);
             }
         }
     }
@@ -9782,7 +10054,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     pub fn seek_first(&mut self)
         requires old(self).tree_ref().wf(),
         ensures
-            final(self).cursor_wf(),
+            final(self).cursor_ok(),
             final(self).tree_ref() == old(self).tree_ref(),
             final(self).idx() == 0,
     {
@@ -9891,6 +10163,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
         }
         if cnt > 0 {
             // non-empty leftmost leaf: position (leaf, 0) at model index 0.
+            self.leaf = node;
             self.node = idx;
             self.pos = 0;
             proof {
@@ -9918,7 +10191,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
                 self.gidx@ = 0;
                 assert(cnt == leaf_word_keys::<L>(self.tree.arena(), lids[0]).len());  // == 0
                 if lids.len() >= 2 {
-                    lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK>(self.tree, 0);  // leaf 0 >= 1: contra
+                    lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK, P>(self.tree, 0);  // leaf 0 >= 1: contra
                     assert(false);
                 }
                 assert(lids.len() == 1);
@@ -9940,7 +10213,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     /// and `None` exactly when exhausted (`idx == |model|`). This is the
     /// enumeration-read half of the leapfrog cursor's soundness.
     pub fn key(&self) -> (r: Option<K>)
-        requires self.cursor_wf(),
+        requires self.cursor_ok(),
         ensures
             self.idx() < self.model().len() ==> (match r {
                 Some(k) => k.id_nat() == self.model()[self.idx()],
@@ -9958,15 +10231,16 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
         // positioned: read leaf `node`'s `pos`-th key and project to K.
         proof {
             assert(self.node.as_nat() != nil_link::<L>());
-            lemma_cursor_node_wf::<K, L, S, TRACK>(self);  // node_wf(arena[node]), node in range
+            lemma_cursor_node_wf::<K, L, S, TRACK, P>(self);  // node_wf(arena[node]), node in range
         }
-        let node = self.tree.nodes.get_index(self.node);
+        let ghost node = self.leaf;
         let ghost lids = crate::bplus_tree::tree_leaf_ids(self.tree.tree@);
         proof {
+            assert(node == self.tree.arena()[self.node.as_nat() as int]);  // leaf_cached
             // pos < count(node) == |leaf_word_keys(node)| (cursor_wf positioned arm).
             L::lemma_keys_view_len(node);
         }
-        let w = L::key(&node, self.pos);
+        let w = L::key(&self.leaf, self.pos);
         let wu = w.as_usize();  // wu as nat == w.as_nat() (as_usize ensures)
         let r = K::from_usize(wu);
         proof {
@@ -9978,10 +10252,10 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
             lemma_chain_keys_eq_model::<L>(arena, self.tree.tree@);  // chain_keys == model
             assert(self.gidx@ < self.model().len());
             // w.as_nat() == leaf_word_keys(node)[pos] == model[gidx] (slice + B2).
-            lemma_cursor_key_at::<K, L, S, TRACK>(self);
+            lemma_cursor_key_at::<K, L, S, TRACK, P>(self);
             assert(w.as_nat() == self.model()[self.gidx@]);
             // model values are in id_bound, so from_usize round-trips.
-            lemma_model_value_bounded::<K, L, S, TRACK>(self.tree, self.gidx@);
+            lemma_model_value_bounded::<K, L, S, TRACK, P>(self.tree, self.gidx@);
             assert((wu as nat) < K::id_bound());          // wu as nat == w.as_nat()
             assert(r.id_nat() == wu as nat);              // from_usize roundtrip
         }
@@ -9993,9 +10267,9 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     /// exhausted end). With `key()`, this enumerates the sorted set in order: the
     /// `step`-by-`step` walk from `seek_first` visits `model[0]`, `model[1]`, ... .
     pub fn step(&mut self)
-        requires old(self).cursor_wf(),
+        requires old(self).cursor_ok(),
         ensures
-            final(self).cursor_wf(),
+            final(self).cursor_ok(),
             final(self).tree_ref() == old(self).tree_ref(),
             // advance by one, clamped at the exhausted end (idx == |model|).
             final(self).idx() == if old(self).idx() < old(self).model().len() {
@@ -10016,9 +10290,10 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
             return;
         }
         // positioned. Read the current leaf; advance within it, or follow `link`.
-        proof { lemma_cursor_node_wf::<K, L, S, TRACK>(self); }
-        let node = self.tree.nodes.get_index(self.node);
-        let cnt = L::count(&node);
+        proof { lemma_cursor_node_wf::<K, L, S, TRACK, P>(self); }
+        let ghost node = self.leaf;
+        proof { assert(node == arena[self.node.as_nat() as int]); }  // leaf_cached
+        let cnt = L::count(&self.leaf);
         let ghost m = self.gleaf@;
         proof {
             L::lemma_keys_view_len(node);
@@ -10035,7 +10310,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
             // ran off leaf m (pos was cnt-1, now == cnt): follow link to leaf m+1
             // (or NIL). `leaf_links_ok` (a wf clause) pins link(arena[lids[m]]) ==
             // (m+1 < len ? lids[m+1] : nil_link).
-            let link = L::link(&node);
+            let link = L::link(&self.leaf);
             self.node = link;
             self.pos = 0;
             proof {
@@ -10057,7 +10332,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
                     // leaf non-root, hence >= 1 key).
                     assert(self.node.as_nat() == lids[m + 1]);
                     assert(lids.len() >= 2);  // m >= 0 and m+1 < len
-                    lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK>(self.tree, m + 1);
+                    lemma_cursor_next_leaf_nonempty::<K, L, S, TRACK, P>(self.tree, m + 1);
                     assert(self.node.as_nat() != nil_link::<L>());  // lids[m+1] real (wf arena bound)
                     assert(self.gleaf@ == m + 1);
                     assert(self.pos < leaf_word_keys::<L>(arena, lids[self.gleaf@]).len());
@@ -10075,6 +10350,13 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
                     assert(self.gidx@ == self.model().len());
                     assert(self.cursor_wf());  // exhausted
                 }
+            }
+            if self.node.as_usize() != nil.as_usize() {
+                proof {
+                    assert(self.node.as_nat() != nil_link::<L>());
+                    lemma_cursor_node_wf::<K, L, S, TRACK, P>(self);  // next leaf in arena range
+                }
+                self.leaf = self.tree.nodes.get_index(self.node);
             }
         } else {
             // stayed within leaf m: node/gleaf unchanged, pos < cnt == |leaf m|,
@@ -10174,7 +10456,7 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
     /// with `model[r] >= t` (by `lemma_seek_target_idx_split`), i.e. seek stops
     /// on the least key `> target` (or exhausts) — it never overshoots a key it
     /// should have stopped before. So no present key is ever skipped.
-    pub(crate) proof fn theorem_seek_never_skips(tree: &BPlusTreeSet<K, L, S, TRACK>, target: K)
+    pub(crate) proof fn theorem_seek_never_skips(tree: &BPlusTreeSet<K, L, S, TRACK, P>, target: K)
         requires
             tree.wf(),
             tree.model().contains(target.id_nat()),
@@ -10230,12 +10512,12 @@ impl<'a, K, L, S, const TRACK: bool> BPlusCursor<'a, K, L, S, TRACK>
 /// stack, each archived header round-trips through ArenaIdx, and each
 /// archived (arena snapshot, header, tree) triple is `tree_state_wf`.
 #[verifier::opaque]
-pub open(crate) spec fn tree_archive_agrees<K, L, S, const TRACK: bool>(
+pub open(crate) spec fn tree_archive_agrees<K, L, S, const TRACK: bool, P>(
     headers: Seq<(L::ArenaIdx, usize, L::ArenaIdx)>,
     trees: Seq<Tree>,
     arena_snaps: Seq<Seq<L::Node>>,
 ) -> bool
-    where K: DenseId, L: NodeLayout<Word = K::Index>, S: SearchKind,
+    where K: DenseId, L: NodeLayout<Word = K::Index>, S: SearchKind, P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
     // No `< max_nat()` clause per index field: `L::ArenaIdx` carries its own
     // range, which is the point of storing the header at its own type.
@@ -10253,85 +10535,45 @@ pub open(crate) spec fn tree_archive_agrees<K, L, S, const TRACK: bool>(
             ==> (#[trigger] headers[k]).2.as_nat() == crate::bplus_tree::last_leaf_id(trees[k]))
 }
 
-/// Token for mark/restore. Delegates to the inner arena Vec's token, and
-/// additionally snapshots the two exec header fields that live OUTSIDE the Vec
-/// (`root`, `nkeys`) so `restore` can roll them back along with the arena.
-#[derive(Copy, Clone)]
-pub struct BPlusToken {
-    pub(crate) nodes: VecToken,
-    // Inert header copies (restore recovers the header from the
-    // internal archive; these are never consulted — see `is_valid_token`).
-    // Read only by spec code, which plain builds erase.
-    #[allow(dead_code)]
-    pub(crate) root: usize,
-    #[allow(dead_code)]
-    pub(crate) nkeys: usize,
-}
-
-impl BPlusToken {
-    /// Reconstruction coordinate of the inner arena token (spec counterpart).
-    pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.nodes.frame_idx as nat
-    }
-
-    /// The token's (inert) root header copy.
-    pub open(crate) spec fn root_spec(self) -> nat {
-        self.root as nat
-    }
-
-    /// The token's (inert) nkeys header copy.
-    pub open(crate) spec fn nkeys_spec(self) -> nat {
-        self.nkeys as nat
-    }
-}
-
-impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
     where
         K: DenseId,
         L: NodeLayout<Word = K::Index>,
         S: SearchKind,
+        P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
 
-    /// Semi-persistence: snapshot the whole tree (`mark`) so a later `restore`
-    /// rolls it back. Delegates to the arena Vec's `mark`, plus records the two
-    /// exec header fields (`root`, `nkeys`) that live outside the Vec. The view
-    /// (`model`/`tree@`) is unchanged; the inner Vec pushes a frame capturing the
-    /// current arena. Mirrors `SparseSet::mark`. Requires `TRACK` for the inner
-    /// Vec to actually retain the snapshot.
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> (token: BPlusToken)
+
+    /// Push a frame without minting (what a typed group drives): the arena
+    /// seals its stratum and the header and ghost tree are archived.
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
         requires
-            // `wf` already implies arena.len() < max_nat (its last clause), so no
-            // separate capacity obligation: mark is total on any wf tree.
             old(self).wf(),
+            TRACK,
+            old(self).arena_depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
+            final(self).arena() == old(self).arena(),
             final(self).tree_spec() == old(self).tree_spec(),
             final(self).model() == old(self).model(),
             final(self).root_spec() == old(self).root_spec(),
             final(self).nkeys_spec() == old(self).nkeys_spec(),
-            // the snapshot just pushed is the current arena; restore can return here.
-            token.frame_idx_spec() == old(self).arena_depth_spec(),
+            final(self).arena_depth_spec() == old(self).arena_depth_spec() + 1,
             final(self).arena_snapshots_view()
                 == old(self).arena_snapshots_view().push(old(self).arena()),
-            token.root_spec() == final(self).root_spec().as_nat(),
-            token.nkeys_spec() == final(self).nkeys_spec(),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().push(old(self).tree_spec()),
         {
         // Total-with-documented-panic: the erased TRACK and depth requires
         // become explicit refuse branches; ensures bind returning paths only.
-        if !TRACK {
-            crate::guard::refuse("BPlusTreeSet::mark: tree is untracked");
-        }
-        if !(self.nodes.frames.len() < (u32::MAX as usize)) {
-            crate::guard::refuse("BPlusTreeSet::mark: frame depth at u32 ceiling");
-        }
-            let nodes_token = self.nodes.mark(shrink);
+            self.nodes.push_frame(shrink);
             // Archive the header and ghost tree alongside the arena
             // snapshot the inner mark just pushed.
             self.header_archive.push((self.root, self.nkeys, self.last_leaf));
             self.tree_snapshots = Ghost(self.tree_snapshots@.push(self.tree@));
             proof {
                 reveal(tree_archive_agrees);
-                assert(tree_archive_agrees::<K, L, S, TRACK>(
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
                     old(self).header_archive@, old(self).tree_snapshots@,
                     old(self).nodes.snapshots_view()));
                 let k_new = self.header_archive@.len() - 1;
@@ -10366,73 +10608,43 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                         assert(self.tree_snapshots@[k] == self.tree@);
                     }
                 }
-                assert(tree_archive_agrees::<K, L, S, TRACK>(
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
                     self.header_archive@, self.tree_snapshots@,
                     self.nodes.snapshots_view()));
             }
-            BPlusToken {
-                nodes: nodes_token,
-                // Inert: restore recovers the header from the archive, never
-                // from the token. Kept at `usize` because nothing reads it.
-                root: self.root.as_usize(),
-                nkeys: self.nkeys,
-            }
         }
 
-    /// Roll the whole tree back to the state captured by `token`. The arena Vec
-    /// rolls back to its frame snapshot; `root`/`nkeys` come from the token; and
-    /// the ghost model `tree@` is supplied as `snap_tree` (the ghost tree that was
-    /// live at the mark — erased at runtime, like `ListArena::restore`'s
-    /// `snap_model`). The caller proves `snap_tree` is a valid B+tree over the
-    /// snapshot arena (`tree_state_wf`), exactly the structural half of `wf`; this
-    /// method re-establishes the full `self.wf()`.
-    /// "Restorable now": the Vec component is restorable and every
-    /// runtime-checkable header condition holds (the recorded root index
-    /// round-trips through ArenaIdx). A token passing this check will not be
-    /// rejected by any of `restore`'s runtime guards — one public validity
-    /// meaning. (The proof-only `tree_state_wf` precondition is not runtime
-    /// checkable; forged in-range-but-wrong headers are excluded by token
-    /// opacity because fields are `pub(crate)`.)
-    pub fn is_valid_token(&self, token: &BPlusToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        // The token's header copies (root/nkeys) are NOT consulted: restore
-        // recovers the header from the internal archive, so forged
-        // header fields are inert and validity is exactly the Vec component's
-        // restorability.
-        self.nodes.is_valid_token(&token.nodes)
-    }
 
-    pub fn restore(&mut self, token: BPlusToken)
+
+    /// Semantics B, token-free (what a typed group drives): the arena resets
+    /// to its snapshot at `target` and keeps that frame open; the header and
+    /// ghost tree archived at that mark come back.
+    pub(crate) fn reset_frames(&mut self, target: usize)
         where L::Node: core::default::Default
         requires
             old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).arena_depth_spec(),
+            old(self).arena_depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
-            // Restored to the state archived at that mark: header and ghost tree
-            // are recovered internally; the token's header copies
-            // are NOT consulted; forged header fields are inert).
-            final(self).tree_spec() == old(self).tree_snapshots_spec()[token.frame_idx_spec() as int],
-            final(self).arena() == old(self).arena_snapshots_view()[token.frame_idx_spec() as int],
+            final(self).tree_spec() == old(self).tree_snapshots_spec()[target as int],
+            final(self).arena() == old(self).arena_snapshots_view()[target as int],
             final(self).model() == crate::bplus_tree::tree_keys(
-                old(self).tree_snapshots_spec()[token.frame_idx_spec() as int]),
+                old(self).tree_snapshots_spec()[target as int]),
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, target as int + 1),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, target as int + 1),
+            final(self).arena_depth_spec() == target as nat + 1,
         {
         // Total-with-documented-panic: is_valid_token answers exactly "would
         // restore succeed now"; a stale/foreign token refuses here.
-        if !self.is_valid_token(&token) {
-            crate::guard::refuse("BPlusTreeSet::restore: token does not name a restorable frame");
-        }
             // Runtime guards, all before `self.nodes.restore`
             // mutates the arena, so a bad token cannot leave the tree
             // half-restored. The header comes from the internal archive (in
             // lockstep with the vec frames — wf agreement), so no token
             // header validation is needed: those fields are ignored.
-            crate::guard::check_precondition(TRACK, "restore() called on untracked tree");
-            crate::guard::check_precondition(
-                self.is_valid_token(&token),
-                "BPlusTreeSet::restore: invalid, foreign, stale, consumed, or abandoned token",
-            );
             proof {
                 reveal(tree_archive_agrees);
                 // Archive lengths equal the snapshot stack (wf agreement); the
@@ -10440,21 +10652,21 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                 // snapshots.len() == frames.len(), so frame_idx indexes the
                 // archives.
             }
-            let ghost snap_tree = self.tree_snapshots@[token.nodes.frame_idx_spec() as int];
+            let ghost snap_tree = self.tree_snapshots@[target as int];
             // Recover the archived header. frame_idx < frames.len() ==
             // header_archive.len() (agreement), so the indexing is in-bounds;
             // the guard above pins it for unverified callers too.
             crate::guard::check_precondition(
-                token.nodes.frame_idx < self.header_archive.len(),
-                "BPlusTreeSet::restore: token frame beyond header archive",
+                (target) < self.header_archive.len(),
+                "BPlusTreeSet::reset_frames: frame beyond header archive",
             );
             // The archive stores both indices at their own type, so recovering
             // the header is three moves with no conversion that could fail: the
             // two unreachable `try_from_usize` arms this replaced each needed an
             // `assert(false)` to discharge.
             let (saved_root, saved_nkeys, saved_last_leaf) =
-                self.header_archive[token.nodes.frame_idx];
-            self.nodes.restore(token.nodes);
+                self.header_archive[target];
+            self.nodes.reset_frame(target);
             self.root = saved_root;
             self.nkeys = saved_nkeys;
             // `last_leaf` comes back with the rest of the header: the agreement
@@ -10463,12 +10675,103 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
             self.last_leaf = saved_last_leaf;
             self.tree = Ghost(snap_tree);
             // Truncate the archives in lockstep with the vec snapshot stack.
-            self.header_archive.truncate(token.nodes.frame_idx);
+            self.header_archive.truncate(target + 1);
             self.tree_snapshots =
-                Ghost(self.tree_snapshots@.subrange(0, token.nodes.frame_idx_spec() as int));
+                Ghost(self.tree_snapshots@.subrange(0, target as int + 1));
             proof {
                 reveal(tree_archive_agrees);
-                let f = token.nodes.frame_idx_spec() as int;
+                let f = target as int;
+                // nodes.restore put the arena at the snapshot; the archived
+                // agreement at frame f is tree_state_wf over exactly that
+                // snapshot + the archived header + tree.
+                assert(self.arena()
+                    == old(self).nodes.snapshots_view()[f]);
+                // Truncated archives agree with the truncated snapshot stack.
+                assert(self.nodes.snapshots_view()
+                    =~= old(self).nodes.snapshots_view().subrange(0, f + 1));
+                assert forall|k: int| 0 <= k < self.header_archive@.len()
+                    implies Self::tree_state_wf(
+                            self.nodes.snapshots_view()[k],
+                            (#[trigger] self.header_archive@[k]).0.as_nat(),
+                            self.tree_snapshots@[k],
+                            self.header_archive@[k].1 as nat) by {
+                    assert(self.header_archive@[k] == old(self).header_archive@[k]);
+                    assert(self.tree_snapshots@[k] == old(self).tree_snapshots@[k]);
+                    assert(self.nodes.snapshots_view()[k]
+                        == old(self).nodes.snapshots_view()[k]);
+                }
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
+                    self.header_archive@, self.tree_snapshots@,
+                    self.nodes.snapshots_view()));
+            }
+        }
+
+
+
+    /// The legacy pop-restore, token-free (what a typed group drives): the
+    /// arena restores to its snapshot at `target` and drops that frame with
+    /// everything above it; the header and ghost tree archived at that mark
+    /// come back.
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        where L::Node: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).arena_depth_spec(),
+        ensures
+            final(self).wf(),
+            final(self).tree_spec() == old(self).tree_snapshots_spec()[target as int],
+            final(self).arena() == old(self).arena_snapshots_view()[target as int],
+            final(self).model() == crate::bplus_tree::tree_keys(
+                old(self).tree_snapshots_spec()[target as int]),
+            final(self).arena_snapshots_view()
+                == old(self).arena_snapshots_view().subrange(0, target as int),
+            final(self).tree_snapshots_spec()
+                == old(self).tree_snapshots_spec().subrange(0, target as int),
+            final(self).arena_depth_spec() == target as nat,
+        {
+        // Total-with-documented-panic: is_valid_token answers exactly "would
+        // restore succeed now"; a stale/foreign token refuses here.
+            // Runtime guards, all before `self.nodes.restore`
+            // mutates the arena, so a bad token cannot leave the tree
+            // half-restored. The header comes from the internal archive (in
+            // lockstep with the vec frames — wf agreement), so no token
+            // header validation is needed: those fields are ignored.
+            proof {
+                reveal(tree_archive_agrees);
+                // Archive lengths equal the snapshot stack (wf agreement); the
+                // vec's own wf (wf_for_snap's parallel-stacks clause) gives
+                // snapshots.len() == frames.len(), so frame_idx indexes the
+                // archives.
+            }
+            let ghost snap_tree = self.tree_snapshots@[target as int];
+            // Recover the archived header. frame_idx < frames.len() ==
+            // header_archive.len() (agreement), so the indexing is in-bounds;
+            // the guard above pins it for unverified callers too.
+            if !(target < self.header_archive.len()) {
+                crate::guard::refuse("BPlusTreeSet::restore_frames: header archive out of step");
+            }
+            // The archive stores both indices at their own type, so recovering
+            // the header is three moves with no conversion that could fail: the
+            // two unreachable `try_from_usize` arms this replaced each needed an
+            // `assert(false)` to discharge.
+            let (saved_root, saved_nkeys, saved_last_leaf) =
+                self.header_archive[target];
+            self.nodes.restore_frame(target);
+            self.root = saved_root;
+            self.nkeys = saved_nkeys;
+            // `last_leaf` comes back with the rest of the header: the agreement
+            // clause pins it to the archived ghost tree's rightmost leaf, so
+            // `last_leaf_ok` is re-established from the archive alone.
+            self.last_leaf = saved_last_leaf;
+            self.tree = Ghost(snap_tree);
+            // Truncate the archives in lockstep with the vec snapshot stack.
+            self.header_archive.truncate(target);
+            self.tree_snapshots =
+                Ghost(self.tree_snapshots@.subrange(0, target as int));
+            proof {
+                reveal(tree_archive_agrees);
+                let f = target as int;
                 // nodes.restore put the arena at the snapshot; the archived
                 // agreement at frame f is tree_state_wf over exactly that
                 // snapshot + the archived header + tree.
@@ -10488,7 +10791,7 @@ impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
                     assert(self.nodes.snapshots_view()[k]
                         == old(self).nodes.snapshots_view()[k]);
                 }
-                assert(tree_archive_agrees::<K, L, S, TRACK>(
+                assert(tree_archive_agrees::<K, L, S, TRACK, P>(
                     self.header_archive@, self.tree_snapshots@,
                     self.nodes.snapshots_view()));
             }
@@ -10528,11 +10831,12 @@ pub type Layout256 = Layout256U32;
 // invariant, so this does not weaken the privacy closeout (no construction,
 // no mutation).
 // ---------------------------------------------------------------------------
-impl<K, L, S, const TRACK: bool> BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> BPlusTreeSet<K, L, S, TRACK, P>
 where
     K: DenseId,
     L: NodeLayout<Word = K::Index>,
     S: SearchKind,
+    P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
     /// Read-only arena access for white-box tests.
     #[doc(hidden)]
@@ -10541,7 +10845,7 @@ where
     ) -> &crate::vec::Vec<
         L::Node,
         L::ArenaIdx,
-        crate::inline_store::InlineStore<L::Node, L::ArenaIdx>,
+        <P as TaggedFamily<L::Node, L::ArenaIdx, TRACK>>::Store,
         TRACK,
     > {
         &self.nodes
@@ -10555,11 +10859,12 @@ where
 }
 
 // Production-surface parity (production ships Default).
-impl<K, L, S, const TRACK: bool> Default for BPlusTreeSet<K, L, S, TRACK>
+impl<K, L, S, const TRACK: bool, P> Default for BPlusTreeSet<K, L, S, TRACK, P>
 where
     K: DenseId,
     L: NodeLayout<Word = K::Index>,
     S: SearchKind,
+    P: TaggedFamily<L::Node, L::ArenaIdx, TRACK>,
 {
     fn default() -> Self {
         Self::new()

@@ -13,6 +13,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use verus::group::ForkHistory;
 
 use semi_persistent_containers as prod;
 use semi_persistent_containers_verus as verus;
@@ -74,10 +75,10 @@ fn bench_nested_mark(c: &mut Criterion) {
             )
         });
         g.bench_with_input(BenchmarkId::new("verus", depth), &depth, |b, &depth| {
-            type V = verus::VecP<u64, u32, true>;
+            type V = ForkHistory<verus::VecP<u64, u32, true>>;
             b.iter_batched_ref(
                 || {
-                    let mut v: V = V::new();
+                    let mut v: V = ForkHistory::new(verus::VecP::new());
                     for i in 0..N {
                         v.try_push(i as u64).expect("push: within index word");
                     }
@@ -86,9 +87,10 @@ fn bench_nested_mark(c: &mut Criterion) {
                 |v| {
                     nested_body!(
                         *v,
-                        |vv: &mut V, s| vv.try_mark(s).expect("mark: bounded depth"),
+                        |vv: &mut V, s| vv.mark(s).expect("mark: bounded depth"),
                         |vv: &mut V, t| {
-                            vv.try_restore(t).expect("restore: own token");
+                            // Legacy restore == verified restore_and_pop (restore + pop_scope fused; design doc 08 §1).
+                            assert!(vv.restore_and_pop(t), "restore: own token");
                         },
                         verus::ShrinkPolicy::Never,
                         set_index,

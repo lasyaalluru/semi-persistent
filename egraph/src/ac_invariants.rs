@@ -61,6 +61,7 @@ impl<Cfg: EGraphConfig, L: LitVal, const TRACK: bool, const PROOFS: bool>
     EGraph<Cfg, L, TRACK, PROOFS>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, TRACK>,
 {
     /// Canonical child monomial (class-repr, mult) of a completion node — MSet (coalesced
     /// counts) or Set (deduped, all counts 1). Delegates to the engine's own

@@ -13,8 +13,11 @@ Rules are compiled and stored. `(run N)` triggers the saturation
 loop. `(push)`/`(pop)` snapshot and restore the mutable logical state:
 the e-graph, runtime globals, and rules added after the mark. Static
 registries, configuration, scratch capacity, and last-run diagnostics are
-not rolled back. This path requires `TRACK = true` (as used by the CLI);
-untracked containers reject `mark`/`restore`.
+not rolled back. `(pop)` is the fused `EGraph::restore_and_pop`: it returns to
+the checkpoint and drops that scope in one move, on one pop core per column,
+which is what makes it cost what the pre-semantics-B restore cost (containers
+doc 08 §1). This path requires `TRACK = true` (as used by the CLI); an untracked
+member cannot take a frame, so the group refuses the mark.
 
 The saturation loop itself is the classic equality saturation
 algorithm: rebuild, index, schedule, match, apply, repeated until

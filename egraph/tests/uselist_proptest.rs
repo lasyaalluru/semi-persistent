@@ -4,6 +4,7 @@ use proptest::prelude::*;
 use semi_persistent_egraph::ENodeId;
 use semi_persistent_egraph::classes::EClasses;
 use semi_persistent_egraph::containers::ShrinkPolicy;
+use semi_persistent_egraph::containers::group::ForkHistory;
 use semi_persistent_egraph::id::{EClassKey, UseListId, UseNodeId};
 use std::collections::HashMap;
 
@@ -102,7 +103,7 @@ fn run_layered(
     merges: Vec<(usize, usize)>,    // pairs of layer-0 indices to merge
     do_mark_restore: bool,
 ) {
-    let mut ec = EC::new();
+    let mut ec = ForkHistory::new(EC::new());
     let mut oracle = Oracle::new();
     let mut layers: Vec<Vec<ENodeId>> = Vec::new();
     let mut all_ids: Vec<ENodeId> = Vec::new();
@@ -152,7 +153,7 @@ fn run_layered(
 
     // Optionally mark
     let token = if do_mark_restore {
-        Some(ec.mark(ShrinkPolicy::Never))
+        Some(ec.mark(ShrinkPolicy::Never).expect("mark headroom"))
     } else {
         None
     };
@@ -171,7 +172,7 @@ fn run_layered(
 
     // Restore and verify
     if let Some(tok) = token {
-        ec.restore(tok);
+        assert!(ec.restore(tok), "restore: the group's own live token");
         oracle = snap_oracle;
         check_all(&ec, &oracle, &all_ids);
     }

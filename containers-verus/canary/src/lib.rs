@@ -111,52 +111,39 @@ mod union_find_shaped {
         cv::vec::Vec<DenseId31, u32, cv::inline_store::InlineStore<DenseId31, u32>, true>;
     type RankVec = cv::vec::Vec<u8, u32, cv::inline_store::InlineStore<u8, u32>, true>;
 
-    struct UnionFindShaped {
-        parent_fast: ParentVec,
-        rank: RankVec,
-        parent_proof: Option<ParentVec>,
-    }
-
-    struct UnionFindTokenShaped {
-        parent_fast: cv::vec::VecToken,
-        rank: cv::vec::VecToken,
-        parent_proof: Option<cv::vec::VecToken>,
-    }
+    /// The pair of columns a union-find keeps in lockstep, driven by one
+    /// external history: the shape a consumer writes now (the columns carry no
+    /// tokens of their own, the group mints one stamp for both).
+    type UnionFindShaped = cv::group::ForkHistory<cv::group::Pair<ParentVec, RankVec>>;
 
     pub fn smoke() {
-        let mut uf = UnionFindShaped {
-            parent_fast: ParentVec::new(),
-            rank: RankVec::new(),
-            parent_proof: None,
-        };
-        uf.parent_fast
+        let mut uf: UnionFindShaped =
+            cv::group::ForkHistory::new(cv::group::Pair::new(ParentVec::new(), RankVec::new()));
+        uf.member
+            .a
             .try_push(DenseId31::new(0))
             .expect("push: within index word");
-        uf.rank.try_push(0u8).expect("push: within index word");
-        // Composite mark: each member vec marks; token wraps them.
-        let tok = UnionFindTokenShaped {
-            parent_fast: uf
-                .parent_fast
-                .try_mark(cv::vec::ShrinkPolicy::Never)
-                .expect("mark: depth bounded by this harness"),
-            rank: uf
-                .rank
-                .try_mark(cv::vec::ShrinkPolicy::Never)
-                .expect("mark: depth bounded by this harness"),
-            parent_proof: None,
-        };
-        uf.parent_fast
+        uf.member.b.try_push(0u8).expect("push: within index word");
+        // One mark for the pair; both columns advance in lockstep.
+        let tok = uf
+            .mark(cv::vec::ShrinkPolicy::Never)
+            .expect("mark: depth bounded by this harness");
+        uf.member
+            .a
             .try_push(DenseId31::new(1))
             .expect("push: within index word");
-        uf.rank.try_push(1u8).expect("push: within index word");
-        // Two-phase restore: prevalidate ALL, then restore in reverse order.
-        assert!(uf.parent_fast.is_valid_token(&tok.parent_fast));
-        assert!(uf.rank.is_valid_token(&tok.rank));
-        uf.rank.try_restore(tok.rank).expect("restore: own token");
-        uf.parent_fast
-            .try_restore(tok.parent_fast)
-            .expect("restore: own token");
-        assert_eq!(uf.parent_fast.len(), 1);
+        uf.member.b.try_push(1u8).expect("push: within index word");
+        assert!(uf.is_valid(tok));
+        // One restore moves both columns; the checkpoint stays valid after it
+        // (semantics B).
+        assert!(uf.restore(tok), "restore: the group's own live token");
+        assert!(uf.is_valid(tok));
+        assert_eq!(uf.member.a.len(), 1);
+        assert_eq!(uf.member.b.len(), 1);
+        // The fused pop lands below the checkpoint and kills it.
+        assert!(uf.restore_and_pop(tok));
+        assert!(!uf.is_valid(tok));
+        assert_eq!(uf.depth(), 0);
     }
 }
 
@@ -184,21 +171,21 @@ mod min_pool_shaped {
 }
 
 /// EGraph's unit_node / inverse_op maps (egraph.rs:102-108) at the Copy-key
-/// surface available today: SpMap<Copy, Copy>.
+/// surface available today: SpUniqueMap<Copy, Copy>.
 mod copy_key_maps {
     use super::cv;
 
     // Index word `u32`, as at the egraph sites: both maps are keyed by an operator id
     // whose `Index` is the config word, so a log position shares that word.
     struct EGraphMapsShaped {
-        unit_node: cv::map::SpMap<u32, u32, u32, true>,
-        inverse_op: cv::map::SpMap<u32, u32, u32, true>,
+        unit_node: cv::map::SpUniqueMap<u32, u32, u32, true>,
+        inverse_op: cv::map::SpUniqueMap<u32, u32, u32, true>,
     }
 
     pub fn smoke() {
         let mut m = EGraphMapsShaped {
-            unit_node: cv::map::SpMap::new(),
-            inverse_op: cv::map::SpMap::new(),
+            unit_node: cv::map::SpUniqueMap::new(),
+            inverse_op: cv::map::SpUniqueMap::new(),
         };
         m.unit_node
             .try_insert(1, 100)
@@ -323,20 +310,20 @@ mod clone_key_maps {
     // Index word `u32` at every site, as in the egraph: each of these maps mints its
     // ids from its own log positions, and those ids' `Index` is the config word.
     struct RegistriesShaped {
-        sorts: cv::map::SpMap<String, (), u32, true>,
-        ops: cv::map::SpMap<String, OpInfoShaped, u32, true>,
+        sorts: cv::map::SpUniqueMap<String, (), u32, true>,
+        ops: cv::map::SpUniqueMap<String, OpInfoShaped, u32, true>,
         // au/terms.rs:43 — Vec inside the key tuple.
-        by_structure: cv::map::SpMap<(u32, Vec<u32>), u32, u32, true>,
+        by_structure: cv::map::SpUniqueMap<(u32, Vec<u32>), u32, u32, true>,
         // au/space.rs:63 — Vec as the whole key.
-        ctx_index: cv::map::SpMap<Vec<u32>, u32, u32, true>,
+        ctx_index: cv::map::SpUniqueMap<Vec<u32>, u32, u32, true>,
     }
 
     pub fn smoke() {
         let mut r = RegistriesShaped {
-            sorts: cv::map::SpMap::new(),
-            ops: cv::map::SpMap::new(),
-            by_structure: cv::map::SpMap::new(),
-            ctx_index: cv::map::SpMap::new(),
+            sorts: cv::map::SpUniqueMap::new(),
+            ops: cv::map::SpUniqueMap::new(),
+            by_structure: cv::map::SpUniqueMap::new(),
+            ctx_index: cv::map::SpUniqueMap::new(),
         };
         r.sorts
             .try_insert("Int".to_string(), ())
@@ -353,15 +340,31 @@ mod clone_key_maps {
                 },
             )
             .expect("canary: capacity");
-        // Append-only entries have no mutable accessor: constructor-ness is
-        // decided at registration; a late change is read-clone-modify-insert.
+        // Unique-keyed: a second registration under the same name is refused,
+        // which is the registry's duplicate check; the first entry stands.
         let mut updated = r.ops.get_val(idx).clone();
         updated.is_constructor = true;
-        r.ops
-            .try_insert("+".to_string(), updated)
+        assert_eq!(
+            r.ops.try_insert("+".to_string(), updated),
+            Err(cv::error::ContainerError::DuplicateKey),
+            "unique map refuses a present key"
+        );
+        assert!(!r.ops.get_by_key(&"+".to_string()).unwrap().is_constructor);
+        assert_eq!(r.ops.len(), 1, "one live key, no shadow");
+        // Interning answers with the existing entry, in one hash.
+        let (hit, fresh) = r
+            .ops
+            .try_intern(
+                "+".to_string(),
+                OpInfoShaped {
+                    name: "+".to_string(),
+                    args: vec![0, 0],
+                    unit: None,
+                    is_constructor: true,
+                },
+            )
             .expect("canary: capacity");
-        assert!(r.ops.get_by_key(&"+".to_string()).unwrap().is_constructor);
-        assert_eq!(r.ops.len(), 1, "shadow overwrite keeps one live key");
+        assert!(!fresh && hit == idx, "intern of a present key is a hit");
 
         r.by_structure
             .try_insert((3, vec![1, 2]), 9)

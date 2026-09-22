@@ -32,6 +32,7 @@ pub(crate) fn static_generalize_quality<
 ) -> (u32, u32)
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if l == r {
         (snap.best_size(l), 0)
@@ -75,6 +76,7 @@ pub fn lb_pair<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> (u32, u32)
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     if l == r {
         (snap.best_size(l), 0)
@@ -104,6 +106,7 @@ pub fn reachable_pairs<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: boo
 ) -> u64
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let side = |c: ClassOf<Cfg>| {
         let reach = snap.reachability();
@@ -136,6 +139,7 @@ pub(crate) fn transport_pair_lb<Cfg: EGraphConfig, L: LitVal, const T: bool, con
 ) -> Option<u128>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut cost = vec![vec![Cell::Forbidden; rm.len()]; lm.len()];
     for (i, &(lc, _)) in lm.iter().enumerate() {

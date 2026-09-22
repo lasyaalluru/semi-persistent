@@ -41,15 +41,15 @@
 
 use vstd::prelude::*;
 
-use crate::circular_list::{CircularList, CircularListNode, CircularListToken};
+use crate::circular_list::{CircularList, CircularListNode};
+use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
-use crate::list::{ListArena, ListArenaToken, ListNode};
+use crate::list::{ListArena, ListHead, ListNode};
 use crate::opt::{DenseId, Opt};
-use crate::parallel_store::ParallelStore;
-use crate::sparse_set::{SparseSet, SparseSetToken};
+use crate::sparse_set::SparseSet;
+use crate::store_policy::{HotFirst, PlainFamily, TaggedFamily};
 use crate::tagged::Tagged;
-use crate::union_find::{UnionFind, UnionFindToken};
+use crate::union_find::UnionFind;
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
 verus! {
@@ -65,12 +65,67 @@ pub struct ClassData<L: DenseId, T: DenseId> {
     pub use_list: L,
     pub min_row: Option<<T as DenseId>::Index>,
     pub atomic: bool,
+    /// Whether this class participates in e-matching. `true` by default (a fresh
+    /// singleton matches as today); a client sets it `false` to shield the whole
+    /// class from the matcher (the generic e-matching shield, generalizing the
+    /// node-level `:subsume`). Class-closed: folded survivor ||= absorbed at
+    /// `merge_with`, so a class is shielded only if every member class was. The
+    /// bit lives here so it rolls back with the class payload on `restore`.
+    /// Soundness-free: shielding only removes matches, never adds one, so no wf
+    /// invariant constrains it.
+    pub matchable: bool,
     /// Member-node count of the class, in the node-id family's index type so
     /// the width follows the configuration (the `min_row` pattern). Set to 1
     /// at `add_singleton`, folded survivor += absorbed at `merge_with`,
     /// carried unchanged by every other payload write. Feeds the
     /// `--union-by size`/`sum` survivor policy.
     pub size: <T as DenseId>::Index,
+}
+
+/// Spec-carrying equality for the class payload (F2.4): what lets the
+/// ClassData column instantiate `ValueRle`. Ids and index words compare
+/// through `as_usize` (whose contract ties it to `as_nat`) plus injectivity;
+/// the bools compare natively; the struct equality follows fieldwise.
+impl<L: DenseId, T: DenseId> crate::value_compressor::EqSpec for ClassData<L, T> {
+    fn eq_exec(&self, other: &Self) -> (r: bool)
+        ensures r == (self == other),
+    {
+        let ul = self.use_list.as_usize() == other.use_list.as_usize();
+        let mr = match (self.min_row, other.min_row) {
+            (Option::None, Option::None) => true,
+            (Option::Some(a), Option::Some(b)) => a.as_usize() == b.as_usize(),
+            _ => false,
+        };
+        let sz = self.size.as_usize() == other.size.as_usize();
+        let r = ul && mr && sz && (self.atomic == other.atomic)
+            && (self.matchable == other.matchable);
+        proof {
+            if r {
+                L::lemma_as_nat_injective(self.use_list, other.use_list);
+                <T as DenseId>::Index::lemma_as_nat_injective(self.size, other.size);
+                match (self.min_row, other.min_row) {
+                    (Option::Some(a), Option::Some(b)) => {
+                        <T as DenseId>::Index::lemma_as_nat_injective(a, b);
+                    }
+                    _ => {}
+                }
+                assert(*self == *other);
+            } else {
+                // Contrapositive: equal structs make every exec comparison
+                // true (each `as_usize` result's nat is its receiver's
+                // `as_nat`, and equal receivers have equal `as_nat`s), which
+                // contradicts !r.
+                if *self == *other {
+                    assert(ul);
+                    assert(sz);
+                    assert(mr);
+                    assert(false);
+                }
+                assert(*self != *other);
+            }
+        }
+        r
+    }
 }
 
 impl<L: DenseId, T: DenseId> Clone for ClassData<L, T> {
@@ -88,6 +143,7 @@ impl<L: DenseId, T: DenseId> core::default::Default for ClassData<L, T> {
             use_list: L::default(),
             min_row: None,
             atomic: false,
+            matchable: true,
             size: <T::Index as IndexLike>::min(),
         }
     }
@@ -104,6 +160,7 @@ pub struct ClassDataRepr<LR, I> {
     pub row: I,
     pub present: bool,
     pub atomic: bool,
+    pub matchable: bool,
     pub size: I,
 }
 
@@ -127,6 +184,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             use_list: L::value_of(r.a),
             min_row: if r.present { Some(r.row) } else { None },
             atomic: r.atomic,
+            matchable: r.matchable,
             size: r.size,
         }
     }
@@ -158,6 +216,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             row,
             present,
             atomic: self.atomic,
+            matchable: self.matchable,
             size: self.size,
         }
     }
@@ -166,6 +225,7 @@ impl<L: DenseId, T: DenseId> Tagged for ClassData<L, T> {
             use_list: L::from_repr(&r.a),
             min_row: if r.present { Some(r.row) } else { None },
             atomic: r.atomic,
+            matchable: r.matchable,
             size: r.size,
         }
     }
@@ -368,42 +428,69 @@ pub open(crate) spec fn eg_archive_agrees<
 
 /// Verified equivalence classes: ring + union-find + repr set + use-lists +
 /// min-monomial pool, with the agreement clauses as `wf`.
-pub struct EClasses<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
+pub struct EClasses<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P = HotFirst>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// The class ring; a root cell carries the class's configured-width key
     /// while the class is live, absent once absorbed.
-    pub(crate) entries: CircularList<Opt<K>, T, TRACK>,
+    pub(crate) entries: CircularList<Opt<K>, T, TRACK, P>,
     /// Per-class data. The sparse set uses the full index word internally so
     /// its length can represent the complete bit-stealing ID cardinality; its
     /// numeric keys convert losslessly to the packed `K` stored in the ring.
+    /// Value layer: measured NoValueCompression for the SMT profile. The
+    /// column CAN instantiate `ValueRle` (its `EqSpec` impl below is what
+    /// F2.4 added), and the corpus shadow measurement refuted it there:
+    /// 3.56/3.31 MB for the layered RLE candidates against 2.48 MB plain and
+    /// 2.29 MB sorted runs, zero frames choosing RLE out of 9,845 (SMT
+    /// frames write distinct class payloads, so equality runs degenerate to
+    /// one run per entry). Revisit at EqSat frame scale (goal F5).
     pub(crate) reprs: SparseSet<ClassData<L, T>, <T as DenseId>::Index,
-        InlineStore<ClassData<L, T>, <T as DenseId>::Index>, TRACK>,
+        <P as TaggedFamily<ClassData<L, T>, T::Index, TRACK>>::Store, TRACK,
+        crate::value_compressor::NoValueCompression, P>,
     /// Verified canonical-representative lookup.
-    pub(crate) uf: UnionFind<T, J, TRACK, PROOFS>,
+    pub(crate) uf: UnionFind<T, J, TRACK, PROOFS, P>,
     /// Per-class parent lists.
-    pub(crate) uses: ListArena<T, L, N, TRACK>,
-    /// Min-monomial pool: flat rows of `min_width` columns. `ParallelStore`,
-    /// as production's `VecP`: `Opt` owns its niche bit, so it cannot sit in
-    /// a bit-stealing `InlineStore`.
-    pub(crate) min_pool: SpVec<Opt<T>, usize, ParallelStore<Opt<T>, usize>, TRACK>,
+    pub(crate) uses: ListArena<T, L, N, TRACK, P>,
+    /// Min-monomial pool: flat rows of `min_width` columns. A plain-family
+    /// column (`ParallelStore` under the default policy, as production's
+    /// `VecP`): `Opt` owns its niche bit, so it cannot sit in a bit-stealing
+    /// `InlineStore`.
+    pub(crate) min_pool: SpVec<Opt<T>, usize, <P as PlainFamily<Opt<T>, usize, TRACK>>::Store, TRACK>,
     /// Fixed row width; 0 until `set_min_width`.
     pub(crate) min_width: usize,
 }
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// Convert the public, packed class-key type to the sparse set's full-word
     /// internal key. The numeric identity is unchanged.
@@ -476,12 +563,12 @@ where
 
     /// The ring component (spec ref, for iterator ensures).
     pub open(crate) spec fn entries_ref(&self)
-        -> &CircularList<Opt<K>, T, TRACK> {
+        -> &CircularList<Opt<K>, T, TRACK, P> {
         &self.entries
     }
 
     /// The use-list arena (spec ref, for iterator ensures).
-    pub open(crate) spec fn uses_ref(&self) -> &ListArena<T, L, N, TRACK> {
+    pub open(crate) spec fn uses_ref(&self) -> &ListArena<T, L, N, TRACK, P> {
         &self.uses
     }
 
@@ -493,6 +580,65 @@ where
     /// The archived root maps, one per mark (spec).
     pub open(crate) spec fn roots_archive_view(&self) -> Seq<Seq<usize>> {
         self.uf.roots_snapshots_view()
+    }
+
+    // Component views and archives, exposed so the restore contracts can name
+    // every column an e-class state is made of (each is a spec projection of
+    // the component's own verified view; nothing is stored twice).
+    pub open(crate) spec fn entries_model_view(&self) -> Seq<Seq<usize>> {
+        self.entries.model_view()
+    }
+
+    pub open(crate) spec fn entries_model_archive(&self) -> Seq<Seq<Seq<usize>>> {
+        self.entries.model_snapshots_view()
+    }
+
+    pub open(crate) spec fn entries_archive(&self) -> Seq<Seq<crate::circular_list::CircularListNode<Opt<K>, T>>> {
+        self.entries.entries_snapshots_view()
+    }
+
+    pub open(crate) spec fn entries_nodes_view(&self) -> Seq<crate::circular_list::CircularListNode<Opt<K>, T>> {
+        self.entries.entries_view()
+    }
+
+    pub open(crate) spec fn reprs_dense_view(&self) -> Seq<ClassData<L, T>> {
+        self.reprs.dense_view()
+    }
+
+    pub open(crate) spec fn reprs_sparse_view(&self) -> Seq<<T as DenseId>::Index> {
+        self.reprs.sparse_view()
+    }
+
+    pub open(crate) spec fn reprs_indices_view(&self) -> Seq<<T as DenseId>::Index> {
+        self.reprs.indices_view()
+    }
+
+    pub open(crate) spec fn reprs_dense_archive(&self) -> Seq<Seq<ClassData<L, T>>> {
+        self.reprs.dense_snapshots_view()
+    }
+
+    pub open(crate) spec fn reprs_sparse_archive(&self) -> Seq<Seq<<T as DenseId>::Index>> {
+        self.reprs.sparse_snapshots_view()
+    }
+
+    pub open(crate) spec fn reprs_indices_archive(&self) -> Seq<Seq<<T as DenseId>::Index>> {
+        self.reprs.indices_snapshots_view()
+    }
+
+    pub open(crate) spec fn uses_model_view(&self) -> Seq<Seq<usize>> {
+        self.uses.model_view()
+    }
+
+    pub open(crate) spec fn uses_model_archive(&self) -> Seq<Seq<Seq<usize>>> {
+        self.uses.model_snapshots_view()
+    }
+
+    pub open(crate) spec fn pool_view(&self) -> Seq<Opt<T>> {
+        self.min_pool.view()
+    }
+
+    pub open(crate) spec fn pool_archive(&self) -> Seq<Seq<Opt<T>>> {
+        self.min_pool.snapshots_view()
     }
 
     /// Mark depth (spec): the number of live frames.
@@ -554,10 +700,11 @@ where
         }
         let e = EClasses {
             entries: CircularList::new(),
-            reprs: SparseSet::new_inline(),
+            reprs: SparseSet::with_store(
+                <P as TaggedFamily<ClassData<L, T>, T::Index, TRACK>>::empty()),
             uf: UnionFind::new(),
             uses: ListArena::new(),
-            min_pool: SpVec::<Opt<T>, usize, ParallelStore<Opt<T>, usize>, TRACK>::new(),
+            min_pool: SpVec::with_store(<P as PlainFamily<Opt<T>, usize, TRACK>>::empty()),
             min_width: 0,
         };
         proof {
@@ -718,7 +865,7 @@ where
             None => crate::guard::refuse("EClasses::add_singleton: index width below 1"),
         };
         let raw_key = match self.reprs.try_add(ClassData {
-            use_list: list_id, min_row: None, atomic: false, size: one,
+            use_list: list_id, min_row: None, atomic: false, matchable: true, size: one,
         }) {
             Ok(k) => k,
             Err(_) => crate::guard::refuse("EClasses::add_singleton: repr capacity exhausted"),
@@ -777,7 +924,7 @@ where
             assert(self.reprs.contains_spec(raw_key));
             assert(ss_contains(sparse, indices, live, kn));
             assert(ss_value(dense, sparse, kn)
-                == ClassData::<L, T> { use_list: list_id, min_row: None, atomic: false, size: one });
+                == ClassData::<L, T> { use_list: list_id, min_row: None, atomic: false, matchable: true, size: one });
 
             // survivors: old liveness and values carry over, id-for-nat
             assert forall|kk: nat| #[trigger] ss_contains(osparse, oindices, olive, kk)
@@ -1061,20 +1208,32 @@ pub struct MergeInfo<T: DenseId, L: DenseId> {
     pub absorbed_atomic: bool,
 }
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
 
     /// Re-establishes `eg_model_wf` after a merge's three mutations (union,
     /// ring splice with payload clear, repr removal). Extracted for the same
     /// reason as `lemma_splice_disjoint` (list.rs): proved inline, the ring
     /// and root quantifiers e-match against both states' full `wf`.
+    /// rlimit raised: the F2.4 `EqSpec` impl's ambient axioms nudged this
+    /// proof past the default budget without changing its content.
+    #[verifier::rlimit(60)]
     proof fn lemma_merge_wf(&self, o: Self, s: T, ab: T, key_ab: nat, skey: nat,
         ab_pay: Opt<K>, cs: int, ps: int, ca: int, pa: int)
         requires
@@ -1507,6 +1666,9 @@ where
     /// the absorbed payload cleared, repr removal. `None` iff already one
     /// class. The core of `merge` and `merge_directed`; the distinct-rings
     /// precondition of `splice_absorb` is discharged here from W2 + W3.
+    // rlimit raised alongside lemma_merge_wf: the F2.4 EqSpec impl's ambient
+    // axioms nudged this proof past the default budget, content unchanged.
+    #[verifier::rlimit(120)]
     pub(crate) fn merge_with(&mut self, a: T, b: T, directed: bool, prefer_a: bool)
         -> (r: Option<MergeInfo<T, L>>)
         requires old(self).wf(),
@@ -1619,6 +1781,13 @@ where
             None => crate::guard::refuse(
                 "EClasses::merge: class size overflows the index width"),
         };
+        // Matchable is class-closed (relevant if any member is): fold survivor
+        // ||= absorbed, so a class stays shielded only if both sides were. This
+        // rides the survivor payload write below; `lemma_merge_wf` constrains the
+        // survivor's use_list/min_row/atomic/size but not matchable, and
+        // `eg_model_wf` reads neither atomic nor matchable, so the fold preserves
+        // wf for free (soundness-free: shielding only removes matches).
+        sdata.matchable = sdata.matchable || data.matchable;
         self.reprs.set_live(raw_skey, sdata);
         let ghost m1 = *self;
         // distinct rings, from W3a: were s and ab on one ring, they would
@@ -1643,7 +1812,7 @@ where
             }
         }
         let none_pay = Opt::<K>::none();
-        self.entries.splice_absorb(s, ab, none_pay);
+        self.entries.splice_absorb_core(s, ab, none_pay);
         self.reprs.remove(raw_key);
         proof {
             // assemble the pointwise splice ensures into the update form.
@@ -2020,6 +2189,8 @@ where
                     assert(row.as_nat() * (self.min_width as nat) + (self.min_width as nat)
                         == (row.as_nat() + 1) * (self.min_width as nat)) by (nonlinear_arith);
                     <T::Index as IndexLike>::lemma_max_nat_fits_usize();
+                    // The pool's length fits `usize` (store `wf`, via its lemma).
+                    self.min_pool.store.lemma_wf_data_len();
                 }
                 let base = row.as_usize() * self.min_width;
                 let cell = self.min_pool.get_index(base + col);
@@ -2190,6 +2361,8 @@ where
             assert((row.as_nat() + 1) * w <= self.min_pool.view().len());
             assert(row.as_nat() * w + w == (row.as_nat() + 1) * w) by (nonlinear_arith);
             <T::Index as IndexLike>::lemma_max_nat_fits_usize();
+            // The pool's length fits `usize` (store `wf`, via its lemma).
+            self.min_pool.store.lemma_wf_data_len();
             self.lemma_mid_pool_wf(o, key, row);
         }
         let base = row.as_usize() * self.min_width;
@@ -2320,6 +2493,19 @@ where
         self.reprs.get_live(raw_key).atomic
     }
 
+    /// Whether class `key` participates in e-matching (the generic e-matching
+    /// shield; `true` by default). Refuses a dead key. Soundness-free: the value
+    /// only removes matches, so no wf invariant constrains it.
+    pub fn matchable(&self, key: K) -> (b: bool)
+        requires self.wf(),
+    {
+        let raw_key = Self::key_index(key);
+        if !self.reprs.contains(raw_key) {
+            crate::guard::refuse("EClasses::matchable: class key is not live");
+        }
+        self.reprs.get_live(raw_key).matchable
+    }
+
     /// The use-list id of class `key`. Refuses a dead key.
     pub fn use_list_id(&self, key: K) -> (l: L)
         requires self.wf(),
@@ -2389,10 +2575,70 @@ where
         }
     }
 
+    /// Set class `key`'s e-matching participation (the generic e-matching
+    /// shield). Settable both ways, unlike `set_atomic` (relevancy un-shields as
+    /// terms become relevant). Refuses a dead key. Soundness-free: the bit only
+    /// removes matches, so no wf invariant constrains it, and the proof is the
+    /// same shape as `set_atomic` — the mutation touches one class's payload and
+    /// leaves every class's `use_list`/`min_row` unchanged, which is all
+    /// `eg_model_wf` reads of the payload column.
+    pub fn set_class_matchable(&mut self, key: K, m: bool)
+        requires old(self).wf(),
+        ensures
+            final(self).wf(),
+            final(self).n_spec() == old(self).n_spec(),
+            final(self).roots_view() == old(self).roots_view(),
+            final(self).num_classes_spec() == old(self).num_classes_spec(),
+    {
+        let raw_key = Self::key_index(key);
+        if !self.reprs.contains(raw_key) {
+            crate::guard::refuse("EClasses::set_class_matchable: class key is not live");
+        }
+        let ghost o = *old(self);
+        let mut data = self.reprs.get_live(raw_key);
+        if data.matchable == m {
+            return;
+        }
+        data.matchable = m;
+        self.reprs.set_live(raw_key, data);
+        proof {
+            let dense = self.reprs.dense_view();
+            let sparse = self.reprs.sparse_view();
+            let indices = self.reprs.indices_view();
+            let live = self.reprs.n_spec();
+            let odense = o.reprs.dense_view();
+            let osparse = o.reprs.sparse_view();
+            let oindices = o.reprs.indices_view();
+            assert(sparse == osparse && indices == oindices && live == o.reprs.n_spec());
+            assert forall|kk: nat| #[trigger] ss_contains(sparse, indices, live, kk)
+                implies ss_value(dense, sparse, kk).use_list
+                        == ss_value(odense, osparse, kk).use_list
+                    && ss_value(dense, sparse, kk).min_row
+                        == ss_value(odense, osparse, kk).min_row by {
+                if kk != key.as_nat() {
+                    assert(osparse[kk as int].as_nat()
+                        != osparse[key.as_nat() as int].as_nat()) by {
+                        if osparse[kk as int].as_nat()
+                            == osparse[key.as_nat() as int].as_nat() {
+                            assert(oindices[osparse[kk as int].as_nat() as int]
+                                .as_nat() == kk);
+                        }
+                    }
+                    assert(ss_value(dense, sparse, kk) == ss_value(odense, osparse, kk));
+                }
+            }
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_view(), self.entries.payload_seq(),
+                self.uf.roots_view(), dense, sparse, indices,
+                self.uses.model_view(), self.uses.nodes_view(),
+                self.min_pool.view(), self.min_width as nat));
+        }
+    }
+
     /// Iterate `start`'s class ring (the verified `RingIter`: exactly the
     /// ring's nodes, each once, in successor order).
     pub fn iter_class(&self, start: T)
-        -> (it: crate::circular_list::RingIter<'_, Opt<K>, T, TRACK>)
+        -> (it: crate::circular_list::RingIter<'_, Opt<K>, T, TRACK, P>)
         requires self.wf(),
         ensures start.id_nat() < self.n_spec() ==> ({
             &&& it.list_ref() == self.entries_ref()
@@ -2409,7 +2655,7 @@ where
     /// Iterate class `key`'s use-list (the verified `ListIter`). Refuses a
     /// dead key.
     pub fn iter_uses(&self, key: K)
-        -> (it: crate::list::ListIter<'_, T, L, N, TRACK>)
+        -> (it: crate::list::ListIter<'_, T, L, N, TRACK, P>)
         requires self.wf(),
         ensures self.contains_key_spec(key) ==> ({
             &&& it.arena_ref() == self.uses_ref()
@@ -2501,7 +2747,7 @@ where
 
     /// Direct read access to the use-list arena (production's `uses`; the
     /// rebuild loop iterates an absorbed list by id).
-    pub fn uses(&self) -> (a: &ListArena<T, L, N, TRACK>)
+    pub fn uses(&self) -> (a: &ListArena<T, L, N, TRACK, P>)
         requires self.wf(),
         ensures a == self.uses_ref(), a.wf(),
     {
@@ -2623,69 +2869,104 @@ where
 // Semi-persistence: compose from the five components
 // ---------------------------------------------------------------------------
 
-/// Token bundling the five component tokens.
-#[derive(Copy, Clone)]
-pub struct EClassesToken {
-    pub(crate) entries: CircularListToken,
-    pub(crate) reprs: SparseSetToken,
-    pub(crate) uf: UnionFindToken,
-    pub(crate) uses: ListArenaToken,
-    pub(crate) pool: VecToken,
-}
-
-impl EClassesToken {
-    pub open(crate) spec fn frame_idx_spec(self) -> nat {
-        self.pool.frame_idx as nat
-    }
-}
-
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool>
-    EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
-    /// Mark the aggregate: one frame on every component, atomically from the
-    /// caller's view (a component that cannot mark refuses before the next
-    /// one is touched, production's panic-on-depth-exhaustion semantics).
-    pub fn mark(&mut self, shrink: ShrinkPolicy) -> (token: EClassesToken)
-        requires old(self).wf(),
+
+    /// Push a frame on every component without minting (what a typed group
+    /// drives): `mark` minus the token bundling, over the components' own
+    /// structural pushes.
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
+        requires old(self).wf(), TRACK, old(self).depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).n_spec() == old(self).n_spec(),
             final(self).roots_view() == old(self).roots_view(),
             final(self).num_classes_spec() == old(self).num_classes_spec(),
             final(self).min_width_spec() == old(self).min_width_spec(),
-            token.frame_idx_spec() == final(self).depth_spec() - 1,
             final(self).depth_spec() == old(self).depth_spec() + 1,
+            final(self).entries_model_view() == old(self).entries_model_view(),
+            final(self).entries_nodes_view() == old(self).entries_nodes_view(),
+            final(self).reprs_dense_view() == old(self).reprs_dense_view(),
+            final(self).reprs_sparse_view() == old(self).reprs_sparse_view(),
+            final(self).reprs_indices_view() == old(self).reprs_indices_view(),
+            final(self).uses_model_view() == old(self).uses_model_view(),
+            final(self).pool_view() == old(self).pool_view(),
+            final(self).roots_archive_view() == old(self).roots_archive_view().push(old(self).roots_view()),
+            final(self).entries_model_archive() == old(self).entries_model_archive().push(old(self).entries_model_view()),
+            final(self).entries_archive() == old(self).entries_archive().push(old(self).entries_nodes_view()),
+            final(self).reprs_dense_archive() == old(self).reprs_dense_archive().push(old(self).reprs_dense_view()),
+            final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().push(old(self).reprs_sparse_view()),
+            final(self).reprs_indices_archive() == old(self).reprs_indices_archive().push(old(self).reprs_indices_view()),
+            final(self).uses_model_archive() == old(self).uses_model_archive().push(old(self).uses_model_view()),
+            final(self).pool_archive() == old(self).pool_archive().push(old(self).pool_view()),
     {
-        if !TRACK {
-            crate::guard::refuse("EClasses::mark: untracked aggregate");
-        }
         let ghost o = *old(self);
-        let t_entries = match self.entries.try_mark(shrink) {
-            Ok(t) => t,
-            Err(_) => crate::guard::refuse("EClasses::mark: ring mark refused"),
-        };
-        let t_reprs = match self.reprs.try_mark(shrink) {
-            Ok(t) => t,
-            Err(_) => crate::guard::refuse("EClasses::mark: repr-set mark refused"),
-        };
-        let t_uf = match self.uf.try_mark(shrink) {
-            Ok(t) => t,
-            Err(_) => crate::guard::refuse("EClasses::mark: union-find mark refused"),
-        };
-        let t_uses = match self.uses.try_mark(shrink) {
-            Ok(t) => t,
-            Err(_) => crate::guard::refuse("EClasses::mark: use-list mark refused"),
-        };
-        let t_pool = match self.min_pool.try_mark(shrink) {
-            Ok(t) => t,
-            Err(_) => crate::guard::refuse("EClasses::mark: pool mark refused"),
-        };
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
+        {
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        // Every component's own headroom, checked before any moves so a
+        // refusal cannot leave the aggregate out of step.
+        if !(self.entries.entries.store.raw_len() < usize::MAX
+            && self.entries.entries.depth_exec() < (u32::MAX as usize))
+        {
+            crate::guard::refuse("EClasses::push_frames: ring cannot open another frame");
+        }
+        if !(self.reprs.dense.can_mark() && self.reprs.sparse.can_mark() && self.reprs.indices.can_mark()) {
+            crate::guard::refuse("EClasses::push_frames: repr set cannot open another frame");
+        }
+        if !(self.uf.parent.can_mark() && self.uf.rank.can_mark()) {
+            crate::guard::refuse("EClasses::push_frames: union-find cannot open another frame");
+        }
+        if !(self.uses.heads.store.raw_len() < usize::MAX
+            && self.uses.nodes.store.raw_len() < usize::MAX
+            && self.uses.heads.depth_exec() < u32::MAX as usize
+            && self.uses.nodes.depth_exec() < u32::MAX as usize)
+        {
+            crate::guard::refuse("EClasses::push_frames: use lists cannot open another frame");
+        }
+        if !self.min_pool.can_mark() {
+            crate::guard::refuse("EClasses::push_frames: pool cannot open another frame");
+        }
+        self.entries.push_frames(shrink);
+        self.reprs.push_frames(shrink);
+        self.uf.push_frames(shrink);
+        self.uses.push_frames(shrink);
+        self.min_pool.push_frame(shrink);
         proof {
             reveal(eg_archive_agrees);
             assert(eg_archive_agrees::<T, K, L, N>(
@@ -2776,80 +3057,73 @@ where
                 }
             }
         }
-        EClassesToken {
-            entries: t_entries,
-            reprs: t_reprs,
-            uf: t_uf,
-            uses: t_uses,
-            pool: t_pool,
-        }
     }
 
-    /// "Restorable now" for the composite token: every constituent
-    /// restorable AND all nine leaf frames name the same mark.
-    pub fn is_valid_token(&self, token: &EClassesToken) -> (b: bool)
-        requires self.wf(),
-    {
-        self.entries.is_valid_token(&token.entries)
-            && self.reprs.is_valid_token(&token.reprs)
-            && self.uf.is_valid_token(&token.uf)
-            && self.uses.is_valid_token(&token.uses)
-            && self.min_pool.is_valid_token(&token.pool)
-            && self.frames_agree(token)
-    }
 
-    /// All nine leaf tokens name the same frame (frankentoken defense).
-    fn frames_agree(&self, token: &EClassesToken) -> (b: bool)
-        ensures b == ({
-            &&& token.entries.frame_idx_spec() == token.frame_idx_spec()
-            &&& token.reprs.dense_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.reprs.sparse_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.reprs.indices_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.uf.parent_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.uf.rank_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.uses.heads_frame_idx_spec() == token.frame_idx_spec()
-            &&& token.uses.nodes_frame_idx_spec() == token.frame_idx_spec()
-        }),
-    {
-        let f = token.pool.frame_idx;
-        token.entries.entries.frame_idx == f
-            && token.reprs.dense.frame_idx == f
-            && token.reprs.sparse.frame_idx == f
-            && token.reprs.indices.frame_idx == f
-            && token.uf.parent.frame_idx == f
-            && token.uf.rank.frame_idx == f
-            && token.uses.heads.frame_idx == f
-            && token.uses.nodes.frame_idx == f
-    }
 
-    /// Restore the aggregate to the marked frame. Refuses an invalid,
-    /// foreign, stale, consumed, or mixed-mark token before any mutation;
-    /// `SparseSet::restore`'s snapshot-wellformedness precondition is
-    /// discharged from the aggregate's own archive.
-    pub fn restore(&mut self, token: EClassesToken)
-        requires old(self).wf(),
+
+
+    /// Semantics B, token-free (what a typed group drives): every component
+    /// resets to its snapshot at `target` and keeps that frame open; the
+    /// aggregate's archive at `target` is the jointly valid state it lands in.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
+            old(self).depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
             final(self).min_width_spec() == old(self).min_width_spec(),
-            old(self).is_restorable_full_spec(token) ==> {
-                &&& final(self).roots_view() == old(self).roots_archive_view()[
-                        token.frame_idx_spec() as int]
-                &&& final(self).n_spec() == old(self).roots_archive_view()[
-                        token.frame_idx_spec() as int].len()
-            },
+            ({
+                let f = target as int;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == target as nat + 1
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f + 1)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f + 1)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f + 1)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f + 1)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f + 1)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f + 1)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f + 1)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f + 1)
+            }),
     {
-        if !(self.entries.is_valid_token(&token.entries)
-            && self.reprs.is_valid_token(&token.reprs)
-            && self.uf.is_valid_token(&token.uf)
-            && self.uses.is_valid_token(&token.uses)
-            && self.min_pool.is_valid_token(&token.pool)
-            && self.frames_agree(&token))
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
         {
-            crate::guard::refuse(
-                "EClasses::restore: invalid, foreign, stale, consumed, abandoned, or mixed-mark token");
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        if !(target < d) {
+            crate::guard::refuse("EClasses::reset_frames: target is not below the depth");
         }
         let ghost o = *old(self);
-        let ghost f = token.pool.frame_idx as int;
+        let ghost f = target as int;
         proof {
             reveal(eg_archive_agrees);
             assert(eg_archive_agrees::<T, K, L, N>(
@@ -2871,11 +3145,11 @@ where
                 o.reprs.sparse_snapshots_view()[f],
                 o.reprs.indices_snapshots_view()[f]));
         }
-        self.entries.restore(token.entries);
-        self.reprs.restore(token.reprs);
-        self.uf.restore(token.uf);
-        self.uses.restore(token.uses);
-        self.min_pool.restore(token.pool);
+        self.entries.reset_frames(target);
+        self.reprs.reset_frames(target);
+        self.uf.reset_frames(target);
+        self.uses.reset_frames(target);
+        self.min_pool.reset_frame(target);
         proof {
             reveal(eg_archive_agrees);
             // restored views are the archived frame-f views.
@@ -2945,46 +3219,168 @@ where
         }
     }
 
-    /// The full runtime-checkable restore precondition (spec counterpart of
-    /// `is_valid_token` plus the frame agreement).
-    pub open(crate) spec fn is_restorable_full_spec(&self, token: EClassesToken) -> bool {
-        &&& self.entries.is_restorable_spec(token.entries)
-        &&& self.reprs.is_restorable_spec(token.reprs)
-        &&& self.uf.is_restorable_spec(token.uf)
-        &&& self.uses.is_restorable_spec(token.uses)
-        &&& self.min_pool.is_restorable_spec(token.pool)
-        &&& token.entries.frame_idx_spec() == token.frame_idx_spec()
-        &&& token.reprs.dense_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.reprs.sparse_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.reprs.indices_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.uf.parent_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.uf.rank_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.uses.heads_frame_idx_spec() == token.frame_idx_spec()
-        &&& token.uses.nodes_frame_idx_spec() == token.frame_idx_spec()
-    }
 
-    /// Total restore: an unusable token is `Err(InvalidToken)`.
-    pub fn try_restore(&mut self, token: EClassesToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
+
+
+    /// The legacy pop-restore, token-free (what a typed group drives): every
+    /// component restores to its snapshot at `target` and drops that frame
+    /// with everything above it.
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        requires
+            old(self).wf(),
+            TRACK,
+            (target as nat) < old(self).depth_spec(),
         ensures
             final(self).wf(),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken
-                && final(self).roots_view() == old(self).roots_view(),
+            final(self).min_width_spec() == old(self).min_width_spec(),
+            ({
+                let f = target as int;
+                &&& final(self).roots_view() == old(self).roots_archive_view()[f]
+                &&& final(self).n_spec() == old(self).roots_archive_view()[f].len()
+                &&& final(self).depth_spec() == target as nat
+                &&& final(self).roots_archive_view() == old(self).roots_archive_view().subrange(0, f)
+                &&& final(self).entries_model_view() == old(self).entries_model_archive()[f]
+                &&& final(self).entries_nodes_view() == old(self).entries_archive()[f]
+                &&& final(self).entries_model_archive() == old(self).entries_model_archive().subrange(0, f)
+                &&& final(self).entries_archive() == old(self).entries_archive().subrange(0, f)
+                &&& final(self).reprs_dense_view() == old(self).reprs_dense_archive()[f]
+                &&& final(self).reprs_sparse_view() == old(self).reprs_sparse_archive()[f]
+                &&& final(self).reprs_indices_view() == old(self).reprs_indices_archive()[f]
+                &&& final(self).reprs_dense_archive() == old(self).reprs_dense_archive().subrange(0, f)
+                &&& final(self).reprs_sparse_archive() == old(self).reprs_sparse_archive().subrange(0, f)
+                &&& final(self).reprs_indices_archive() == old(self).reprs_indices_archive().subrange(0, f)
+                &&& final(self).uses_model_view() == old(self).uses_model_archive()[f]
+                &&& final(self).uses_model_archive() == old(self).uses_model_archive().subrange(0, f)
+                &&& final(self).pool_view() == old(self).pool_archive()[f]
+                &&& final(self).pool_archive() == old(self).pool_archive().subrange(0, f)
+            }),
     {
-        if self.entries.is_valid_token(&token.entries)
-            && self.reprs.is_valid_token(&token.reprs)
-            && self.uf.is_valid_token(&token.uf)
-            && self.uses.is_valid_token(&token.uses)
-            && self.min_pool.is_valid_token(&token.pool)
-            && self.frames_agree(&token)
+        let d = self.min_pool.depth_exec();
+        if !(self.entries.entries.depth_exec() == d
+            && self.reprs.dense.depth_exec() == d
+            && self.reprs.sparse.depth_exec() == d
+            && self.reprs.indices.depth_exec() == d
+            && self.uf.parent.depth_exec() == d
+            && self.uf.rank.depth_exec() == d
+            && self.uses.heads.depth_exec() == d
+            && self.uses.nodes.depth_exec() == d)
         {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
+            crate::guard::refuse("EClasses: components out of step");
+        }
+        if PROOFS {
+            match (&self.uf.parent_proof, &self.uf.justification) {
+                (Some(pp), Some(j)) => {
+                    if !(pp.depth_exec() == d && j.depth_exec() == d) {
+                        crate::guard::refuse("EClasses: proof columns out of step");
+                    }
+                }
+                _ => crate::guard::refuse("EClasses: proof-column shape does not match the build"),
+            }
+        }
+        if !(target < d) {
+            crate::guard::refuse("EClasses::restore_frames: target is not below the depth");
+        }
+        let ghost o = *old(self);
+        let ghost f = target as int;
+        proof {
+            reveal(eg_archive_agrees);
+            assert(eg_archive_agrees::<T, K, L, N>(
+                o.entries.model_snapshots_view(),
+                o.entries.entries_snapshots_view(),
+                o.uf.roots_snapshots_view(),
+                o.reprs.dense_snapshots_view(),
+                o.reprs.sparse_snapshots_view(),
+                o.reprs.indices_snapshots_view(),
+                o.uses.model_snapshots_view(),
+                o.uses.nodes_snapshots_view(),
+                o.min_pool.snapshots_view(),
+                o.min_width as nat));
+            // the archived frame f is a jointly-valid state; in particular
+            // the repr triple is sparse-set well-formed, which is
+            // SparseSet::restore's precondition.
+            assert(crate::sparse_set::sparse_set_snap_wf(
+                o.reprs.dense_snapshots_view()[f],
+                o.reprs.sparse_snapshots_view()[f],
+                o.reprs.indices_snapshots_view()[f]));
+        }
+        self.entries.restore_frames(target);
+        self.reprs.restore_frames(target);
+        self.uf.restore_frames(target);
+        self.uses.restore_frames(target);
+        self.min_pool.restore_frame(target);
+        proof {
+            reveal(eg_archive_agrees);
+            // restored views are the archived frame-f views.
+            assert(self.entries.model_view() == o.entries.model_snapshots_view()[f]);
+            assert(self.entries.payload_seq()
+                =~= ring_payloads(o.entries.entries_snapshots_view()[f]));
+            assert(self.uf.roots_view() == o.uf.roots_snapshots_view()[f]);
+            assert(eg_model_wf::<T, K, L, N>(
+                self.entries.model_view(), self.entries.payload_seq(),
+                self.uf.roots_view(), self.reprs.dense_view(),
+                self.reprs.sparse_view(), self.reprs.indices_view(),
+                self.uses.model_view(), self.uses.nodes_view(),
+                self.min_pool.view(), self.min_width as nat));
+            // truncated stacks agree per frame below f.
+            assert forall|k: int| 0 <= k < self.entries.model_snapshots_view().len()
+                implies eg_model_wf::<T, K, L, N>(
+                    #[trigger] self.entries.model_snapshots_view()[k],
+                    ring_payloads(self.entries.entries_snapshots_view()[k]),
+                    self.uf.roots_snapshots_view()[k],
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k],
+                    self.uses.model_snapshots_view()[k],
+                    self.uses.nodes_snapshots_view()[k],
+                    self.min_pool.snapshots_view()[k],
+                    self.min_width as nat)
+                && crate::sparse_set::sparse_set_snap_wf(
+                    self.reprs.dense_snapshots_view()[k],
+                    self.reprs.sparse_snapshots_view()[k],
+                    self.reprs.indices_snapshots_view()[k]) by {
+                assert(self.entries.model_snapshots_view()[k]
+                    == o.entries.model_snapshots_view()[k]);
+                assert(self.entries.entries_snapshots_view()[k]
+                    == o.entries.entries_snapshots_view()[k]);
+                assert(self.uf.roots_snapshots_view()[k]
+                    == o.uf.roots_snapshots_view()[k]);
+                assert(self.reprs.dense_snapshots_view()[k]
+                    == o.reprs.dense_snapshots_view()[k]);
+                assert(self.reprs.sparse_snapshots_view()[k]
+                    == o.reprs.sparse_snapshots_view()[k]);
+                assert(self.reprs.indices_snapshots_view()[k]
+                    == o.reprs.indices_snapshots_view()[k]);
+                assert(self.uses.model_snapshots_view()[k]
+                    == o.uses.model_snapshots_view()[k]);
+                assert(self.uses.nodes_snapshots_view()[k]
+                    == o.uses.nodes_snapshots_view()[k]);
+                assert(self.min_pool.snapshots_view()[k]
+                    == o.min_pool.snapshots_view()[k]);
+            }
+            assert forall|k1: int, k2: int|
+                0 <= k1 <= k2 < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k1]).len()
+                    <= (#[trigger] self.min_pool.snapshots_view()[k2]).len() by {
+                assert(self.min_pool.snapshots_view()[k1]
+                    == o.min_pool.snapshots_view()[k1]);
+                assert(self.min_pool.snapshots_view()[k2]
+                    == o.min_pool.snapshots_view()[k2]);
+            }
+            // archived pools below f are bounded by the restored pool
+            // (monotonicity at (k, f)).
+            assert forall|k: int| 0 <= k < self.min_pool.snapshots_view().len()
+                implies (#[trigger] self.min_pool.snapshots_view()[k]).len()
+                    <= self.min_pool.view().len() by {
+                assert(o.min_pool.snapshots_view()[k].len()
+                    <= o.min_pool.snapshots_view()[f].len());
+            }
         }
     }
+
+
+
+
+
 }
 
 } // verus!
@@ -2995,13 +3391,23 @@ where
 // the union-find's glue — doc/design/egraph-class-layer.md).
 // ---------------------------------------------------------------------------
 
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool> EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P>
+    EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     /// Merge with justification (records the proof edge `a—b`).
     pub fn merge_justified(&mut self, a: T, b: T, just: J) -> Option<MergeInfo<T, L>> {
@@ -3044,7 +3450,9 @@ where
     }
 
     /// Read-only proof-parent forest for an Euler-tour batch index.
-    pub fn proof_parent(&self) -> Option<&crate::VecI<T, T::Index, TRACK>> {
+    pub fn proof_parent(
+        &self,
+    ) -> Option<&SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>> {
         self.uf.proof_parent()
     }
 
@@ -3060,29 +3468,24 @@ where
     }
 }
 
-// prod-parity: the consumer's adapter token derives `Debug` and bundles this
-// one; manual because deriving inside `verus!{}` is unsupported.
-impl core::fmt::Debug for EClassesToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("EClassesToken")
-            .field("entries", &self.entries)
-            .field("reprs", &self.reprs)
-            .field("uf", &self.uf)
-            .field("uses", &self.uses)
-            .field("pool", &self.pool)
-            .finish()
-    }
-}
-
 // Production-surface parity (the pre-swap class layer shipped Default).
-impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool> Default
-    for EClasses<T, K, L, N, J, TRACK, PROOFS>
+impl<T, K, L, N, J, const TRACK: bool, const PROOFS: bool, P> Default
+    for EClasses<T, K, L, N, J, TRACK, PROOFS, P>
 where
     T: DenseId,
     K: DenseId<Index = T::Index>,
     L: DenseId,
     N: DenseId + Tagged + core::default::Default,
     J: Tagged + Copy + core::default::Default,
+    P: TaggedFamily<CircularListNode<Opt<K>, T>, T::Index, TRACK>
+        + TaggedFamily<ClassData<L, T>, T::Index, TRACK>
+        + TaggedFamily<T::Index, T::Index, TRACK>
+        + TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>
+        + TaggedFamily<ListHead<N>, L::Index, TRACK>
+        + TaggedFamily<ListNode<T, N>, N::Index, TRACK>
+        + PlainFamily<Opt<T>, usize, TRACK>,
 {
     fn default() -> Self {
         Self::new()

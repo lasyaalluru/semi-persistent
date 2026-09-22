@@ -37,6 +37,55 @@ mod test {
         assert_eq!(buf.steps.len(), 19);
     }
 
+    /// The deep expansion is memoized (design chapter 15, `explain_deep`).
+    /// A nested diamond `g(t, t)` shares every child pair between two
+    /// positions, so an unmemoized walk doubles its work per level and, when
+    /// a child pair's forest path routes through the congruence edge being
+    /// expanded, never ends. With the `expanded`/`explained` sets the step
+    /// list is one congruence edge per level plus the one axiom.
+    #[test]
+    fn deep_proof_diamond_is_linear() {
+        let mut eg = EGraph31::<NiraLitVal, false, true>::new();
+        let int = eg.intern_sort("Int");
+        let x_op = eg.register_op0("x", int);
+        let y_op = eg.register_op0("y", int);
+        let g = eg.register_op2("g", int, int, int);
+        let x = eg.add(x_op, &[]);
+        let y = eg.add(y_op, &[]);
+        let depth = 16;
+        let (mut a, mut b) = (x, y);
+        for _ in 0..depth {
+            a = eg.add(g, &[a, a]);
+            b = eg.add(g, &[b, b]);
+        }
+        eg.merge_justified(
+            x,
+            y,
+            Justification::Axiom {
+                axiom_id: crate::id::AxiomId::new(7),
+            },
+        );
+        eg.rebuild();
+        assert_eq!(eg.find(a), eg.find(b));
+
+        let mut buf = ProofBuf::new();
+        assert!(eg.explain_deep(a, b, &mut buf));
+        let congruences = buf
+            .steps
+            .iter()
+            .filter(|(_, _, j)| matches!(j, Justification::Congruence { .. }))
+            .count();
+        let axioms = buf
+            .steps
+            .iter()
+            .filter(|(_, _, j)| matches!(j, Justification::Axiom { .. }))
+            .count();
+        // Unmemoized, the same input yields 2^depth congruence steps.
+        assert_eq!(congruences, depth, "each congruence pair expanded once");
+        assert_eq!(axioms, 1, "the leaf pair explained once");
+        assert_eq!(buf.steps.len(), depth + 1);
+    }
+
     #[test]
     fn layered_congruence_proof() {
         let mut eg = EGraph31::<NiraLitVal, false, true>::new();
@@ -233,6 +282,7 @@ mod deep_proof_test {
                     format!("congruence({}, {})", name(na), name(nb))
                 }
                 Justification::Rewrite { rule_id, .. } => format!("rewrite #{rule_id}"),
+                Justification::Assumption { lit } => format!("assumption {lit}"),
                 Justification::ACSuperposition { .. }
                 | Justification::ACInterReduction { .. }
                 | Justification::ACAxiomCP { .. }
@@ -323,6 +373,7 @@ mod kind_proof_tests {
                     eg.node_op_name(*node_b)
                 ),
                 Justification::Rewrite { rule_id, .. } => format!("rewrite #{rule_id}"),
+                Justification::Assumption { lit } => format!("assumption {lit}"),
                 Justification::ACSuperposition { .. }
                 | Justification::ACInterReduction { .. }
                 | Justification::ACAxiomCP { .. }
@@ -1079,6 +1130,7 @@ mod aci_deep_proof_test {
                     eg.node_op_name(*node_b)
                 ),
                 Justification::Rewrite { rule_id, .. } => format!("rewrite #{rule_id}"),
+                Justification::Assumption { lit } => format!("assumption {lit}"),
                 Justification::ACSuperposition { .. }
                 | Justification::ACInterReduction { .. }
                 | Justification::ACAxiomCP { .. }

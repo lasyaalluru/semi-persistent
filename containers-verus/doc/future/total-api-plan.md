@@ -22,7 +22,52 @@ functions. CI rejects any new public `requires` occurrence not listed in
 The allowlist is a boundary inventory, not a proof that listed functions are
 safe for arbitrary callers. Each entry must belong to one of the classes below.
 
-## Current Boundary Classes
+## Status (2026-09-17): complete
+
+Every public executable function of the crate is total: the checker reports
+0 public `requires` clauses (beyond the receiver's own `wf`-class predicates,
+which every constructor and operation upholds) and the allowlist is empty. It
+also reads module visibility from `lib.rs`, so items of a `pub(crate)` module
+are not counted as public. Each boundary class below drained as follows:
+
+- **Runtime-rechecked layout operations** — the `check_precondition`
+  mirrors in the layout impls became refuse-guards and the nine trait
+  primitives plus `internal_insert_at`/`first_key` carry requires-free
+  conditional contracts (the pattern `leaf_fill_keys` already used). A new
+  exec twin `is_node_wf` lets the generic helpers re-establish `node_wf`
+  after their own guard, since the spec predicate is opaque through `L`.
+- **Inaccessible store receivers** — the thirteen protocol operations (with
+  the ghost views they are stated over) moved to the crate-private
+  supertrait `diff_store_ops::DiffStoreOps`; `DiffStore` keeps the total
+  queries and maintenance operations and remains the bound consumers name.
+  The protocol test that drove stores directly moved in-crate.
+- **Type laws** — `SpMap::new` ensures `obeys_key_model::<K>() ==> m.wf()`
+  (a property of the type; nothing to check at runtime) and the `Tagged`
+  operations ensure `repr_wf(r) ==> …`; `capture_bits::set_true` and
+  `guard::check_precondition` are `pub(crate)`.
+- **Component boundaries** — `CircularList::{splice, splice_absorb}` refuse
+  a same-ring pair after a verified walk of the absorbed ring, with an O(1)
+  fast path for a singleton absorbed ring (`next(aid) == aid`) (option 2 of
+  the design list below, chosen because the e-graph's merge keeps the
+  walk-free crate-private cores `splice_core`/`splice_absorb_core`, whose
+  distinct-rings precondition is a theorem there); the external_body
+  debug-only walk is gone. The "no ring walk on every splice" requirement
+  below holds where it matters: the e-graph never walks, and the public
+  component API walks only a non-singleton absorbed ring. `SparseSet::restore` archives the snapshot
+  well-formedness in `wf` (lockstep stacks, every archived triple
+  `snap_wf`), so token validity plus equal frame indices make it total.
+- **Everything else** — `History::{mark, restore_to}`, `GenStamps`,
+  `HintedArena` (whose `complete` predicate joined `wf`, with a `wf_struct`
+  form for the mid-operation `note_hint`), the cold and compressed stacks,
+  every frame's `decode_at`, `Codes`, the run compressors and the sync group
+  took refuse-guards; the remaining internal primitives are `pub(crate)`.
+
+The "Remaining Design Work" and "Current Boundary Classes" sections below
+are kept as the record of the options considered; only "Keyed Maps" is still
+open (the key-model law is no longer a precondition, but it remains the one
+uninterpreted assumption a custom key type must satisfy).
+
+## Current Boundary Classes (historical)
 
 ### Runtime-Rechecked Layout Operations
 

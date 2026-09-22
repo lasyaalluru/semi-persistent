@@ -11,9 +11,8 @@
 //! SpMap for deduplication caches); mark/restore truncates them as one unit.
 
 use crate::config::AuIds;
-use crate::containers::{
-    AppendOnlyVec, DenseId, IndexLike, MapToken, ShrinkPolicy, SpMap, VecToken,
-};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 
 use super::{AuIds31, Span};
 
@@ -83,15 +82,7 @@ where
     /// Pool of items (all interned contexts concatenated).
     items: AppendOnlyVec<T, A::Index>,
     /// Deduplication map: sorted item vector -> context id.
-    index: SpMap<Vec<T>, A::Context, A::Index>,
-}
-
-/// Token for restoring a `ContextStore` to a previous state.
-#[derive(Clone, Copy, Debug)]
-pub struct ContextStoreToken {
-    spans: VecToken,
-    items: VecToken,
-    index: MapToken,
+    index: SpUniqueMap<Vec<T>, A::Context, A::Index>,
 }
 
 impl<A: AuIds, T> ContextStore<A, T>
@@ -102,7 +93,7 @@ where
         let mut store = ContextStore {
             spans: AppendOnlyVec::new(),
             items: AppendOnlyVec::new(),
-            index: SpMap::new(),
+            index: SpUniqueMap::new(),
         };
         store.intern(&[]);
         store
@@ -115,10 +106,18 @@ where
     }
 
     pub fn intern(&mut self, sorted_items: &[T]) -> A::Context {
-        if let Some(log_idx) = self.index.id_of(&sorted_items.to_vec()) {
-            return *self.index.get_val(log_idx);
-        }
+        // One hash of the item vector, not two: the map decides membership and
+        // claims the id in the same probe (`SpMap::try_intern`), and the span
+        // columns are only extended when the id is fresh. The key is a heap
+        // vector, so the hash saved here is the dominant cost of an intern.
         let id: A::Context = crate::id::id_at_index(self.spans.len());
+        let (found, fresh) = self
+            .index
+            .try_intern(sorted_items.to_vec(), id)
+            .expect("AU arena sized by its index word");
+        if !fresh {
+            return *self.index.get_val(found);
+        }
         let start = self.items.len().as_usize();
         for &item in sorted_items {
             self.items
@@ -127,9 +126,6 @@ where
         }
         self.spans
             .try_push(Span::new(start, sorted_items.len()))
-            .expect("AU arena sized by its index word");
-        self.index
-            .try_insert(sorted_items.to_vec(), id)
             .expect("AU arena sized by its index word");
         id
     }
@@ -163,39 +159,35 @@ where
         self.spans.is_empty()
     }
 
-    pub fn mark(&mut self) -> ContextStoreToken {
-        ContextStoreToken {
-            spans: self
-                .spans
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            items: self
-                .items
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            index: self
-                .index
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.spans, shrink);
+        Member::push_frame(&mut self.items, shrink);
+        Member::push_frame(&mut self.index, shrink);
     }
 
-    pub fn is_valid_token(&self, token: &ContextStoreToken) -> bool {
-        self.spans.is_valid_token(&token.spans)
-            && self.items.is_valid_token(&token.items)
-            && self.index.is_valid_token(&token.index)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.spans, depth);
+        Member::reset_frame(&mut self.items, depth);
+        Member::reset_frame(&mut self.index, depth);
     }
 
-    pub fn restore(&mut self, token: ContextStoreToken) {
-        self.index
-            .try_restore(token.index)
-            .expect("restore: token minted by this container's own mark");
-        self.items
-            .try_restore(token.items)
-            .expect("restore: token minted by this container's own mark");
-        self.spans
-            .try_restore(token.spans)
-            .expect("restore: token minted by this container's own mark");
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.spans, depth);
+        Member::restore_frame(&mut self.items, depth);
+        Member::restore_frame(&mut self.index, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.spans);
+        Member::pop_frame(&mut self.items);
+        Member::pop_frame(&mut self.index);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.spans)
     }
 }
 
@@ -231,20 +223,7 @@ pub struct OrArena<A: AuIds = AuIds31> {
     pub terminal: AppendOnlyVec<bool, A::Index>,
     pub left_best_size: AppendOnlyVec<u32, A::Index>,
     pub right_best_size: AppendOnlyVec<u32, A::Index>,
-    pub by_key: SpMap<(A::Class, A::Class, A::Context, A::Context), A::Or, A::Index>,
-}
-
-/// Token for restoring an `OrArena`.
-#[derive(Clone, Copy, Debug)]
-pub struct OrArenaToken {
-    left: VecToken,
-    right: VecToken,
-    left_ctx: VecToken,
-    right_ctx: VecToken,
-    terminal: VecToken,
-    left_best_size: VecToken,
-    right_best_size: VecToken,
-    by_key: MapToken,
+    pub by_key: SpUniqueMap<(A::Class, A::Class, A::Context, A::Context), A::Or, A::Index>,
 }
 
 impl<A: AuIds> OrArena<A> {
@@ -257,7 +236,7 @@ impl<A: AuIds> OrArena<A> {
             terminal: AppendOnlyVec::new(),
             left_best_size: AppendOnlyVec::new(),
             right_best_size: AppendOnlyVec::new(),
-            by_key: SpMap::new(),
+            by_key: SpUniqueMap::new(),
         }
     }
 
@@ -271,72 +250,55 @@ impl<A: AuIds> OrArena<A> {
         self.left.is_empty()
     }
 
-    pub fn mark(&mut self) -> OrArenaToken {
-        OrArenaToken {
-            left: self
-                .left
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            right: self
-                .right
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            left_ctx: self
-                .left_ctx
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            right_ctx: self
-                .right_ctx
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            terminal: self
-                .terminal
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            left_best_size: self
-                .left_best_size
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            right_best_size: self
-                .right_best_size
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            by_key: self
-                .by_key
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.left, shrink);
+        Member::push_frame(&mut self.right, shrink);
+        Member::push_frame(&mut self.left_ctx, shrink);
+        Member::push_frame(&mut self.right_ctx, shrink);
+        Member::push_frame(&mut self.terminal, shrink);
+        Member::push_frame(&mut self.left_best_size, shrink);
+        Member::push_frame(&mut self.right_best_size, shrink);
+        Member::push_frame(&mut self.by_key, shrink);
     }
 
-    pub fn restore(&mut self, token: OrArenaToken) {
-        self.by_key
-            .try_restore(token.by_key)
-            .expect("restore: token minted by this container's own mark");
-        self.right_best_size
-            .try_restore(token.right_best_size)
-            .expect("restore: token minted by this container's own mark");
-        self.left_best_size
-            .try_restore(token.left_best_size)
-            .expect("restore: token minted by this container's own mark");
-        self.terminal
-            .try_restore(token.terminal)
-            .expect("restore: token minted by this container's own mark");
-        self.right_ctx
-            .try_restore(token.right_ctx)
-            .expect("restore: token minted by this container's own mark");
-        self.left_ctx
-            .try_restore(token.left_ctx)
-            .expect("restore: token minted by this container's own mark");
-        self.right
-            .try_restore(token.right)
-            .expect("restore: token minted by this container's own mark");
-        self.left
-            .try_restore(token.left)
-            .expect("restore: token minted by this container's own mark");
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.left, depth);
+        Member::reset_frame(&mut self.right, depth);
+        Member::reset_frame(&mut self.left_ctx, depth);
+        Member::reset_frame(&mut self.right_ctx, depth);
+        Member::reset_frame(&mut self.terminal, depth);
+        Member::reset_frame(&mut self.left_best_size, depth);
+        Member::reset_frame(&mut self.right_best_size, depth);
+        Member::reset_frame(&mut self.by_key, depth);
     }
 
-    pub fn is_valid_token(&self, token: &OrArenaToken) -> bool {
-        self.left.is_valid_token(&token.left)
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.left, depth);
+        Member::restore_frame(&mut self.right, depth);
+        Member::restore_frame(&mut self.left_ctx, depth);
+        Member::restore_frame(&mut self.right_ctx, depth);
+        Member::restore_frame(&mut self.terminal, depth);
+        Member::restore_frame(&mut self.left_best_size, depth);
+        Member::restore_frame(&mut self.right_best_size, depth);
+        Member::restore_frame(&mut self.by_key, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.left);
+        Member::pop_frame(&mut self.right);
+        Member::pop_frame(&mut self.left_ctx);
+        Member::pop_frame(&mut self.right_ctx);
+        Member::pop_frame(&mut self.terminal);
+        Member::pop_frame(&mut self.left_best_size);
+        Member::pop_frame(&mut self.right_best_size);
+        Member::pop_frame(&mut self.by_key);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.left)
     }
 }
 
@@ -349,15 +311,6 @@ impl<A: AuIds> Default for OrArena<A> {
 // ---------------------------------------------------------------------------
 // SearchSpace: combines the above into one structure
 // ---------------------------------------------------------------------------
-
-/// Token for restoring the entire search-space layer. Validity is delegated
-/// to the inner semi-persistent containers' branch genealogy.
-#[derive(Clone, Copy, Debug)]
-pub struct SpaceToken {
-    or_arena: OrArenaToken,
-    contexts: ContextStoreToken,
-    pair_contexts: ContextStoreToken,
-}
 
 /// The complete search-space layer shared by all algorithms in a session.
 pub struct SearchSpace<A: AuIds = AuIds31> {
@@ -605,26 +558,35 @@ impl<A: AuIds> SearchSpace<A> {
         }
     }
 
-    pub fn mark(&mut self) -> SpaceToken {
-        SpaceToken {
-            or_arena: self.or_arena.mark(),
-            contexts: self.contexts.mark(),
-            pair_contexts: self.pair_contexts.mark(),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        self.or_arena.push_frame(shrink);
+        self.contexts.push_frame(shrink);
+        self.pair_contexts.push_frame(shrink);
     }
 
-    /// Is this token restorable right now (same instances, live branches on
-    /// every inner container)?
-    pub fn is_valid_token(&self, token: &SpaceToken) -> bool {
-        self.or_arena.is_valid_token(&token.or_arena)
-            && self.contexts.is_valid_token(&token.contexts)
-            && self.pair_contexts.is_valid_token(&token.pair_contexts)
+    pub fn reset_frame(&mut self, depth: usize) {
+        self.or_arena.reset_frame(depth);
+        self.contexts.reset_frame(depth);
+        self.pair_contexts.reset_frame(depth);
     }
 
-    pub fn restore(&mut self, token: SpaceToken) {
-        self.or_arena.restore(token.or_arena);
-        self.contexts.restore(token.contexts);
-        self.pair_contexts.restore(token.pair_contexts);
+    pub fn restore_frame(&mut self, depth: usize) {
+        self.or_arena.restore_frame(depth);
+        self.contexts.restore_frame(depth);
+        self.pair_contexts.restore_frame(depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        self.or_arena.pop_frame();
+        self.contexts.pop_frame();
+        self.pair_contexts.pop_frame();
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        self.or_arena.frame_depth()
     }
 }
 
@@ -780,12 +742,13 @@ mod tests {
         let ctx = space.contexts.empty();
 
         let (id1, _) = space.get_or_insert_or_node(c0, c1, ctx, ctx, 1, 1);
-        let token = space.mark();
+        let token = space.frame_depth();
+        space.push_frame(ShrinkPolicy::Never);
 
         let (_id2, _) = space.get_or_insert_or_node(c1, c2, ctx, ctx, 1, 1);
         assert_eq!(space.or_arena.len(), 2);
 
-        space.restore(token);
+        space.reset_frame(token);
         assert_eq!(space.or_arena.len(), 1);
 
         // The first node is still there.
@@ -806,7 +769,8 @@ mod tests {
         let c2 = AuClassId::from_usize(2);
         let (empty_l, empty_r) = space.empty_contexts();
         let (root, _) = space.get_or_insert_or_node(c0, c1, empty_l, empty_r, 1, 1);
-        let token = space.mark();
+        let token = space.frame_depth();
+        space.push_frame(ShrinkPolicy::Never);
 
         let (child_l, child_r) = space.derive_child_contexts(root, c1, c2, |_| true, |_| true);
         let (child, _) = space.get_or_insert_or_node(c1, c2, child_l, child_r, 1, 1);
@@ -816,7 +780,7 @@ mod tests {
         );
         assert_eq!(space.pair_contexts.len().as_usize(), 2);
 
-        space.restore(token);
+        space.reset_frame(token);
         assert_eq!(space.or_arena.len(), 1);
         assert_eq!(space.pair_contexts.len().as_usize(), 1);
         assert_eq!(space.cycle_context(root), CycleContext::Pairs(Vec::new()));

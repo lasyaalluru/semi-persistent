@@ -3,8 +3,11 @@
 //! Verified union-find over two semi-persistent columns. It establishes the
 //! acyclic-root invariant consumed by `eclasses.rs`.
 //!
-//! `parent` and `rank` are verified `Vec`s over `InlineStore`, production's
-//! `VecI` columns (`egraph/src/union_find.rs`). The abstract state is a ghost
+//! `parent` and `rank` are verified `Vec`s whose store the policy parameter
+//! `P` chooses (`crate::store_policy`; the default `HotFirst` gives
+//! `InlineStore`, production's `VecI` columns, `egraph/src/union_find.rs`).
+//! The proofs use only the `Vec` contract, so they hold for every policy.
+//! The abstract state is a ghost
 //! root map `roots@: Seq<usize>` — each element's canonical representative —
 //! plus a ghost measure `dist@: Seq<nat>`, the element's path length to its
 //! root. The physical parent column is a cache of `roots@`, tied to it by
@@ -50,32 +53,13 @@
 
 use vstd::prelude::*;
 
+use crate::diff_store::DiffStore;
 use crate::index_like::IndexLike;
-use crate::inline_store::InlineStore;
 use crate::opt::DenseId;
+use crate::store_policy::{HotFirst, TaggedFamily};
 use crate::vec::{ShrinkPolicy, Vec as SpVec, VecToken};
 
 verus! {
-
-/// Token bundling the column tokens (production's shape: the proof pair is
-/// `Some` iff the union-find was built with `PROOFS`).
-#[derive(Copy, Clone)]
-pub struct UnionFindToken {
-    pub(crate) parent: VecToken,
-    pub(crate) rank: VecToken,
-    pub(crate) parent_proof: Option<VecToken>,
-    pub(crate) justification: Option<VecToken>,
-}
-
-impl UnionFindToken {
-    pub open(crate) spec fn parent_frame_idx_spec(self) -> nat {
-        self.parent.frame_idx as nat
-    }
-
-    pub open(crate) spec fn rank_frame_idx_spec(self) -> nat {
-        self.rank.frame_idx as nat
-    }
-}
 
 /// The root map after `ab`'s class is absorbed into `s`'s.
 pub open(crate) spec fn merge_roots(roots: Seq<usize>, s: nat, ab: nat) -> Seq<usize> {
@@ -190,17 +174,23 @@ pub open(crate) spec fn uf_proof_archive_agrees<T: DenseId, J: crate::tagged::Ta
 
 /// Verified union-find (production parity: `UnionFind<T, J, TRACK, PROOFS>`
 /// with the dual fast/proof forests under `PROOFS`).
-pub struct UnionFind<T: DenseId, J, const TRACK: bool = true, const PROOFS: bool = false>
+pub struct UnionFind<T: DenseId, J, const TRACK: bool = true, const PROOFS: bool = false, P = HotFirst>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK> + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
-    pub(crate) parent: SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
-    pub(crate) rank: SpVec<u8, T::Index, InlineStore<u8, T::Index>, TRACK>,
+    pub(crate) parent: SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK,
+        crate::value_compressor::ValueDictC>,
+    pub(crate) rank: SpVec<u8, T::Index, <P as TaggedFamily<u8, T::Index, TRACK>>::Store, TRACK,
+        crate::value_compressor::ValueDictC>,
     /// Proof forest: per-node ORIGINAL-edge parent, never compressed
     /// (`Some` iff `PROOFS`). Production's `parent_proof`.
-    pub(crate) parent_proof: Option<SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>>,
+    pub(crate) parent_proof: Option<SpVec<T, T::Index,
+        <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>>,
     /// Per-node justification of the proof edge (`Some` iff `PROOFS`).
-    pub(crate) justification: Option<SpVec<J, T::Index, InlineStore<J, T::Index>, TRACK>>,
+    pub(crate) justification: Option<SpVec<J, T::Index,
+        <P as TaggedFamily<J, T::Index, TRACK>>::Store, TRACK>>,
     /// Ghost root map: `roots@[i]` is `i`'s canonical representative.
     pub(crate) roots: Ghost<Seq<usize>>,
     /// Ghost path-length measure (0 at roots, strictly decreasing toward them).
@@ -210,9 +200,11 @@ where
     pub(crate) dist_snapshots: Ghost<Seq<Seq<nat>>>,
 }
 
-impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool> UnionFind<T, J, TRACK, PROOFS>
+impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool, P> UnionFind<T, J, TRACK, PROOFS, P>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK> + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
     pub open(crate) spec fn parent_view(&self) -> Seq<T> {
         self.parent.view()
@@ -266,27 +258,8 @@ where
         self.dist_snapshots@
     }
 
-    pub open(crate) spec fn is_token_valid_spec(&self, token: UnionFindToken) -> bool {
-        &&& self.parent.is_token_valid_spec(token.parent)
-        &&& self.rank.is_token_valid_spec(token.rank)
-    }
 
-    pub open(crate) spec fn is_restorable_spec(&self, token: UnionFindToken) -> bool {
-        &&& self.parent.is_restorable_spec(token.parent)
-        &&& self.rank.is_restorable_spec(token.rank)
-    }
 
-    /// Composite restore preconditions (mirrors `ListArena::restore_pre_spec`).
-    pub open(crate) spec fn restore_pre_spec(&self, token: UnionFindToken) -> bool {
-        &&& self.parent.is_token_valid_spec(token.parent)
-        &&& token.parent.frame_idx_spec() < self.parent.depth_spec()
-        &&& self.parent.depth_spec() < u32::MAX
-        &&& self.parent.fork_count_spec() + 1 <= u32::MAX
-        &&& self.rank.is_token_valid_spec(token.rank)
-        &&& token.rank.frame_idx_spec() < self.rank.depth_spec()
-        &&& self.rank.depth_spec() < u32::MAX
-        &&& self.rank.fork_count_spec() + 1 <= u32::MAX
-    }
 
     pub open(crate) spec fn wf(&self) -> bool {
         &&& self.parent.wf()
@@ -321,15 +294,15 @@ where
             u.parent_snapshots_view().len() == 0,
     {
         let u = UnionFind {
-            parent: SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK>::new(),
-            rank: SpVec::<u8, T::Index, InlineStore<u8, T::Index>, TRACK>::new(),
+            parent: SpVec::with_store(<P as TaggedFamily<T, T::Index, TRACK>>::empty()),
+            rank: SpVec::with_store(<P as TaggedFamily<u8, T::Index, TRACK>>::empty()),
             parent_proof: if PROOFS {
-                Some(SpVec::<T, T::Index, InlineStore<T, T::Index>, TRACK>::new())
+                Some(SpVec::with_store(<P as TaggedFamily<T, T::Index, TRACK>>::empty()))
             } else {
                 None
             },
             justification: if PROOFS {
-                Some(SpVec::<J, T::Index, InlineStore<J, T::Index>, TRACK>::new())
+                Some(SpVec::with_store(<P as TaggedFamily<J, T::Index, TRACK>>::empty()))
             } else {
                 None
             },
@@ -581,7 +554,17 @@ where
         }
     }
 
-    /// Canonical representative of `x`, with two-pass full compression.
+    /// Canonical representative of `x`, with PATH HALVING compression: a
+    /// single pass that points each visited node at its grandparent and then
+    /// advances two levels. Half the writes of two-pass full compression for
+    /// the same inverse-Ackermann amortized bound (Tarjan and van Leeuwen
+    /// 1984), which matters here because a compression write is not a plain
+    /// store: it goes through the TRACKED `parent.set_index`, so it costs a
+    /// capture check, possibly a diff-log entry, that entry's memory for the
+    /// frame's lifetime, and the work of replaying it at restore. Halving the
+    /// writes shrinks all four. Measured lever: `UnionFind::find` was 16.7% of
+    /// EqSat self time (math-microbenchmark) before this change.
+    ///
     /// Total-with-documented-panic: an out-of-range id refuses. The abstract
     /// state (`roots_view`) is unchanged — compression rewrites the cache,
     /// not the partition.
@@ -606,50 +589,8 @@ where
             crate::guard::refuse("UnionFind::find: id out of range");
         }
         let ghost n = old(self).n_spec();
-        // pass 1: locate the root (read-only walk; production's shape).
-        let mut root = x;
-        loop
-            invariant
-                self.wf(),
-                *self == *old(self),
-                self.n_spec() == n,
-                root.id_nat() < n,
-                x.id_nat() < n,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
-            ensures
-                *self == *old(self),
-                root.id_nat() < n,
-                self.roots@[root.id_nat() as int] == root.id_nat() as usize,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
-            decreases self.dist@[root.id_nat() as int],
-        {
-            let p = self.parent.get_index(root.to_index());
-            proof {
-                assert(p == self.parent_view()[root.id_nat() as int]);
-                assert(p.id_nat() < n);
-            }
-            if p.to_usize() == root.to_usize() {
-                proof {
-                    T::lemma_id_injective(p, root);
-                    crate::opt::lemma_id_nat_fits_usize(root);
-                    assert(parent_self_root_clause(
-                        self.parent_view(), self.roots@, root.id_nat() as int));
-                    assert(self.parent_view()[root.id_nat() as int].id_nat() == root.id_nat());
-                    assert(self.roots@[root.id_nat() as int] == root.id_nat() as usize);
-                }
-                break;
-            }
-            proof { assert(p.id_nat() != root.id_nat()); }
-            root = p;
-        }
-        // pass 2: point every node on the walked path at the root
-        // (production's full compression). Each write lowers the written
-        // node's measure to 1 (the root's is 0), which preserves the strict
-        // decrease into it, and the cursor advances along parents read
-        // before their cell is overwritten.
-        proof { crate::opt::lemma_id_nat_fits_usize(root); }
         let mut cur = x;
-        while cur.to_usize() != root.to_usize()
+        loop
             invariant
                 self.wf(),
                 self.n_spec() == n,
@@ -662,37 +603,74 @@ where
                 self.parent.snapshots_view() == old(self).parent.snapshots_view(),
                 cur.id_nat() < n,
                 x.id_nat() < n,
-                root.id_nat() < n,
+                // The walk preserves the class: cur's root is x's root.
                 self.roots@[cur.id_nat() as int] == self.roots@[x.id_nat() as int],
-                self.roots@[root.id_nat() as int] == root.id_nat() as usize,
-                self.roots@[root.id_nat() as int] == self.roots@[x.id_nat() as int],
+            ensures
+                self.wf(),
+                self.n_spec() == n,
+                self.rank == old(self).rank,
+                self.roots@ == old(self).roots@,
+                self.roots_snapshots@ == old(self).roots_snapshots@,
+                self.dist_snapshots@ == old(self).dist_snapshots@,
+                self.parent.snapshots_view() == old(self).parent.snapshots_view(),
+                cur.id_nat() < n,
+                // Exit condition: cur IS the root of x's class.
+                self.roots@[cur.id_nat() as int] == cur.id_nat() as usize,
+                self.roots@[cur.id_nat() as int] == self.roots@[x.id_nat() as int],
             decreases self.dist@[cur.id_nat() as int],
         {
-            proof {
-                crate::opt::lemma_id_nat_fits_usize(cur);
-                assert(cur.id_nat() != root.id_nat()) by {
-                    if cur.id_nat() == root.id_nat() { T::lemma_id_injective(cur, root); }
-                }
-            }
+            proof { crate::opt::lemma_id_nat_fits_usize(cur); }
             let p = self.parent.get_index(cur.to_index());
             proof {
                 assert(p == self.parent_view()[cur.id_nat() as int]);
                 assert(p.id_nat() < n);
                 crate::opt::lemma_id_nat_fits_usize(p);
-                // cur is not a root: were parent[cur] == cur, roots[cur] == cur,
-                // but roots[cur] == roots[root] == root != cur.
-                assert(parent_self_root_clause(
-                    self.parent_view(), self.roots@, cur.id_nat() as int));
-                assert(self.parent_view()[cur.id_nat() as int].id_nat() != cur.id_nat()) by {
-                    if self.parent_view()[cur.id_nat() as int].id_nat() == cur.id_nat() {
-                        assert(self.roots@[cur.id_nat() as int] == cur.id_nat() as usize);
-                    }
+            }
+            if p.to_usize() == cur.to_usize() {
+                // cur is a root.
+                proof {
+                    T::lemma_id_injective(p, cur);
+                    assert(parent_self_root_clause(
+                        self.parent_view(), self.roots@, cur.id_nat() as int));
+                    assert(self.roots@[cur.id_nat() as int] == cur.id_nat() as usize);
                 }
+                break;
+            }
+            proof {
                 assert(p.id_nat() != cur.id_nat());
+                assert(self.dist@[p.id_nat() as int] < self.dist@[cur.id_nat() as int]);
+                assert(self.roots@[p.id_nat() as int] == self.roots@[cur.id_nat() as int]);
+            }
+            let g = self.parent.get_index(p.to_index());
+            proof {
+                assert(g == self.parent_view()[p.id_nat() as int]);
+                assert(g.id_nat() < n);
+                crate::opt::lemma_id_nat_fits_usize(g);
+                assert(self.roots@[g.id_nat() as int] == self.roots@[p.id_nat() as int]);
+            }
+            if g.to_usize() == p.to_usize() {
+                // p is the root: nothing left to compress, step onto it.
+                proof {
+                    T::lemma_id_injective(g, p);
+                    assert(parent_self_root_clause(
+                        self.parent_view(), self.roots@, p.id_nat() as int));
+                    assert(self.roots@[p.id_nat() as int] == p.id_nat() as usize);
+                }
+                cur = p;
+                break;
+            }
+            // Compress one level: point cur at its grandparent. The measure
+            // for cur becomes dist[g] + 1, which is strictly below cur's old
+            // measure (dist[cur] > dist[p] > dist[g]), so every edge INTO cur
+            // still strictly decreases, and the new edge cur -> g does too.
+            proof {
+                assert(g.id_nat() != p.id_nat());
+                assert(self.dist@[g.id_nat() as int] < self.dist@[p.id_nat() as int]);
             }
             let ghost pre = *self;
-            self.parent.set_index(cur.to_index(), root);
-            self.dist = Ghost(self.dist@.update(cur.id_nat() as int, 1nat));
+            let ghost gdist = self.dist@[g.id_nat() as int];
+            self.parent.set_index(cur.to_index(), g);
+            self.dist = Ghost(self.dist@.update(cur.id_nat() as int, (gdist + 1) as nat));
             proof {
                 let pv = self.parent_view();
                 let opv = pre.parent_view();
@@ -700,24 +678,22 @@ where
                 let dist = self.dist@;
                 let odist = pre.dist@;
                 let ci = cur.id_nat() as int;
-                let ri = root.id_nat() as int;
-                assert(pv == opv.update(ci, root));
-                assert(dist == odist.update(ci, 1nat));
-                // cur is not any element's root value (it is not a root).
+                let gi = g.id_nat() as int;
+                let pi = p.id_nat() as int;
+                assert(pv == opv.update(ci, g));
+                assert(dist == odist.update(ci, (gdist + 1) as nat));
+                assert(odist[gi] < odist[pi] && odist[pi] < odist[ci]);
+                assert(dist[ci] == odist[gi] + 1);
+                assert(dist[ci] < odist[ci]);
+                // cur is not a root (its parent differed), and g != cur (a
+                // 2-cycle would violate the strict measure decrease).
                 assert(roots[ci] != cur.id_nat() as usize);
+                assert(gi != ci);
                 assert forall|i: int| 0 <= i < n implies
                     (#[trigger] roots[i]) != cur.id_nat() as usize by {
                     if roots[i] == cur.id_nat() as usize {
                         assert(roots[ci] == roots[i]);
                     }
-                }
-                // the root has measure 0 and stays a root.
-                assert(roots[ri] == root.id_nat() as usize);
-                assert(odist[ri] == 0);
-                // cur was not a root, so its old measure was at least 1.
-                assert(odist[ci] >= 1) by {
-                    assert(opv[ci].id_nat() != ci as nat);
-                    assert(odist[opv[ci].id_nat() as int] < odist[ci]);
                 }
                 assert forall|i: int| 0 <= i < n implies (#[trigger] pv[i]).id_nat() < n by {
                     if i != ci { assert(pv[i] == opv[i]); }
@@ -728,7 +704,7 @@ where
                         assert(pv[i] == opv[i]);
                         assert(parent_self_root_clause(opv, roots, i));
                     } else {
-                        assert(pv[ci] == root);
+                        assert(pv[ci] == g);
                         assert(pv[ci].id_nat() != ci as nat);
                     }
                 }
@@ -737,7 +713,8 @@ where
                     if i != ci {
                         assert(pv[i] == opv[i]);
                     } else {
-                        assert(roots[ri] == roots[ci]);
+                        assert(roots[gi] == roots[pi]);
+                        assert(roots[pi] == roots[ci]);
                     }
                 }
                 assert forall|i: int| 0 <= i < n implies
@@ -753,15 +730,16 @@ where
                 assert forall|i: int| 0 <= i < n && (#[trigger] pv[i]).id_nat() != i as nat
                     implies dist[pv[i].id_nat() as int] < dist[i] by {
                     if i == ci {
-                        // new edge cur -> root: measure 0 < 1.
-                        assert(dist[ri] == odist[ri]);
-                        assert(dist[ci] == 1);
+                        // new edge cur -> g: dist[g] < dist[g] + 1.
+                        assert(gi != ci);
+                        assert(dist[gi] == odist[gi]);
+                        assert(dist[ci] == odist[gi] + 1);
                     } else if opv[i].id_nat() == cur.id_nat() {
-                        // an edge into cur: its head's measure fell to 1, and
-                        // the tail's was strictly above cur's old (>= 1) one.
-                        assert(dist[ci] == 1);
+                        // an edge into cur: cur's measure only FELL, and the
+                        // tail's was strictly above cur's old one.
                         assert(odist[ci] < odist[i]);
                         assert(dist[i] == odist[i]);
+                        assert(dist[ci] < odist[ci]);
                     } else {
                         assert(pv[i] == opv[i]);
                         assert(dist[pv[i].id_nat() as int]
@@ -771,21 +749,19 @@ where
                 }
                 assert(uf_model_wf(pv, roots, dist));
                 assert(self.parent.snapshots_view() == pre.parent.snapshots_view());
+                // Measure for the next iteration: cur becomes g, whose cell
+                // was not written (g != cur), so its measure is unchanged and
+                // strictly below cur's old one.
+                assert(dist[gi] == odist[gi]);
+                assert(odist[gi] < odist[ci]);
             }
-            proof {
-                // measure: the next cursor's cell is unwritten (it is ahead of
-                // the walk), so its measure is the old one, strictly below.
-                assert(p.id_nat() != cur.id_nat());
-                assert(self.dist@[p.id_nat() as int] == pre.dist@[p.id_nat() as int] || p.id_nat() == cur.id_nat());
-                assert(pre.dist@[p.id_nat() as int] < pre.dist@[cur.id_nat() as int]);
-            }
-            cur = p;
+            cur = g;
         }
         proof {
-            crate::opt::lemma_id_nat_fits_usize(root);
-            assert(root.id_nat() == old(self).roots_view()[x.id_nat() as int] as nat);
+            crate::opt::lemma_id_nat_fits_usize(cur);
+            assert(cur.id_nat() == old(self).roots_view()[x.id_nat() as int] as nat);
         }
-        root
+        cur
     }
 
     /// Attach root `ab`'s class under root `s` (the link step of union).
@@ -1117,48 +1093,51 @@ where
 
     // ---- semi-persistence: compose from the two columns ----
 
-    pub(crate) fn mark(&mut self, shrink: ShrinkPolicy) -> (token: UnionFindToken)
+
+    // --------------------------------------------------------------------
+    // Shared-history variants (doc 10): the parent/rank (+ optional proof)
+    // columns driven by one external History via push_frame/restore_frame, so
+    // the branch genealogy lives once. Additive — the UnionFindToken mark/restore
+    // above and their theorems are untouched. The roots/dist and proof archives
+    // are maintained by the same proof blocks (push_frame/restore_frame share the
+    // per-column snapshot ensures). The synced-depth invariant (all columns and
+    // the history at one depth) is carried explicitly; under PROOFS it extends to
+    // the two proof columns.
+    #[allow(dead_code)]
+    pub(crate) fn push_frames(&mut self, shrink: ShrinkPolicy)
         requires
             old(self).wf(),
             TRACK,
             old(self).parent_depth_spec() < u32::MAX,
             old(self).rank_depth_spec() < u32::MAX,
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
         ensures
             final(self).wf(),
             final(self).parent_view() == old(self).parent_view(),
             final(self).rank_view() == old(self).rank_view(),
             final(self).roots_view() == old(self).roots_view(),
-            token.parent_frame_idx_spec() == old(self).parent_depth_spec(),
-            token.rank_frame_idx_spec() == old(self).rank_depth_spec(),
             final(self).parent_depth_spec() == old(self).parent_depth_spec() + 1,
-            final(self).rank_depth_spec() == old(self).rank_depth_spec() + 1,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
             final(self).roots_snapshots_view()
                 == old(self).roots_snapshots_view().push(old(self).roots_view()),
             final(self).parent_snapshots_view()
                 == old(self).parent_snapshots_view().push(old(self).parent_view()),
-            token.parent_frame_idx_spec()
-                == final(self).roots_snapshots_view().len() - 1,
     {
-        let parent_tok = self.parent.mark(shrink);
-        let rank_tok = self.rank.mark(shrink);
-        // proof columns (production parity): marked through their total
-        // forms; depth exhaustion refuses with production's expect message.
-        let pp_tok = match &mut self.parent_proof {
-            Some(pp) => match pp.try_mark(shrink) {
-                Ok(t) => Some(t),
-                Err(_) => crate::guard::refuse(
-                    "mark: frame depth is bounded by the saturation driver"),
-            },
-            None => None,
-        };
-        let j_tok = match &mut self.justification {
-            Some(j) => match j.try_mark(shrink) {
-                Ok(t) => Some(t),
-                Err(_) => crate::guard::refuse(
-                    "mark: frame depth is bounded by the saturation driver"),
-            },
-            None => None,
-        };
+        proof {
+            // Element counts fit the index word (store `wf`, via its lemma).
+            self.parent.store.lemma_wf_data_len();
+            self.rank.store.lemma_wf_data_len();
+            if PROOFS {
+                self.parent_proof->Some_0.store.lemma_wf_data_len();
+                self.justification->Some_0.store.lemma_wf_data_len();
+            }
+        }
+        self.parent.push_frame(shrink);
+        self.rank.push_frame(shrink);
+        if let Some(pp) = &mut self.parent_proof { pp.push_frame(shrink) }
+        if let Some(j) = &mut self.justification { j.push_frame(shrink) }
         self.roots_snapshots = Ghost(self.roots_snapshots@.push(self.roots@));
         self.dist_snapshots = Ghost(self.dist_snapshots@.push(self.dist@));
         proof {
@@ -1223,112 +1202,40 @@ where
                 assert(uf_proof_archive_agrees(self.parent.snapshots_view(), pps, js));
             }
         }
-        UnionFindToken {
-            parent: parent_tok,
-            rank: rank_tok,
-            parent_proof: pp_tok,
-            justification: j_tok,
-        }
     }
 
-    /// Total mark (the composite of the two columns' `can_mark`).
-    pub fn try_mark(&mut self, shrink: ShrinkPolicy)
-        -> (r: Result<UnionFindToken, crate::error::ContainerError>)
-        requires old(self).wf(),
-        ensures
-            final(self).wf(),
-            r matches Ok(token) ==> {
-                &&& final(self).roots_view() == old(self).roots_view()
-                &&& final(self).parent_view() == old(self).parent_view()
-                &&& token.parent_frame_idx_spec() == old(self).parent_depth_spec()
-                &&& token.rank_frame_idx_spec() == old(self).rank_depth_spec()
-                &&& final(self).roots_snapshots_view()
-                    == old(self).roots_snapshots_view().push(old(self).roots_view())
-                &&& final(self).parent_snapshots_view()
-                    == old(self).parent_snapshots_view().push(old(self).parent_view())
-                &&& token.parent_frame_idx_spec()
-                    == final(self).roots_snapshots_view().len() - 1
-            },
-            r is Err ==> final(self).roots_view() == old(self).roots_view(),
-    {
-        if !TRACK {
-            return Err(crate::error::ContainerError::Untracked);
-        }
-        if self.parent.can_mark() && self.rank.can_mark() {
-            Ok(self.mark(shrink))
-        } else {
-            Err(crate::error::ContainerError::DepthLimit)
-        }
-    }
 
-    /// "Restorable now" for the composite token.
-    pub fn is_valid_token(&self, token: &UnionFindToken) -> (b: bool)
-        requires self.wf(),
-        ensures b == self.is_restorable_spec(*token),
-    {
-        self.parent.is_valid_token(&token.parent) && self.rank.is_valid_token(&token.rank)
-    }
 
-    /// The proof pair's validity and same-mark agreement (true vacuously
-    /// when `PROOFS = false`; the token must match the build).
-    fn proof_tokens_valid(&self, token: &UnionFindToken) -> (b: bool)
-        requires self.wf(),
-        ensures b && PROOFS ==> {
-            &&& token.parent_proof is Some
-            &&& token.justification is Some
-            &&& self.parent_proof->Some_0
-                .is_restorable_spec(token.parent_proof->Some_0)
-            &&& self.justification->Some_0
-                .is_restorable_spec(token.justification->Some_0)
-            &&& token.parent_proof->Some_0.frame_idx == token.parent.frame_idx
-            &&& token.justification->Some_0.frame_idx == token.parent.frame_idx
-        },
-    {
-        match (&self.parent_proof, &token.parent_proof, &self.justification, &token.justification)
-        {
-            (Some(pp), Some(pt), Some(j), Some(jt)) => {
-                pp.is_valid_token(pt)
-                    && j.is_valid_token(jt)
-                    && pt.frame_idx == token.parent.frame_idx
-                    && jt.frame_idx == token.parent.frame_idx
-            }
-            (None, None, None, None) => true,
-            _ => false,
-        }
-    }
 
-    pub(crate) fn restore(&mut self, token: UnionFindToken)
+
+
+
+    #[allow(dead_code)]
+    pub(crate) fn restore_frames(&mut self, target: usize)
+        where T: core::default::Default, J: core::default::Default
         requires
             old(self).wf(),
             TRACK,
-            old(self).restore_pre_spec(token),
-            token.parent_frame_idx_spec() == token.rank_frame_idx_spec(),
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            (target as nat) < old(self).parent_depth_spec(),
         ensures
             final(self).wf(),
             final(self).parent_view()
-                == old(self).parent_snapshots_view()[token.parent_frame_idx_spec() as int],
+                == old(self).parent_snapshots_view()[target as int],
             final(self).rank_view()
-                == old(self).rank_snapshots_view()[token.rank_frame_idx_spec() as int],
+                == old(self).rank_snapshots_view()[target as int],
             final(self).roots_view()
-                == old(self).roots_snapshots_view()[token.parent_frame_idx_spec() as int],
+                == old(self).roots_snapshots_view()[target as int],
             final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
-                .subrange(0, token.parent_frame_idx_spec() as int),
+                .subrange(0, target as int),
             final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
-                .subrange(0, token.parent_frame_idx_spec() as int),
+                .subrange(0, target as int),
+            final(self).parent_depth_spec() == target as nat,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
     {
-        // Atomic compound restore: prevalidate BOTH constituent tokens before
-        // restoring either (a parent column rolled back without its rank
-        // column desyncs the lengths unrecoverably), and pin the same-mark
-        // frame agreement.
-        crate::guard::check_precondition(
-            self.is_valid_token(&token),
-            "UnionFind::restore: invalid, foreign, stale, consumed, or abandoned token component",
-        );
-        crate::guard::check_precondition(
-            token.parent.frame_idx == token.rank.frame_idx,
-            "UnionFind::restore: token components name different marks",
-        );
-        let ghost f = token.parent.frame_idx as int;
+        let ghost f = target as int;
         let ghost snap_roots = self.roots_snapshots@[f];
         let ghost snap_dist = self.dist_snapshots@[f];
         proof {
@@ -1336,30 +1243,10 @@ where
             assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
                 old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
         }
-        if !self.proof_tokens_valid(&token) {
-            crate::guard::refuse(
-                "UnionFind::restore: proof-column token component invalid or from a different mark");
-        }
-        self.parent.restore(token.parent);
-        self.rank.restore(token.rank);
-        match (&mut self.parent_proof, token.parent_proof) {
-            (Some(pp), Some(t)) => match pp.try_restore(t) {
-                Ok(()) => (),
-                Err(_) => crate::guard::refuse("restore: own token"),
-            },
-            (None, None) => (),
-            _ => crate::guard::refuse(
-                "UnionFind::restore: proof-token shape does not match the build"),
-        }
-        match (&mut self.justification, token.justification) {
-            (Some(j), Some(t)) => match j.try_restore(t) {
-                Ok(()) => (),
-                Err(_) => crate::guard::refuse("restore: own token"),
-            },
-            (None, None) => (),
-            _ => crate::guard::refuse(
-                "UnionFind::restore: proof-token shape does not match the build"),
-        }
+        self.parent.restore_frame(target);
+        self.rank.restore_frame(target);
+        if let Some(pp) = &mut self.parent_proof { pp.restore_frame(target) }
+        if let Some(j) = &mut self.justification { j.restore_frame(target) }
         self.roots = Ghost(snap_roots);
         self.dist = Ghost(snap_dist);
         self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f));
@@ -1373,8 +1260,6 @@ where
                     old(self).parent.snapshots_view(), opps, ojs));
                 let pps = self.parent_proof->Some_0.snapshots_view();
                 let js = self.justification->Some_0.snapshots_view();
-                // restored views are frame f's; the archive equates their
-                // lengths with the fast parent's at every frame.
                 assert(self.parent_proof->Some_0.view() == opps[f]);
                 assert(self.justification->Some_0.view() == ojs[f]);
                 assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());
@@ -1424,29 +1309,117 @@ where
         }
     }
 
-    /// Total restore: component restorability plus the same-mark frame
-    /// agreement (a mixed token from two different marks refuses).
-    pub fn try_restore(&mut self, token: UnionFindToken)
-        -> (r: Result<(), crate::error::ContainerError>)
-        requires old(self).wf(),
+    /// Semantics B, token-free (what a typed group drives): reset the parent
+    /// and rank columns (and, under `PROOFS`, the proof columns) to their
+    /// snapshot at `target`, keep frame `target` open, and recover the roots
+    /// and distances archived at that mark.
+    pub(crate) fn reset_frames(&mut self, target: usize)
+        where T: core::default::Default, J: core::default::Default
+        requires
+            old(self).wf(),
+            TRACK,
+            old(self).parent_depth_spec() == old(self).rank_depth_spec(),
+            PROOFS ==> old(self).parent_proof->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            PROOFS ==> old(self).justification->Some_0.depth_spec() == old(self).parent_depth_spec(),
+            (target as nat) < old(self).parent_depth_spec(),
+            old(self).parent_depth_spec() < u32::MAX,
         ensures
             final(self).wf(),
-            r is Ok ==> final(self).roots_view()
-                == old(self).roots_snapshots_view()[token.parent_frame_idx_spec() as int]
-                && final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
-                    .subrange(0, token.parent_frame_idx_spec() as int),
-            r is Err ==> final(self).roots_view() == old(self).roots_view(),
-            r matches Err(e) ==> e == crate::error::ContainerError::InvalidToken,
+            final(self).parent_view() == old(self).parent_snapshots_view()[target as int],
+            final(self).rank_view() == old(self).rank_snapshots_view()[target as int],
+            final(self).roots_view() == old(self).roots_snapshots_view()[target as int],
+            final(self).roots_snapshots_view() == old(self).roots_snapshots_view()
+                .subrange(0, target as int + 1),
+            final(self).parent_snapshots_view() == old(self).parent_snapshots_view()
+                .subrange(0, target as int + 1),
+            final(self).parent_depth_spec() == target as nat + 1,
+            final(self).parent_depth_spec() == final(self).rank_depth_spec(),
     {
-        if self.is_valid_token(&token)
-            && token.parent.frame_idx == token.rank.frame_idx
-        {
-            self.restore(token);
-            Ok(())
-        } else {
-            Err(crate::error::ContainerError::InvalidToken)
+        let ghost f = target as int;
+        let ghost snap_roots = self.roots_snapshots@[f];
+        let ghost snap_dist = self.dist_snapshots@[f];
+        proof {
+            reveal(uf_archive_agrees);
+            assert(uf_archive_agrees(old(self).roots_snapshots@, old(self).dist_snapshots@,
+                old(self).parent.snapshots_view(), old(self).rank.snapshots_view()));
+        }
+        self.parent.reset_frame(target);
+        self.rank.reset_frame(target);
+        if PROOFS {
+            match (&mut self.parent_proof, &mut self.justification) {
+                (Some(pp), Some(j)) => {
+                    pp.reset_frame(target);
+                    j.reset_frame(target);
+                }
+                _ => crate::guard::refuse(
+                    "UnionFind::reset_frames: proof-column shape does not match the build"),
+            }
+        }
+        self.roots = Ghost(snap_roots);
+        self.dist = Ghost(snap_dist);
+        self.roots_snapshots = Ghost(self.roots_snapshots@.subrange(0, f + 1));
+        self.dist_snapshots = Ghost(self.dist_snapshots@.subrange(0, f + 1));
+        proof {
+            if PROOFS {
+                reveal(uf_proof_archive_agrees);
+                let opps = old(self).parent_proof->Some_0.snapshots_view();
+                let ojs = old(self).justification->Some_0.snapshots_view();
+                assert(uf_proof_archive_agrees(
+                    old(self).parent.snapshots_view(), opps, ojs));
+                let pps = self.parent_proof->Some_0.snapshots_view();
+                let js = self.justification->Some_0.snapshots_view();
+                // restored views are frame f's; the archive equates their
+                // lengths with the fast parent's at every frame.
+                assert(self.parent_proof->Some_0.view() == opps[f]);
+                assert(self.justification->Some_0.view() == ojs[f]);
+                assert(opps[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert(ojs[f].len() == old(self).parent.snapshots_view()[f].len());
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] pps[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(pps[k] == opps[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                    implies (#[trigger] js[k]).len()
+                        == self.parent.snapshots_view()[k].len() by {
+                    assert(js[k] == ojs[k]);
+                    assert(self.parent.snapshots_view()[k]
+                        == old(self).parent.snapshots_view()[k]);
+                }
+                assert(uf_proof_archive_agrees(
+                    self.parent.snapshots_view(), pps, js));
+            }
+            reveal(uf_archive_agrees);
+            assert(uf_model_wf(old(self).parent.snapshots_view()[f], snap_roots, snap_dist));
+            assert(self.parent_view() == old(self).parent.snapshots_view()[f]);
+            assert(self.rank_view() == old(self).rank.snapshots_view()[f]);
+            assert(self.parent.snapshots_view()
+                =~= old(self).parent.snapshots_view().subrange(0, f + 1));
+            assert(self.rank.snapshots_view()
+                =~= old(self).rank.snapshots_view().subrange(0, f + 1));
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies uf_model_wf(#[trigger] self.parent.snapshots_view()[k],
+                    self.roots_snapshots@[k], self.dist_snapshots@[k]) by {
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+                assert(self.roots_snapshots@[k] == old(self).roots_snapshots@[k]);
+                assert(self.dist_snapshots@[k] == old(self).dist_snapshots@[k]);
+            }
+            assert forall|k: int| 0 <= k < self.parent.snapshots_view().len()
+                implies (#[trigger] self.rank.snapshots_view()[k]).len()
+                    == self.parent.snapshots_view()[k].len() by {
+                assert(self.rank.snapshots_view()[k] == old(self).rank.snapshots_view()[k]);
+                assert(self.parent.snapshots_view()[k]
+                    == old(self).parent.snapshots_view()[k]);
+            }
+            assert(uf_archive_agrees(self.roots_snapshots@, self.dist_snapshots@,
+                self.parent.snapshots_view(), self.rank.snapshots_view()));
         }
     }
+
+
 }
 
 /// The self-parent-is-root clause, named so `assert forall` blocks can state
@@ -1511,15 +1484,20 @@ impl<T: DenseId, J: Copy> ProofBuf<T, J> {
     }
 }
 
-impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool> UnionFind<T, J, TRACK, PROOFS>
+impl<T: DenseId, J, const TRACK: bool, const PROOFS: bool, P> UnionFind<T, J, TRACK, PROOFS, P>
 where
     J: crate::tagged::Tagged + Copy + core::default::Default,
+    P: TaggedFamily<T, T::Index, TRACK>
+        + TaggedFamily<u8, T::Index, TRACK>
+        + TaggedFamily<J, T::Index, TRACK>,
 {
     /// Read-only proof-parent column for batch proof indexing.
     ///
     /// `None` when `PROOFS = false`. A successful justified union or restore
     /// invalidates any index derived from this forest.
-    pub fn proof_parent(&self) -> Option<&SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>> {
+    pub fn proof_parent(
+        &self,
+    ) -> Option<&SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>> {
         self.parent_proof.as_ref()
     }
 
@@ -1560,8 +1538,8 @@ where
     /// Reverse the parent_proof path from `x` to its root, making `x` the
     /// new root (production's algorithm verbatim).
     fn reroot_proof(
-        pp: &mut SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
-        j: &mut SpVec<J, T::Index, InlineStore<J, T::Index>, TRACK>,
+        pp: &mut SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>,
+        j: &mut SpVec<J, T::Index, <P as TaggedFamily<J, T::Index, TRACK>>::Store, TRACK>,
         x: T,
     ) {
         let mut path = vec![x];
@@ -1667,7 +1645,7 @@ where
     }
 
     fn walk_to_root(
-        pp: &SpVec<T, T::Index, InlineStore<T, T::Index>, TRACK>,
+        pp: &SpVec<T, T::Index, <P as TaggedFamily<T, T::Index, TRACK>>::Store, TRACK>,
         x: T,
         path: &mut Vec<T>,
     ) {
@@ -1681,18 +1659,6 @@ where
             path.push(p);
             cur = p;
         }
-    }
-}
-
-// prod-parity: manual `Debug` (composes the column tokens).
-impl core::fmt::Debug for UnionFindToken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("UnionFindToken")
-            .field("parent", &self.parent)
-            .field("rank", &self.rank)
-            .field("parent_proof", &self.parent_proof)
-            .field("justification", &self.justification)
-            .finish()
     }
 }
 

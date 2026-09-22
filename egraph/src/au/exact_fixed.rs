@@ -118,6 +118,7 @@ fn build_graph<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Option<PairGraph<Cfg>>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut graph = PairGraph::new(left, right);
     let mut cache: ActionCache<Cfg::O, Cfg::Au, Cfg::M> =
@@ -218,6 +219,7 @@ fn structural_size_bound<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
 ) -> u128
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     action
         .children
@@ -257,6 +259,7 @@ fn transport_size_bound<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
 ) -> Option<u128>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let cost = action
         .cells
@@ -290,6 +293,7 @@ fn structural_term<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> <Cfg::Au as AuIds>::Term
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let children: Vec<_> = action
         .children
@@ -332,6 +336,7 @@ pub(crate) fn run_in<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>
 ) -> Result<FixedExact<<Cfg::Au as AuIds>::Term>, super::AuError>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     snap.validate_finite_from(left)?;
     snap.validate_finite_from(right)?;
@@ -484,6 +489,7 @@ pub(crate) fn run<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 >
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut pool = TermPool::new();
     let result = run_in(snap, &mut pool, left, right, deadline, pruning, None)?;

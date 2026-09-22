@@ -7,7 +7,8 @@
 //! (production `Map` collides with `vstd::map::Map`). Gated on
 //! `compat-composites`.
 use proptest::prelude::*;
-use semi_persistent_containers_verus::{MapToken, ShrinkPolicy, SpMap};
+use semi_persistent_containers_verus::history::GroupToken;
+use semi_persistent_containers_verus::{ShrinkPolicy, SpMap};
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -28,9 +29,12 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut m = SpMap::<String, u32, usize, true>::new();
+    let mut m =
+        semi_persistent_containers_verus::group::ForkHistory::new(
+            SpMap::<String, u32, usize, true>::new(),
+        );
     let mut oracle = std::collections::HashMap::<String, u32>::new();
-    let mut snapshots: Vec<(MapToken, std::collections::HashMap<String, u32>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, std::collections::HashMap<String, u32>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -48,7 +52,7 @@ fn run_ops(ops: Vec<Op>) {
                     continue;
                 }
                 let token = m
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone()));
             }
@@ -58,7 +62,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                m.try_restore(token).expect("compat: own live token");
+                assert!(m.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }
@@ -131,7 +135,9 @@ mod literal_keys {
     }
 
     fn exercise<K: Clone + Hash + Eq + std::fmt::Debug>(keys: Vec<K>) {
-        let mut m: SpMap<K, u64, usize, true> = SpMap::new();
+        let mut m: semi_persistent_containers_verus::group::ForkHistory<
+            SpMap<K, u64, usize, true>,
+        > = semi_persistent_containers_verus::group::ForkHistory::new(SpMap::new());
         let mut oracle: HashMap<K, u64> = HashMap::new();
 
         for (i, k) in keys.iter().enumerate() {
@@ -140,7 +146,7 @@ mod literal_keys {
         }
         let snap = oracle.clone();
         let tok = m
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("compat: depth in bounds");
         for (i, k) in keys.iter().enumerate().filter(|(i, _)| i % 2 == 0) {
             m.try_insert(k.clone(), (i as u64) + 1000)
@@ -155,7 +161,7 @@ mod literal_keys {
                 "post-overwrite mismatch for {k:?}"
             );
         }
-        m.try_restore(tok).expect("compat: own live token");
+        assert!(m.restore(tok), "compat: own live token");
         assert_eq!(m.len(), snap.len());
         for (k, v) in &snap {
             assert_eq!(m.get_by_key(k), Some(v), "post-restore mismatch for {k:?}");
@@ -459,7 +465,9 @@ mod canonical_key_model {
     /// withdrawn OrderedFloat axiom) now legitimately collapse to ONE key.
     #[test]
     fn canonical_keys_spmap_oracle() {
-        let mut m: SpMap<CanonicalF64, u64, usize, true> = SpMap::new();
+        let mut m: semi_persistent_containers_verus::group::ForkHistory<
+            SpMap<CanonicalF64, u64, usize, true>,
+        > = semi_persistent_containers_verus::group::ForkHistory::new(SpMap::new());
         let mut oracle: std::collections::HashMap<CanonicalF64, u64> =
             std::collections::HashMap::new();
 
@@ -485,12 +493,12 @@ mod canonical_key_model {
         assert_eq!(m.len(), oracle.len());
 
         let tok = m
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("compat: depth in bounds");
         m.try_insert(CanonicalF64::new(f64::NAN), 999)
             .expect("compat: capacity");
         assert_eq!(m.get_by_key(&CanonicalF64::new(-f64::NAN)), Some(&999));
-        m.try_restore(tok).expect("compat: own live token");
+        assert!(m.restore(tok), "compat: own live token");
         for (k, v) in &oracle {
             assert_eq!(m.get_by_key(k), Some(v), "post-restore mismatch");
         }

@@ -63,23 +63,25 @@ use vstd::prelude::*;
 
 verus! {
 
-/// Opaque per-`Vec` identity. The runtime payload is a `u64` (production used
-/// u32; widened for uniqueness headroom -- see the module doc, and note the
-/// runtime no-wrap trap is opt-in via `strict-id-exhaustion`, not
-/// unconditional); the ghost `id` is its abstract value, used in specs.
-#[verifier::external_body]
+/// Per-`Vec` identity. The runtime payload is a `u64` (production used u32;
+/// widened for uniqueness headroom -- see the module doc, and note the runtime
+/// no-wrap trap is opt-in via `strict-id-exhaustion`, not unconditional); the
+/// ghost `id` is its abstract value, used in specs. Transparent inside the
+/// crate and opaque to consumers (the field is `pub(crate)`), so equality is
+/// proved rather than trusted.
 #[derive(Clone, Copy)]
 pub struct ContainerId {
-    raw: u64,
+    pub(crate) raw: u64,
 }
 
 impl ContainerId {
-    /// Ghost projection: the abstract identity.
-    pub uninterp spec fn id(self) -> nat;
+    /// Ghost projection: the abstract identity is the payload.
+    pub open(crate) spec fn id(self) -> nat {
+        self.raw as nat
+    }
 
     /// Exec equality, reflecting ghost-id equality exactly. This is the only
     /// observation `restore`/`is_valid_token` make on a `ContainerId`.
-    #[verifier::external_body]
     #[inline(always)]
     pub fn eq(self, other: ContainerId) -> (b: bool)
         ensures b == (self.id() == other.id())

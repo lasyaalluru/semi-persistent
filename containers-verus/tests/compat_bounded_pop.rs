@@ -9,20 +9,21 @@
 //! `resize_default` regrow.
 //!
 //! Gated on `compat-core`.
+use semi_persistent_containers_verus::group::ForkHistory;
 use semi_persistent_containers_verus::{ShrinkPolicy, VecI};
 
 /// The headline DoS regression: after a `mark`, hammering pop+push on a slot
 /// inside the marked region must NOT grow the diff log with iteration count.
 #[test]
 fn pop_push_loop_keeps_diff_log_bounded() {
-    let mut v: VecI<u32, u32, true> = VecI::new();
+    let mut v: ForkHistory<VecI<u32, u32, true>> = ForkHistory::new(VecI::new());
     const SAVED_LEN: usize = 8;
     for i in 0..SAVED_LEN as u32 {
         v.try_push(i).expect("compat: within capacity");
     }
 
     let _token = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("compat: depth in bounds");
     assert_eq!(v.diff_log_len(), 0, "fresh frame starts with an empty log");
 
@@ -53,14 +54,14 @@ fn pop_push_loop_keeps_diff_log_bounded() {
 /// through the `resize_default` regrow path.
 #[test]
 fn restore_roundtrips_after_popping_marked_region() {
-    let mut v: VecI<u32, u32, true> = VecI::new();
+    let mut v: ForkHistory<VecI<u32, u32, true>> = ForkHistory::new(VecI::new());
     let snapshot: Vec<u32> = (10..20).collect();
     for &x in &snapshot {
         v.try_push(x).expect("compat: within capacity");
     }
 
     let token = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("compat: depth in bounds");
 
     // Pop the entire marked region (and then some growth past it), exercising
@@ -74,7 +75,7 @@ fn restore_roundtrips_after_popping_marked_region() {
         v.try_push(x).expect("compat: within capacity");
     }
 
-    v.try_restore(token).expect("compat: own live token");
+    assert!(v.restore(token), "compat: own live token");
 
     // The popped region must be regrown by resize_default and then fully
     // overwritten by the captured diffs: view() equals the pre-mark snapshot.
@@ -94,12 +95,12 @@ fn restore_roundtrips_after_popping_marked_region() {
 /// preserves first-write-wins.
 #[test]
 fn set_after_reentry_does_not_double_capture() {
-    let mut v: VecI<u32, u32, true> = VecI::new();
+    let mut v: ForkHistory<VecI<u32, u32, true>> = ForkHistory::new(VecI::new());
     for i in 0..4u32 {
         v.try_push(i).expect("compat: within capacity");
     }
     let token = v
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("compat: depth in bounds");
 
     // Pop slot 3 (captures it once), then push a new value back into slot 3.
@@ -117,7 +118,7 @@ fn set_after_reentry_does_not_double_capture() {
     );
 
     // And restore still round-trips to the pre-mark state.
-    v.try_restore(token).expect("compat: own live token");
+    assert!(v.restore(token), "compat: own live token");
     let view = v.view_handle();
     assert_eq!(view.len(), 4);
     for i in 0..4u32 {

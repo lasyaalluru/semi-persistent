@@ -6,7 +6,8 @@
 //! signature. Gated on `compat-composites` +
 //! `compat-ids`.
 use proptest::prelude::*;
-use semi_persistent_containers_verus::{ListArena, ListArenaToken, ShrinkPolicy};
+use semi_persistent_containers_verus::history::GroupToken;
+use semi_persistent_containers_verus::{ListArena, ShrinkPolicy};
 
 semi_persistent_containers_verus::define_id31! { pub struct TestElem / StoredTestElem, "e"; }
 semi_persistent_containers_verus::define_id31! { pub struct ListId / StoredListId, "l"; }
@@ -61,10 +62,10 @@ fn collect(arena: &Arena, list: ListId) -> Vec<u32> {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut arena = Arena::new();
+    let mut arena = semi_persistent_containers_verus::group::ForkHistory::new(Arena::new());
     let mut oracle = Oracle::new();
     let mut list_ids: Vec<ListId> = Vec::new();
-    let mut snapshots: Vec<(ListArenaToken, Oracle, Vec<ListId>)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Oracle, Vec<ListId>)> = Vec::new();
 
     for op in ops {
         match op {
@@ -97,7 +98,7 @@ fn run_ops(ops: Vec<Op>) {
                     continue;
                 }
                 let token = arena
-                    .try_mark(ShrinkPolicy::Never)
+                    .mark(ShrinkPolicy::Never)
                     .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone(), list_ids.clone()));
             }
@@ -107,7 +108,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap_oracle, snap_ids) = snapshots[idx].clone();
-                arena.try_restore(token).expect("compat: own live token");
+                assert!(arena.restore(token), "compat: own live token");
                 oracle = snap_oracle;
                 list_ids = snap_ids;
                 snapshots.truncate(idx);

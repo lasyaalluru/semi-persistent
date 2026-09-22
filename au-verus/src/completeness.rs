@@ -63,7 +63,7 @@ pub struct Model {
 /// Both directions are assumed: this is the meaning of the e-graph.
 pub open spec fn model_wf(m: Model) -> bool {
     &&& forall|c: ClassId, t: Term| #[trigger] (m.represents)(c, t) ==> exists|mem: Member|
-            (m.members)(c).contains(mem) && mem.op == t.op && mem.kids.len() == t.kids.len()
+            (m.members)(c).contains(mem) && mem.op == t.op && (#[trigger] mem.kids.len()) == t.kids.len()
             && forall|i: int| 0 <= i < mem.kids.len() ==> (m.represents)(mem.kids[i], t.kids[i])
     &&& forall|c: ClassId, t: Term| #[trigger] (m.represents)(c, t) ==> (m.bs)(c) <= crate::terms::term_size(t)
     // The other direction of the meaning: a member plus a term from each child
@@ -262,10 +262,10 @@ pub proof fn lemma_recurrence_below_every_pair(
     if s.op == t.op && s.kids.len() == t.kids.len() {
         // Both classes have a member matching the term's root, by `model_wf`.
         let ma = choose|ma: Member|
-            (m.members)(a).contains(ma) && ma.op == s.op && ma.kids.len() == s.kids.len()
+            (m.members)(a).contains(ma) && ma.op == s.op && (#[trigger] ma.kids.len()) == s.kids.len()
             && forall|i: int| 0 <= i < ma.kids.len() ==> (m.represents)(ma.kids[i], s.kids[i]);
         let mb = choose|mb: Member|
-            (m.members)(b).contains(mb) && mb.op == t.op && mb.kids.len() == t.kids.len()
+            (m.members)(b).contains(mb) && mb.op == t.op && (#[trigger] mb.kids.len()) == t.kids.len()
             && forall|i: int| 0 <= i < mb.kids.len() ==> (m.represents)(mb.kids[i], t.kids[i]);
         lemma_kids_below(m, d, ma.kids, mb.kids, s.kids, t.kids);
         crate::objective::lemma_add_monotone(

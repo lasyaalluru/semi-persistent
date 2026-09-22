@@ -11,7 +11,8 @@
 
 use crate::canon::{MSetCanon, VarCanon};
 use crate::config::EGraphConfig;
-use crate::containers::{DenseId, MapToken, ShrinkPolicy, SpMap};
+use crate::containers::group::Member;
+use crate::containers::{AppendOnlyVec, DenseId, IndexLike, ShrinkPolicy, SpUniqueMap};
 use crate::egraph::EGraph;
 use crate::id::ENodeKind;
 use crate::literal::LitVal;
@@ -79,7 +80,7 @@ pub const DEFAULT_A_MAX: usize = 32;
 
 /// The action cache: maps class pair `(l, r)` to a list of actions.
 /// Semi-persistent: the `index` map (AppendOnlyVec + SpMap) is append-only and
-/// provides branch genealogy for tokens. The `values` vec grows in lockstep
+/// provides branch genealogy for tokens. The `values` column grows in lockstep
 /// and is truncated on restore. Actions are deterministic from the immutable
 /// snapshot, so re-derivation after restore is cheap (cache is a performance
 /// optimization, not a correctness requirement).
@@ -88,26 +89,22 @@ pub struct ActionCache<O: DenseId, A: AuIds = AuIds31, M: MultiplicityLike = Mul
     ///
     /// Index word `A::Index`: the map's log positions are what the `A::Action`s are
     /// minted from, and `A::Action::Index` is that word.
-    index: SpMap<(A::Class, A::Class), A::Action, A::Index>,
-    /// Action lists, indexed by the map's stored value.
-    values: Vec<Vec<Action<O, A, M>>>,
+    index: SpUniqueMap<(A::Class, A::Class), A::Action, A::Index>,
+    /// Action lists, indexed by the map's stored value. An append-only column:
+    /// ids are positions, an entry is never overwritten, and a rollback is
+    /// exactly "drop the suffix", which is what `AppendOnlyVec` proves. Its
+    /// element need not be `Copy` (no diff is recorded, only a length per
+    /// frame), so the action lists ride in it as they are.
+    values: AppendOnlyVec<Vec<Action<O, A, M>>, A::Index>,
     a_max: usize,
     include_ac: bool,
-}
-
-/// Token for restoring an `ActionCache`. Wraps the SpMap's token, which
-/// carries container identity and branch genealogy.
-#[derive(Clone, Copy, Debug)]
-pub struct ActionCacheToken {
-    index: MapToken,
-    values_len: usize,
 }
 
 impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     pub fn new(a_max: usize) -> Self {
         ActionCache {
-            index: SpMap::new(),
-            values: Vec::new(),
+            index: SpUniqueMap::new(),
+            values: AppendOnlyVec::new(),
             a_max,
             include_ac: true,
         }
@@ -117,8 +114,8 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
     /// Used by the exact solver, which handles those operators by transport.
     pub fn without_ac_actions(a_max: usize) -> Self {
         ActionCache {
-            index: SpMap::new(),
-            values: Vec::new(),
+            index: SpUniqueMap::new(),
+            values: AppendOnlyVec::new(),
             a_max,
             include_ac: false,
         }
@@ -132,17 +129,50 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
         let key = (l, r);
         self.index.id_of(&key).map(|log_idx| {
             let &idx = self.index.get_val(log_idx);
-            self.values[idx.to_usize()].as_slice()
+            self.values
+                .get(A::Index::try_from_usize(idx.to_usize()).expect("id within the index word"))
+                .as_slice()
         })
     }
 
+    /// The action list for `(l, r)`, computing and caching it on a miss: one
+    /// hash of the pair, and `f` runs only when the pair is new.
+    pub fn get_or_insert_with(
+        &mut self,
+        l: A::Class,
+        r: A::Class,
+        f: impl FnOnce() -> Vec<Action<O, A, M>>,
+    ) -> &[Action<O, A, M>] {
+        let values = &mut self.values;
+        let (log_idx, _fresh) = self
+            .index
+            .try_intern_with(
+                (l, r),
+                super::Lazy(|| {
+                    // See `insert` for why the column refuses rather than masks.
+                    let idx = crate::id::id_at::<A::Action>(values.len().as_usize());
+                    values
+                        .try_push(f())
+                        .expect("AU arena sized by its index word");
+                    idx
+                }),
+            )
+            .expect("AU arena sized by its index word");
+        let &idx = self.index.get_val(log_idx);
+        self.values
+            .get(A::Index::try_from_usize(idx.to_usize()).expect("id within the index word"))
+            .as_slice()
+    }
+
     pub fn insert(&mut self, l: A::Class, r: A::Class, actions: Vec<Action<O, A, M>>) {
-        // Checked: `values` is a plain `Vec`, so nothing but this call stands between the
-        // action-list count and the `A::Action` id space. Masking would hand the new list
-        // the id of an older one, and `get` would then serve the wrong action list for a
-        // class pair — a search that expands moves belonging to a different subproblem.
-        let idx = crate::id::id_at::<A::Action>(self.values.len());
-        self.values.push(actions);
+        // The column refuses at its index word rather than masking: masking would
+        // hand the new list the id of an older one, and `get` would then serve the
+        // wrong action list for a class pair — a search that expands moves
+        // belonging to a different subproblem.
+        let idx = crate::id::id_at::<A::Action>(self.values.len().as_usize());
+        self.values
+            .try_push(actions)
+            .expect("AU arena sized by its index word");
         self.index
             .try_insert((l, r), idx)
             .expect("AU arena sized by its index word");
@@ -152,26 +182,31 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> ActionCache<O, A, M> {
         self.a_max
     }
 
-    pub fn mark(&mut self) -> ActionCacheToken {
-        ActionCacheToken {
-            index: self
-                .index
-                .try_mark(ShrinkPolicy::Never)
-                .expect("mark: depth bounded by the search driver"),
-            values_len: self.values.len(),
-        }
+    // Structural frame operations: the typed-group member protocol (design doc
+    // 10). No tokens — the session's `History` is the only token authority, and
+    // it drives these through one forwarding view.
+    pub fn push_frame(&mut self, shrink: ShrinkPolicy) {
+        Member::push_frame(&mut self.index, shrink);
+        Member::push_frame(&mut self.values, shrink);
     }
 
-    /// Is this token restorable right now (same instance, live branch)?
-    pub fn is_valid_token(&self, token: &ActionCacheToken) -> bool {
-        self.index.is_valid_token(&token.index)
+    pub fn reset_frame(&mut self, depth: usize) {
+        Member::reset_frame(&mut self.index, depth);
+        Member::reset_frame(&mut self.values, depth);
     }
 
-    pub fn restore(&mut self, token: ActionCacheToken) {
-        self.index
-            .try_restore(token.index)
-            .expect("restore: token minted by this container's own mark");
-        self.values.truncate(token.values_len);
+    pub fn restore_frame(&mut self, depth: usize) {
+        Member::restore_frame(&mut self.index, depth);
+        Member::restore_frame(&mut self.values, depth);
+    }
+
+    pub fn pop_frame(&mut self) {
+        Member::pop_frame(&mut self.index);
+        Member::pop_frame(&mut self.values);
+    }
+
+    pub fn frame_depth(&self) -> usize {
+        Member::depth_exec(&self.index)
     }
 }
 
@@ -183,23 +218,43 @@ impl<O: DenseId, A: AuIds, M: MultiplicityLike> Default for ActionCache<O, A, M>
 
 /// Generate all actions for a class pair `(l, r)` by scanning their common operators.
 /// Actions are NOT cycle-filtered here; that is done at the OR-node level.
-pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
+pub fn generate_actions<'c, Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
     snap: &AuSnapshot<Cfg, L, T, P>,
-    cache: &mut ActionCache<Cfg::O, Cfg::Au, Cfg::M>,
+    cache: &'c mut ActionCache<Cfg::O, Cfg::Au, Cfg::M>,
     l: ClassOf<Cfg>,
     r: ClassOf<Cfg>,
-) where
+) -> &'c [Action<Cfg::O, Cfg::Au, Cfg::M>]
+where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
-    if cache.get(l, r).is_some() {
-        return;
-    }
+    // One hash of the class pair: the cache decides membership, computes the
+    // list only on a miss, and hands back the slice either way. Written as a
+    // membership check, an insert and a read-back this hashed the pair three
+    // times per visit.
+    let a_max = cache.a_max();
+    let include_ac = cache.include_ac();
+    cache.get_or_insert_with(l, r, || {
+        dedup(compute_actions(snap, a_max, include_ac, l, r))
+    })
+}
 
+/// The action list for `(l, r)` before deduplication: scan the members' common
+/// operators and pair them up per operator class.
+fn compute_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
+    snap: &AuSnapshot<Cfg, L, T, P>,
+    a_max: usize,
+    include_ac: bool,
+    l: ClassOf<Cfg>,
+    r: ClassOf<Cfg>,
+) -> Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>
+where
+    MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
+{
     let eg = snap.egraph();
     let members_l = snap.members(l);
     let members_r = snap.members(r);
-    let a_max = cache.a_max();
-    let include_ac = cache.include_ac();
 
     let mut actions: Vec<Action<Cfg::O, Cfg::Au, Cfg::M>> = Vec::new();
 
@@ -300,8 +355,7 @@ pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     if !include_ac {
         // The exact solver handles all AC/ACI pairs (including identity
         // expansion) through the transport path; skip materialization.
-        dedup_and_insert(cache, l, r, actions);
-        return;
+        return actions;
     }
     for &(op_id, _) in members_l.iter() {
         let kind = eg.ops().info(op_id).canon_class();
@@ -433,20 +487,17 @@ pub fn generate_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
         }
     }
 
-    dedup_and_insert(cache, l, r, actions);
+    actions
 }
 
 /// Deduplicate actions by operator plus canonical (left, right, count)
-/// signature and insert into the cache. Rewrite-derived equivalent members can produce identical
+/// signature. Rewrite-derived equivalent members can produce identical
 /// actions from different (l_node, r_node) pairs; duplicates would surface as
 /// separate statistics edges and bias MCGS selection toward the duplicated
 /// action.
-fn dedup_and_insert<O: DenseId, A: AuIds, M: MultiplicityLike>(
-    cache: &mut ActionCache<O, A, M>,
-    l: A::Class,
-    r: A::Class,
+fn dedup<O: DenseId, A: AuIds, M: MultiplicityLike>(
     mut actions: Vec<Action<O, A, M>>,
-) {
+) -> Vec<Action<O, A, M>> {
     // The signature holds the pair's own types. Widening the two class ids to `usize` to
     // key a hash set bought nothing — dense ids are already `Hash + Ord` — and cost real
     // bytes in a set that is rebuilt for every class pair the search visits: at the 31-bit
@@ -466,7 +517,7 @@ fn dedup_and_insert<O: DenseId, A: AuIds, M: MultiplicityLike>(
         sig.sort_unstable();
         seen.insert((action.op, sig))
     });
-    cache.insert(l, r, actions);
+    actions
 }
 
 /// Ordered operators (fixed arity): positional zip of same-arity member pairs (§3.4.1).
@@ -479,6 +530,7 @@ fn generate_ordered_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let l_arity = eg.for_each_child(l_id, |_, _| {});
@@ -520,6 +572,7 @@ fn generate_seq_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     // Same logic as ordered: positional zip only when lengths match.
     generate_ordered_actions(snap, eg, op, l_nodes, r_nodes, actions);
@@ -536,6 +589,7 @@ fn generate_spair_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: 
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let mut l_children = [<ClassOf<Cfg>>::default(); 2];
@@ -608,6 +662,7 @@ fn generate_mset_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: b
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let identity_class = snap.op_identity_class(op);
     let mut l_mset_buf: Vec<(Cfg::G, Cfg::M)> = Vec::new();
@@ -663,6 +718,7 @@ fn generate_set_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let identity_class = snap.op_identity_class(op);
 
@@ -710,6 +766,7 @@ fn generate_lit_actions<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bo
     actions: &mut Vec<Action<Cfg::O, Cfg::Au, Cfg::M>>,
 ) where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     for &(_, l_id) in l_nodes {
         let l_val = eg.get_lit_val_id(l_id);
@@ -745,6 +802,7 @@ fn mset_counts<Cfg: EGraphConfig, L: LitVal, const T: bool, const P: bool>(
 ) -> Option<(Vec<(ClassOf<Cfg>, Cfg::M)>, Cfg::M)>
 where
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let mut out: Vec<(ClassOf<Cfg>, Cfg::M)> = Vec::with_capacity(buf.len());
     let mut total = Cfg::M::ZERO;

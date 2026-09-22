@@ -12,8 +12,8 @@ for each, why it is trusted rather than proved.*
 
 | configuration | `external_body` markers | axiom fns |
 |---|---|---|
-| default features | **27** (3 structs + 24 functions) | **1** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom) |
-| `literal-types` | **32** (adds 5 opaque type registrations) | **6** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
+| default features | **12** (2 opaque type registrations + 10 functions) | **4** (`builds_valid_hashers::<IndexHasher>`: SpMap's index hasher; mirrors vstd's shipped `RandomState` axiom; plus `obeys_key_model` for the `DenseId31`, `DenseId63` and `DenseUsize` index newtypes, §3.5 D-index) — `define_id*!` additionally emits one such axiom per consumer-defined id type |
+| `literal-types` | **17** (adds 5 opaque type registrations) | **9** (adds `obeys_key_model` for BigInt, BigUint, CanonicalF64, CanonicalRational, BitsF64) |
 
 *Counts re-derived by grepping `#[verifier::external_body]` and splitting
 on the `literal-types` gate (`external_specs.rs` is the only gated
@@ -59,6 +59,24 @@ restates a slice copy whose effect its postcondition pins element-by-element.*
 
 [Design Table of Contents](00-table-of-contents.md)
 
+## Rules of the perimeter
+
+These held for the whole proof drive and hold for every change inside
+`verus!`:
+
+- No `admit`, `assume` or `assume_specification` anywhere in the verified
+  crates (a CI gate greps for them), and no contract-bearing `external_body`
+  added to hide an obligation. The trusted count below is pinned in CI; a
+  change that moves it updates this chapter and the pin in the same commit.
+- Public contracts are never weakened to make a proof go through, and the
+  public API stays total (the partial-API gate: no public function with a
+  precondition beyond `wf`).
+- `containers/`, the unverified implementation, is the differential and
+  performance oracle and is not modified; every runtime property test and
+  every paired benchmark compares against it as it was.
+- Solver limits are not raised to admit a proof; a proof that exceeds them is
+  restructured.
+
 ## 0. What `external_body` means
 
 `#[verifier::external_body]` tells Verus: *do not look inside this function; take
@@ -72,13 +90,122 @@ not logically weaker magic; a false postcondition would still make the
 verification unsound.
 
 A healthy verified crate drives `external_body` down to the irreducible
-boundary. This crate has 27 default-build markers: 3 ContainerId + 11
-capacity/byte diagnostics and shrink helpers + the 5 `bplus_layout`
-bounds-elided array/slice primitives + `check_precondition` + `refuse` +
-`clone_key_exact` + `values_equal` + the debug ring-walk +
-`white_box_head` + the `ExIndexHasher` and `ExFoldHasher` registrations
-(5 more behind `literal-types`, for 32). The casts that were *eliminated* (the
-`IndexLike`/`DenseId` integer casts) are described in §3.
+boundary. The current final checkpoint has 12 default-build markers: 2 opaque
+type registrations (the two hasher types, named in specs, no semantics assumed)
+and 10 functions. They are, in full:
+
+| Item | Why it is irreducible |
+|---|---|
+| `container_id::ContainerId::new` | mints an id by atomic increment; the counter is global mutable state |
+| `hasher_spec::ExIndexHasher`, `ExFoldHasher` | external type specifications: they let the hasher types be NAMED in specs |
+| `compression_config::env_compress_default`, `env_diff_store_kind` | read the environment from inside verified constructors; no spec content (every branch carries the same contract) |
+| `vec::log_shrink_capacity`, `append_only_vec::shrink_aov_capacity`, `parallel_store::shrink_vec_capacity` | capacity-only shrink; vstd models neither `Vec::capacity` nor `shrink_to`, and the contract is "the view is unchanged" |
+| `parallel_store::data_capacity_bits` | reads `Vec::capacity`, same gap, read-only |
+| `std_sort::sort_pairs_by_index` | std's `sort_unstable_by_key` under its documented contract; vstd ships no sort specification |
+| `guard::refuse` | the divergence every total refusal ends in; the panic machinery is unmodeled |
+| `map::clone_key_exact` | vstd's hash-table key model requires the clone to be identical, which is not provable for a generic `K: Clone` |
+
+Twenty-two items left this list on 2026-09-18, in two different ways, and the
+distinction matters when reading the ledger.
+
+**Twelve were stratified out of the perimeter** and are now neither proved nor
+trusted, exactly as the byte reporters were (§2a): the ten
+compression-statistics and shadow-logging functions, `list::white_box_head` and
+`parallel::par_sum_canary`. Nothing verified calls them; they observe frames and
+emit measurements.
+
+**Ten were proved.** The five B+ tree node-layout primitives dropped their
+`unsafe` bodies: `arr_get`, `slice_get` and `arr_set` now go through vstd's
+specified array and slice accessors, `sel_usize` is an ordinary branch, and
+`arr_shift_up` is a verified descending loop where a trusted `memmove` used to
+be. Note honestly what moved where: the vstd accessors are themselves
+`external_body` *in vstd*, so this crate stops trusting its own unchecked reads
+and relies on the platform specification instead, and the bounds checks come
+back. The measured price (2026-09-18, paired against the previous commit):
+`bplus/from_sorted_only` 1.11–1.12, `bplus/scan_only` 1.08–1.10,
+`bplus/from_sorted_then_scan` 1.06–1.07, every insertion, split and cursor case
+at parity — the const-generic array checks fold away, the runtime-length slice
+check in the bulk loader does not. All of those cases remain faster than the
+unverified implementation in the same binary, so the parity rule is unaffected,
+and the margin given back was ours.
+
+`ContainerId` became transparent inside the crate (its field is `pub(crate)`, so
+it stays opaque to consumers), which let its equality be proved and retired the
+struct's own marker. `sparse_set::values_equal` now calls vstd's external trait
+specification for `PartialEq`, whose `eq` promises `obeys_eq_spec() ==> r ==
+eq_spec(..)`; this crate never establishes `obeys_eq_spec` for a caller's `T`,
+so the result stays an unconstrained bool — which is what the scan wanted, now
+without trust. `guard::check_precondition` diverges through `refuse` instead of
+panicking itself. And `diff_compress::choose_mode` is verified end to end: its
+statistics pass is two linear hash-set passes (vstd supplies the key model for
+`usize`) with a deliberately trivial contract, since only sizes depend on the
+counts.
+
+The permanent groups below remain the
+intended boundary; temporary three-tier Vec scaffolds are additionally owned by
+`doc/tasks/three-tier-frame-architecture-goal.md` §8 and are removed milestone by
+milestone. `d21-exec` HEAD `44b8657` had 94 default markers before the first
+Hot-only proof milestone. That milestone added three parsing/runtime scaffolds
+(`ExRatio`, `retained_closed_prefix`, and `hot_frame_run_count`) and removed the
+pre-existing `Vec::with_store_policy` marker after proving policy construction,
+for 96 default markers. H1 additionally proves the three-segment
+`frame_saved_len_exec` dispatch and removes its marker. Retiring five unreachable
+legacy scaffolds (`cold_pairs_scaffold`, `frame_sort_order`,
+`cold_pools_shrink_scaffold`, `compress_all_hot`, and `restore_cold`) removes
+five more markers, yielding H1 counts of 90 default and 95 with
+`literal-types`. H2 verifies the public `Vec::push`, `Vec::pop`, and
+`Vec::set_index` wrappers through checked Hot-scope dispatch and removes those
+three markers, yielding H2 counts of 87 default and 92 with
+`literal-types`. H3 verifies explicit Defer marks for both shrink variants and
+removes the `push_frame_with_options` and `mark_with_options` markers, yielding
+H3 counts of 85 default and 90 with `literal-types`. H4 removes the
+public `restore_frame` marker and restricts the existing runtime restore marker
+to `runtime_restore_frame_fallback`, whose precondition excludes the checked
+all-Hot scope. This yields 84 default markers and 89 with `literal-types`.
+The all-Hot dispatch includes Inline fused clearing and Parallel pre-clearing.
+The Cold-run checkpoint removes the trusted default `restore_run` and its
+`set_raw_usize_scaffold` helper. Inline now proves a clamped, tag-preserving
+loop; DynStore dispatches to checked backend implementations. This yields
+82 default markers and 87 with `literal-types`. The reconstruction checkpoint
+then proves `runtime_begin_restore` after resizing and removes its marker,
+yielding 81 default markers and 86 with `literal-types`. Its checked reconstruction
+phase preserves all history fields and returns the target snapshot. Final
+history truncation and survivor promotion remain in the trusted fallback.
+The subsequent prefix checkpoint checks exact physical/canonical truncation
+and completes zero-target restore for every tier layout. The remaining
+`runtime_restore_frame_fallback` requires `target > 0`; its survivor promotion
+and final invariant remain trusted at that checkpoint. Counts there remain 81 + 5.
+The Cold-promotion checkpoint replaces that fallback with checked
+`restore_cold_survivor_checked`, covering both Hot and Trail destinations, and
+removes the now-unused trusted `runtime_promote_survivor`. Source decoding,
+Cold-prefix preservation, destination representation, shared-map equality and
+capture finalization are checked. Counts at that checkpoint are **79 default + 5 literal**;
+axiom counts are unchanged. Remaining all-tier mutation/mark and rollover
+scaffolds, plus derived/parallel composition obligations, are not discharged
+by the restore result.
+The canonical-capture checkpoint also checks the existing `push_frame` wrapper
+against its dispatcher contract, removing its redundant marker: **78 default
++ 5 literal**. The dispatcher still depends on the recorded trusted all-tier
+mark fallback; this does not discharge that implementation.
+The physical-capture checkpoint checks `runtime_capture` for both ingress
+disciplines, using actual DiffStore capture methods and preserving canonical
+history. Its marker is removed: **77 default + 5 literal**. General set, pop,
+push/regrowth and mark composition remain separate obligations.
+The following set checkpoint checks `runtime_set_fallback` by composing capture
+with the actual `set_raw` method. Pair, Cold and canonical preservation are
+proved for mixed histories; untracked flag behavior retains its original
+contract. Counts become **76 default + 5 literal**. Pop, push/regrowth and mark
+remain separate implementation obligations.
+The push/pop checkpoint discharges `runtime_push_fallback` and
+`runtime_pop_fallback`, preserving all-tier reconstruction and capture state.
+Trail regrowth restores its ghost membership through the existing store hook.
+Counts become **74 default + 5 literal**; all-tier mark and policy execution
+remain pending, as does complete production-interface instantiation.
+No new trusted body was introduced. The
+three-segment accessor, H1 extractor, Cold/ingress transfer lemmas, and
+`maybe_shrink` pass targeted verification; a clean full Vec-module query reports
+117 verified and 0 errors. The 1 + 5 feature-gated axiom counts are unchanged. The casts that were *eliminated* (the `IndexLike`/`DenseId` integer
+casts) are described in §3.
 
 The groups differ in kind, and the distinction is the point of this chapter:
 
@@ -107,6 +234,74 @@ The groups differ in kind, and the distinction is the point of this chapter:
 - **Group E is unverified glue**: `values_equal`, the debug-only ring walk,
   `ListHead::white_box_head`, and the ordinary-Rust delegation shims outside
   `verus!{}`.
+
+The Trail-dedupe checkpoint (2026-09-16) replaces the sort-based Trail
+first-capture selection with a left-to-right fold through a
+`HashSet<I, IndexHasher>` that writes each unique frame straight into the Hot
+pool. Checking that path removes six markers: `runtime_migrate_trail_count`,
+`runtime_migrate_trail`, `runtime_trail_shape`, `runtime_execute_trail_plan`,
+the closure-based `retained_closed_prefix` (now a checked tier-indexed
+function) and the opaque `ExRatio` registration (`Ratio` is now a Verus-native
+struct whose `accepts` is proved). This yields 68 default markers and 73 with
+`literal-types`. The membership set relies on vstd's shipped hash-table model:
+`obeys_key_model::<I>()` (vstd axioms for the primitive widths; three crate
+axioms for the id newtypes and one generated per `define_id*!` type, all over
+structural `raw` equality, §3.5 D-index) and the existing
+`axiom_index_hasher_builds_valid_hashers`. No sort contract is assumed on this
+path any more.
+
+The Hot-to-Cold checkpoint (2026-09-16) sorts each closed Hot frame in place
+in the Hot pool with std's unstable sort and encodes it straight from that slice,
+replacing the per-frame `to_vec` copies, the adaptive `Vec<Vec<(T, I)>>` Hot plan
+and the run-count scratch vector. The sort is the one new trusted item,
+`std_sort::sort_pairs_by_index` (group B, contract-carrying: std's documented
+`sort_unstable_by_key` behaviour, same multiset and non-decreasing key order,
+nothing outside the slice touched). Checking the migration removes five markers
+(`runtime_migrate_hot_count`, `runtime_migrate_hot`, `runtime_hot_shape`,
+`runtime_execute_hot_plan`, `hot_frame_run_count`), for 64 default markers and
+69 with `literal-types`. `diff_compress::sort_frame_by_index` now sorts its copy
+with the same contract instead of the former verified insertion sort, whose
+quadratic worst case was a runtime hazard; the contract of that function is
+unchanged.
+
+The policy-dispatch checkpoint (2026-09-16) checks the whole rollover dispatch
+above the migrations: `runtime_closed_history_bytes` (checked arithmetic with
+`guard::refuse` on overflow), `runtime_reclaim_adaptive_tier_capacities` (now a
+checked `shrink_vec_capacity` composition, so its former contract-free row 10a is
+retired), `runtime_apply_adaptive` and the public `apply_adaptive`,
+`runtime_apply_tier_policy` and the public `apply_tier_policy`, `flush_trail`,
+`compress_hot`, `runtime_apply_configured_rollover`, `runtime_rollover_on_mark`
+and the `ApplyConfigured`/`ForceClosed` mark path `runtime_push_frame_fallback`.
+Eleven markers are removed with no new trusted item, for 53 default markers and
+58 with `literal-types`. The remaining `Vec` markers are the byte reporters and
+diagnostics (`diff_log_len`, `tracking_bytes`, `total_bytes`,
+`log_heap_bytes`, `log_shrink_capacity`) and the
+transparent policy-type registrations.
+
+The pending-indices checkpoint (2026-09-16) checks the read-only consumer
+helper `pending_restore_indices` and replaces its `external_body` Cold scaffold
+with the checked `pending_cold_indices_checked`/`pending_pair_indices_checked`
+passes. Its contract now states exactly which indices it names: `Some` iff the
+token is restorable, and an index is named iff some frame at or above the
+token's frame captures it (`frame_captures`, the physical saved-value lookup).
+Two markers are removed with no new trusted item, for 51 default markers and 56
+with `literal-types`. The same checkpoint adds the checked production sequence
+witness `sequence_witness_checked` (Step 3).
+
+The final checkpoint of that campaign removed the last execution-first `Vec`
+marker, `try_mark_adaptive` (the entry point itself is gone since 2026-09-18,
+when the columns lost their token API; its structural twin is
+`try_push_frame_adaptive`): the public "mark, then one adaptive pass" entry had
+kept a trusted semantic postcondition (view unchanged, depth + 1, snapshot
+pushed) after every function it calls became checked. Its body is unchanged —
+the three guards, the checked `mark_with_options` and the checked
+`runtime_apply_adaptive` — and the contract now follows from theirs. One
+marker removed, no new trusted item: **50 default markers and 55 with
+`literal-types`** (the ledger reached **12 and 17** on 2026-09-18; see the counts
+table at the top and §2d) at that checkpoint (49 and 54 since the total public API
+removed the debug-only ring walk). Every remaining default marker is itemized in §4 or in the
+frame-architecture ledger's diagnostics rows; none carries a semantic
+postcondition about container contents.
 
 ## 1. Group A: `ContainerId` (trusted by design), 3 items
 
@@ -187,7 +382,7 @@ minimal, local, and is exactly what the cross-container guard relies on.
 ### 1d. Why Group A is sound to trust
 
 The container check is **not on the correctness-critical path.** The headline
-`restore` theorem (`view() == snapshots[token.frame_idx]`) and all of branch-cut
+`restore` theorem (`view() == snapshots[token.depth]`) and all of branch-cut
 safety ([Ch. 3](03-fork-history.md)) hold *without* it; the container id only
 *rejects cross-container misuse*, a caller error. Concretely, no proof consumes
 `new()`'s distinctness; `is_token_valid_spec` only needs the *equality
@@ -201,16 +396,31 @@ environmental assumption, with finite runtime evidence from
 mint thousands of ids and check end-to-end that one container rejects another's
 token.
 
-## 2. Group B: unmodeled std behavior, 16 items
+## 2. Group B: unmodeled std behavior, 8 items
 
 Verus/vstd model a `Vec`'s element sequence (`@`) but not its **allocation**:
 `capacity()`, `shrink_to`, and `size_of::<T>()` have no specs. Everything that
 reads or manages capacity is therefore `external_body`. The B+tree hot-path
 primitives (§2d) are the same kind of trust over three other unspecced std
 operations (`get_unchecked`, `select_unpredictable`, `copy_within`). Four
-sub-kinds:
+sub-kinds, the first of which is now empty:
 
-### 2a. Byte reporters (no `ensures`; diagnostic), 8 items
+### 2a. Byte reporters: stratified out of the perimeter (was 12 items)
+
+The byte reporters (`Vec::{tracking_bytes, total_bytes, diff_log_len}`,
+`log_heap_bytes`, `ListArena::{tracking_bytes, total_bytes}`, and the
+`heap_bytes` of `CaptureBits`, `CompressedStack`, `Codes`, `GenStamps`,
+`InlineStore`, `ParallelStore`, plus the ones of `TrailStore`, `DynStore`,
+`TwoStackLog`, `CircularList`, `History`) are read-only diagnostics that no
+proof reads and that cannot alter execution. Since 2026-09-17 they are plain
+Rust outside every `verus!` block: a `diagnostics::HeapBytes` trait (exported
+as `HeapBytes`) carries `heap_bytes` for the stores and columns, and each
+container's reporters live in an ordinary `impl` block after its verified
+one. They are therefore neither verified nor trust markers — Verus does not
+see them — and `DiffStore` no longer has a `heap_bytes` method (consumers
+bound `S: HeapBytes` where they need the number). The production-parity
+checks below still run against them unchanged. What follows is the record of
+what they were while they carried markers.
 
 Production parity: all report the capacity-based allocation
 footprint using exactly production's formulas.
@@ -386,8 +596,30 @@ model (`core::panicking::panic_fmt` has no spec). This is exactly why `vstd`'s
 own `runtime_assert` is `external_body` too. The `requires cond` *is* checked at
 every call site, so the trusted part is only "the body panics when `!cond`",
 which is a one-line `if`. Nothing algorithmic hides here. (See
-[Ch. 3 §5](03-fork-history.md) for the `u32` fork-history limit these guards
-protect, and the `restores_remaining()` query that reports the headroom.)
+[Ch. 3 §5](03-fork-history.md) for the generation-counter limit these guards
+protect.)
+
+### 2d addendum: the node-layout primitives are proved (2026-09-18)
+
+The five `bplus_layout` primitives no longer carry markers. Three of them
+(`arr_get`, `arr_set`, `slice_get`) now go through vstd's specified array and
+slice accessors, which is a genuine reduction in *this* crate's trusted base —
+the `unsafe` unchecked reads are gone — but an honest reader should note the
+trust moved to the platform's specification rather than disappearing, since those
+vstd accessors are `external_body` in vstd. `sel_usize` is the branch its
+contract always described, and `arr_shift_up` is a verified loop where a trusted
+`memmove` used to be.
+
+Rust's bounds checks come back with them. Measured against the previous commit
+(`bplus_cursor_bitset_bench`, two runs, τ = 1.08): insertion, split and cursor
+cases at parity, because those index the const-generic `data` array and the
+compare folds away; `bplus/scan_only` 1.08–1.10, `from_sorted_then_scan`
+1.06–1.07 and `from_sorted_only` 1.11–1.12, because the bulk loader and leaf
+scan read a slice whose length is a runtime value. All of them remain faster than
+the unverified implementation in the same binary. One trusted hint helper
+(`requires cond`, body `core::hint::assert_unchecked(cond)`) would restore the
+margin for a thirteenth marker; it was declined. The numbers and that option are
+recorded in `doc/tasks/final-performance-report.md`.
 
 ## 3. The integer casts are proved, not trusted
 
@@ -501,7 +733,12 @@ the requirement-level fuzzing is what tests the assumed facts.
 **D-hasher: `axiom_index_hasher_builds_valid_hashers`
 (src/hasher_spec.rs, default build; 1 axiom + the `ExIndexHasher` and
 `ExFoldHasher` registrations).** `SpMap`'s transient key index is
-`std::collections::HashMap<K, usize, IndexHasher>`, where `IndexHasher` is an
+`std::collections::HashMap<K, I, S>` for a hasher parameter `S: ValidHasher`
+(2026-09-20): a trait asking for `Default` and a proof of
+`builds_valid_hashers::<S>()`, with two impls, each on an axiom that already
+ships — `IndexHasher`, the default, on this one, and `std::hash::RandomState`
+on vstd's own. Choosing a hasher adds no trusted item. The rest of this entry
+describes the default. `IndexHasher` is an
 8-byte crate-local `BuildHasher` carrying an explicit seed and delegating to
 foldhash's `fast` family, the same hash ALGORITHM production's `Map` uses
 (hashbrown 0.17's `DefaultHashBuilder` is a newtype wrapping
@@ -535,14 +772,13 @@ cost of closing the former SpMap performance exception. Unconditional (not
 `literal-types`-gated) because the
 index is core to `SpMap`.
 
-### Group E: unverified glue, 3 `external_body` items + ordinary-Rust shims
+### Group E: unverified glue, 2 `external_body` items + ordinary-Rust shims
 
 **`external_body` members:**
 
 | Item | Contract | Why trusted |
 |---|---|---|
 | `values_equal<T: PartialEq>` (sparse_set.rs) | NONE: result is an unconstrained bool, so nothing unsound is derivable; `remove_value` promises the structural change, not which value matched | avoids threading vstd's `obeys_eq_spec` plumbing; scan behavior pinned by ported production proptests |
-| `CircularList::debug_check_different_rings` (circular_list.rs) | `requires` the spec-side precondition; no ensures | debug-only runtime mirror of a spec-only precondition (O(ring) walk, gated to debug builds); the verified `splice` never depends on it |
 | `ListHead::white_box_head` (list.rs) | NONE: read-only test accessor with no `ensures` | unpacks the runtime niche for white-box differential tests; no proof depends on its result |
 
 **Ordinary-Rust items outside `verus!{}`** that delegate 1:1 to a verified
@@ -553,7 +789,6 @@ method with the converted argument":
 |---|---|---|
 | `Vec::get(impl Into<I>)` (vec.rs, bottom) | verified `get_index` | generic `Into` carries no Verus-visible input/output relation |
 | `Vec::set(impl Into<I>, T)` | verified `set_index` | same |
-| `guard::check_precondition_erased` | (panics) | callable from `external_body` diagnostics; no proof context |
 | std `Iterator` impls for `VecViewIter` / `ListIter` | verified inherent `next` | trait impls for unmodeled std traits (each is one delegation line) |
 | `white_box_*` read accessors (bplus.rs, list.rs, circular_list.rs) | immutable field borrows | `#[doc(hidden)]` oracle access for runtime property tests; read-only, cannot violate any invariant |
 | `next_id_from` (container_id.rs) | (atomic allocator) | the trusted allocator behind Group A's `new`; plain wrapping `fetch_add` over `u64`, optional fatal boundary behind `strict-id-exhaustion`, exhaustion unit-tested |
@@ -573,38 +808,100 @@ acyclicity or explanation correctness. See
 verification task in
 [`../future/conformance-and-release.md`](../future/conformance-and-release.md).
 
+## 3.6. Group F: the diff-compression campaign's additions, 19 items
+
+The compression, shared-fork-history and parallel-mark work has added 19
+markers at this point. 17 carry no `ensures` and so cannot corrupt a
+proof; 2 carry contracts.
+
+### 3.6a. Diagnostics and shadow instrumentation (no `ensures`), 12 items
+
+`frame_stats` (compression_stats.rs), `mode_name` (compression_stats.rs), `observe` (compression_stats.rs), `observe_frame` (compression_stats.rs), `run_count_sorted` (compression_stats.rs), `run_count_writeorder` (compression_stats.rs), `shadow_emit` (compression_stats.rs), `shadow_enabled` (compression_stats.rs), `shadow_log_copy` (compression_stats.rs), `shadow_log_full` (compression_stats.rs), `cold_frame_count` (diff_log.rs), `shadow_key` (diff_log.rs).
+
+None carries an `ensures`, so no proof can depend on them and a wrong body
+yields a wrong diagnostic rather than an unsound theorem. They are external for
+three separate reasons: `frame_stats`, `run_count_sorted` and
+`run_count_writeorder` use `HashSet` and `sort_unstable`, which Verus does not
+model; the `shadow_*` family does file and stderr I/O behind a `OnceLock`; and
+`shadow_key` is `self as *const _ as usize`, raw pointer identity. `mode_name`
+and `cold_frame_count` are pure matches and are recorded as dischargeable
+rather than necessary.
+
+### 3.6b. Environment levers (no `ensures`), 2 items
+
+`env_compress_default` (compression_config.rs), `env_diff_store_kind` (compression_config.rs).
+
+`std::env` has no Verus model. These are sound to trust rather than merely
+unavoidable, because every value each lever selects carries the same verified
+contract: the stores are separately proved to refine one model, so the flag
+chooses between representations that are already interchangeable.
+
+### 3.6c. Mode selection (no `ensures`), 1 items
+
+`choose_mode` (diff_compress.rs).
+
+The decision arithmetic is verified in `FrameStats::best_mode`. The marker
+covers only the `size_of` and the `HashSet` the wrapper threads through on its
+way there.
+
+### 3.6d–3.6f. The dyn group's trusted items: all gone (2026-09-18)
+
+These three subsections described trusted items that belonged to the predecessor
+dyn group (`sync_group.rs`, `Vec<Box<dyn SyncMember>>`): the parallel
+`mark_parallel`/`restore_parallel` twins, the group `checksum` declared on the
+member trait, and the rayon canary. That module is deleted, and with it those
+markers — three fewer, which is where 37 became 34 before the wider audit took
+the ledger to 12.
+
+The parallel fan-out itself did not disappear, it moved and changed status. The
+e-graph's `EGraphMembers` and the anti-unification layer's `AuMembers` are
+borrowed forwarding views implementing `group::Member`; above a threshold their
+exec parts fan the structural operation out over a `rayon::scope` on disjoint
+`&mut` borrows. Both live in unverified consumer crates, so they are glue rather
+than trusted twins of verified functions: nothing assumes a postcondition about
+them, and the group's contract is discharged by the members' own `Member`
+contracts on the sequential path. What was genuinely trusted before — "rayon
+applies the closure to each member exactly once" — is now confined to code Verus
+never reads, and the differential test pinning parallel against sequential is
+still the evidence that the split is right.
+
+The canary (`parallel::par_sum_canary`) is likewise no longer a marker: it is
+plain Rust below its module's `verus!` block, confirming at runtime that the
+rayon backend links.
+
 ## 4. Summary table
 
-All 27 default-build `external_body` markers plus the 1 default-build axiom
-(the `literal-types` additions are listed after):
+The table below catalogs the permanent and historically grouped trust items.
+The complete current source count is **12 default-build `external_body`
+markers plus 4 default-build axioms** (the twelve byte reporters of rows
+4–9 and 11a–11b are outside the perimeter since 2026-09-17, §2a) (plus one generated `obeys_key_model`
+axiom per `define_id*!` id type in consumer crates); execution-first three-tier Vec markers not
+itemized here are enumerated in
+`doc/tasks/three-tier-frame-architecture-goal.md` §8. The `literal-types`
+additions are listed after the table.
 
 | # | Item | Group | Trusted because | Provable? |
 |---|---|---|---|---|
-| 1 | `struct ContainerId` | A | opaque identity by design (`uninterp id()`) | n/a: no contract |
+| 1 | ~~`struct ContainerId`~~ | A | **no longer a marker**: transparent in-crate since 2026-09-18 — the field is `pub(crate)` and `id()` reads it, so the type stays opaque to consumers while the projection is a definition | n/a |
 | 2 | `ContainerId::new` (+ `next_id_from` allocator) | A | process-global atomic side effect; no `ensures`; wrapping `u64` allocation with an optional fatal boundary | no (side effect) |
-| 3 | `ContainerId::eq` | A | bridges to an intentionally-`uninterp` `id()` | only by un-abstracting; declined |
-| 4 | `Vec::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures` | partially: see feature request |
-| 5 | `Vec::total_bytes` | B | same | partially |
-| 6 | `ForkHistory::heap_bytes` | B | same | partially |
-| 7 | `CaptureBits::heap_bytes` | B | same | partially |
-| 8 | `ParallelStore::heap_bytes` | B | same | partially |
-| 9 | `InlineStore::heap_bytes` | B | same | partially |
+| 3 | ~~`ContainerId::eq`~~ | A | **no longer a marker**: proved 2026-09-18 — with `id()` transparent, `self.raw == other.raw` discharges `b == (self.id() == other.id())` | done |
+| 4–9 | byte reporters (`Vec::tracking_bytes`, `Vec::total_bytes`, `ForkHistory::heap_bytes`, `CaptureBits::heap_bytes`, `ParallelStore::heap_bytes`, `InlineStore::heap_bytes`) | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a); read-only diagnostics | n/a (outside the perimeter) |
 | 10 | `shrink_vec_capacity` | B | `Vec::capacity`/`shrink_to` unmodeled; contract = element sequence unchanged (std-documented) | when vstd specs capacity ops |
+| 10b | `std_sort::sort_pairs_by_index` | B | std `<[T]>::sort_unstable_by_key` is unmodeled by vstd; contract = documented behaviour (permutation of the slice in non-decreasing key order, nothing else touched); consumed by Hot-to-Cold migration and `diff_compress::sort_frame_by_index` | when vstd specs slice sorting |
 | 11 | `shrink_aov_capacity` | B | same (AppendOnlyVec variant formula) | same |
-| 11a | `ListArena::tracking_bytes` | B | capacity + `size_of` unmodeled; no `ensures`; forwards to the two inner vecs | partially |
-| 11b | `ListArena::total_bytes` | B | same | partially |
+| 11a–11b | `ListArena::tracking_bytes`, `ListArena::total_bytes` | — | **no longer markers**: plain Rust outside `verus!` since 2026-09-17 (§2a) | n/a (outside the perimeter) |
 | 11c | `data_capacity_bits` | B | `Vec::capacity` unmodeled; **contract-carrying**: `n >= len` is what makes capture-word truncation unobservable (§2c) | when vstd specs capacity ops |
-| 11d | `arr_get` (bplus_layout) | B | `get_unchecked` unspecced; contract = checked indexing, `i < N` verified at every call site (§2d) | when vstd specs unchecked indexing |
-| 11e | `arr_set` (bplus_layout) | B | same, for the write (`update(i, v)` over the whole array) | same |
-| 11f | `slice_get` (bplus_layout) | B | same, with a runtime-length bound (`i < s.len()`) | same |
-| 11g | `sel_usize` (bplus_layout) | B | `select_unpredictable` unspecced (a codegen hint); contract = the `if`/`else` it replaces; **no `unsafe`** | when vstd specs the intrinsic |
-| 11h | `arr_shift_up` (bplus_layout) | B | `copy_within` unspecced; four-clause shift postcondition; **no `unsafe`** (short arm is the element loop it replaces) | when vstd specs `copy_within` |
+| 11d | ~~`arr_get`~~ (bplus_layout) | B | **no longer a marker**: 2026-09-18 it became `*vstd::array::array_index_get(a, i)`. The `unsafe` read is gone; what remains is vstd's own specified accessor, so the trust moved to the platform and Rust's bounds check returns (cost: §2d) | done, modulo vstd |
+| 11e | ~~`arr_set`~~ (bplus_layout) | B | **no longer a marker**: `a[i] = v` under vstd's array-update specification, same trade as 11d | done, modulo vstd |
+| 11f | ~~`slice_get`~~ (bplus_layout) | B | **no longer a marker**: `*vstd::slice::slice_index_get(s, i)`. This is the one whose bound is a runtime length, so its check does **not** fold away — the measured cost lives here (§2d) | done, modulo vstd |
+| 11g | ~~`sel_usize`~~ (bplus_layout) | B | **no longer a marker**: proved 2026-09-18 as the plain `if c { b } else { a }` its contract always described; the `select_unpredictable` codegen hint is dropped | done |
+| 11h | ~~`arr_shift_up`~~ (bplus_layout) | B | **no longer a marker**: proved 2026-09-18 as a verified descending loop carrying the four-clause postcondition; the trusted `copy_within` arm is gone, and a node's window is bounded by its arity so the loop is short by construction | done |
 | 11i | `guard::refuse` | C | diverges (`-> !`); body is the unmodeled panic machinery; nothing assumable (no post-state) | n/a (no contract) |
-| 12 | `guard::check_precondition` | C | body `panic!` uses unmodeled format machinery (`requires cond` is checked) | no (same reason as `vstd::runtime_assert`) |
+| 12 | ~~`guard::check_precondition`~~ | C | **no longer a marker**: proved 2026-09-18 — the violating arm diverges through `refuse` (row 11i), whose `!` return leaves no post-state obligation, so the runtime monitor survives without trusting this function | done; the panic itself is row 11i
 | 13 | `clone_key_exact` | D | projects key-model requirement (3) out of vstd's prose-stated `obeys_key_model`; no new assumption | no (vstd provides no lemma) |
-| 14 | `values_equal` | E | no ensures: unconstrained bool, nothing derivable; avoids `obeys_eq_spec` plumbing | by threading vstd eq specs; declined for production shape |
-| 15 | `debug_check_different_rings` | E | debug-only mirror of a spec-only precondition | n/a (diagnostic) |
-| 16 | `ListHead::white_box_head` | E | contract-free read-only test accessor (unpacks the niche for the white-box walkers; inside `verus!` so it needs the marker; its node-side counterpart `white_box_next` sits outside `verus!` and needs none) | n/a (no contract) |
+| 14 | ~~`values_equal`~~ | E | **no longer a marker**: proved 2026-09-18 through vstd's `PartialEq` external trait specification, whose `eq` promises `obeys_eq_spec() ==> r == eq_spec(..)`; this crate never establishes `obeys_eq_spec` for a caller's `T`, so the result stays the unconstrained bool the scan wants | done
+| 15 | ~~`debug_check_different_rings`~~ | E | removed 2026-09-17: the public `splice`/`splice_absorb` now run a *verified* walk of the absorbed ring (`guard_different_rings`) in every build, and the e-graph's merge uses the crate-private walk-free cores whose precondition is a theorem | — |
+| 16 | ~~`ListHead::white_box_head`~~ | E | **no longer a marker**: plain Rust outside `verus!` since 2026-09-18, like the byte reporters (rows 4–9). Read-only test accessor (unpacks the niche for the white-box w
 | 17 | `ExIndexHasher` registration | D | contract-free opaque registration; names `IndexHasher` in specs so the hasher axiom can trigger on it | n/a (no contract) |
 | 18 | `ExFoldHasher` registration | D | same: names foldhash's `FoldHasher` (`IndexHasher`'s associated `Hasher` type) so the `BuildHasher` impl type-checks under Verus | n/a (no contract) |
 | — | `axiom_index_hasher_builds_valid_hashers` | D | `broadcast axiom fn`: mirrors vstd's shipped `axiom_random_state_builds_valid_hashers`; `builds_valid_hashers` asserts only byte-determinism, which `IndexHasher` satisfies at least as strongly as std's `RandomState` (seed stored by value, so `build_hasher` is a pure function of it; §3.5 D-hasher) | no (predicate is `uninterp`; vstd `admit()`s the identical fact for `RandomState`) |
@@ -630,7 +927,7 @@ fuzz in `tests/compat_map.rs::canonical_key_model`.)
 
 Plus the Group E ordinary-Rust delegation shims tabulated in §3.5.
 
-**Bottom line.** Default build: 3 trusted-by-design `ContainerId` items
+**Bottom line (permanent grouped subset).** Default build: 3 trusted-by-design `ContainerId` items
 (permanent; equality reflection trusted, global freshness not proved, and
 finite distinctness behavior runtime-fuzzed), 11 capacity-introspection items
 (8 spec-free byte reporters
@@ -655,19 +952,27 @@ requirement (2) by construction, violation regressions pin the
 exclusions), and BitsF64 (raw-bit injective, the long-term float key;
 CanonicalF64's fold is a pinned production-parity decision, see
 key-model-tcb.md §float-semantics). Future key types must go through
-`declare_key_model_assumption!` (justified + auto-fuzzed axioms). The assumed-fact inventory of the default
-crate is therefore: `ContainerId::eq`'s equality reflection, the two shrink
-helpers' data preservation, `data_capacity_bits`'s `capacity >= len`,
-`clone_key_exact`'s clone identity, and the five `bplus_layout` primitives'
-agreement with their checked std forms: **ten** contract-carrying trusted
-statements. Each is either one line of exec code or (`arr_shift_up`) a length
-dispatch between the element loop and the `copy_within` its postcondition
-pins. No
-`assume`/`admit` anywhere in the verified modules. Within the
-`external_body` inventory, no larger algorithm is hidden:
-`arr_shift_up`'s length dispatch is the largest trusted body, and both of its
-arms restate the same postcondition. This statement does not cover the
-ordinary-Rust shims or the consumer proof algorithms listed above.
+`declare_key_model_assumption!` (justified + auto-fuzzed axioms). Default build
+also carries the D-index `obeys_key_model` axioms for `DenseId31`,
+`DenseId63`, `DenseUsize` and each `define_id*!` id type (structural `raw`
+equality and hashing under the clean-id type invariant), consumed by
+`IndexLike::lemma_obeys_key_model` so Trail deduplication can key its
+membership set by the index type without widening. The permanent-boundary subset includes `ContainerId::eq`'s equality
+reflection, the two shrink helpers' data preservation,
+`data_capacity_bits`'s `capacity >= len`, `clone_key_exact`'s clone identity,
+and the five `bplus_layout` primitives' agreement with their checked std
+forms. The execution-first Vec contracts are additional temporary assumed
+facts and are tracked function-by-function in the three-tier task ledger; they
+must not be described as proved until their checked cores replace the outer
+markers. No `assume`/`admit` occurs in project sources. The first Hot-only
+milestone added checked capture/set/mark/restore cores. H1 removes the
+`frame_saved_len_exec` marker after a checked three-segment body, establishes
+the general-wf-to-Hot bridge, and restores a green full Vec-module gate without
+adding a trust marker. H2 checks canonical and physical Hot push/pop/set,
+proves Hot-scope dispatch cannot reach non-Hot fallbacks, and removes the public
+`push`, `pop`, and `set_index` markers. H3 proves explicit Hot `Defer` marks
+for `Never` and thresholded shrink through checked dispatch and removes the
+`push_frame_with_options` and `mark_with_options` markers.
 
 **Scope note.** "No `assume`/`admit`" is a claim about *this crate's project
 sources*. The sibling `abstract-domains` crate likewise has a project-local

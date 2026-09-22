@@ -73,6 +73,35 @@ impl crate::config::EGraphConfig for DefaultConfig {
     type M = crate::multiplicity::Multiplicity;
     type Ids = DefaultNodeIds;
     type Au = crate::au::AuIds31;
+    type Policy = crate::containers::HotFirst;
+
+    crate::impl_mset_child_pair!();
+}
+
+/// The 31-bit equality-saturation configuration: [`DefaultConfig`] under its
+/// own name. Hot-first stores (first-capture dedupe) for every tracked
+/// column, the discipline for workloads that rewrite to a fixpoint between
+/// marks.
+pub type EqSat32 = DefaultConfig;
+
+/// The 31-bit SMT configuration: [`DefaultConfig`]'s id family over
+/// Trail-first stores (append-only ingress, no per-write lookup), the
+/// discipline for mark/backtrack-heavy use such as the Sundance integration.
+pub struct Smt32;
+impl crate::config::EGraphConfig for Smt32 {
+    type Index = u32;
+    type G = crate::id::ENodeId;
+    type ClassKey = crate::id::EClassKey;
+    type O = crate::id::OpId;
+    type S = crate::id::SortId;
+    type V = LitValId;
+    type UL = crate::id::UseListId;
+    type UN = crate::id::UseNodeId;
+    type C = crate::node_store::MSetChild<crate::id::ENodeId>;
+    type M = crate::multiplicity::Multiplicity;
+    type Ids = DefaultNodeIds;
+    type Au = crate::au::AuIds31;
+    type Policy = crate::containers::TrailFirst;
 
     crate::impl_mset_child_pair!();
 }
@@ -134,6 +163,32 @@ impl crate::config::EGraphConfig for Config64 {
     type M = crate::multiplicity::Multiplicity64;
     type Ids = NodeIds64;
     type Au = crate::au::AuIds64;
+    type Policy = crate::containers::HotFirst;
+
+    crate::impl_mset_child_pair!();
+}
+
+/// The 63-bit equality-saturation configuration: [`Config64`] under its own
+/// name (Hot-first stores).
+pub type EqSat64 = Config64;
+
+/// The 63-bit SMT configuration: [`Config64`]'s id family over Trail-first
+/// stores.
+pub struct Smt64;
+impl crate::config::EGraphConfig for Smt64 {
+    type Index = u64;
+    type G = ENodeId64;
+    type ClassKey = EClassKey64;
+    type O = OpId64;
+    type S = SortId64;
+    type V = LitValId64;
+    type UL = UseListId64;
+    type UN = UseNodeId64;
+    type C = crate::node_store::MSetChild<ENodeId64, crate::multiplicity::Multiplicity64>;
+    type M = crate::multiplicity::Multiplicity64;
+    type Ids = NodeIds64;
+    type Au = crate::au::AuIds64;
+    type Policy = crate::containers::TrailFirst;
 
     crate::impl_mset_child_pair!();
 }
@@ -166,6 +221,7 @@ impl crate::config::EGraphConfig for ConfigM16 {
     type M = crate::multiplicity::Multiplicity16;
     type Ids = DefaultNodeIds;
     type Au = crate::au::AuIds31;
+    type Policy = crate::containers::HotFirst;
 
     crate::impl_mset_child_pair!();
 }

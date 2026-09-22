@@ -6,9 +6,8 @@
 //! tree, token-only `restore`, and 31-bit macro ids.
 //! Gated on `compat-bplus` + `compat-ids`.
 use proptest::prelude::*;
-use semi_persistent_containers_verus::{
-    BPlusToken, BPlusTreeSet, BinarySearch, Layout64U32, ShrinkPolicy,
-};
+use semi_persistent_containers_verus::history::GroupToken;
+use semi_persistent_containers_verus::{BPlusTreeSet, BinarySearch, Layout64U32, ShrinkPolicy};
 
 semi_persistent_containers_verus::define_id31! {
     pub struct PropId / StoredPropId, "p";
@@ -74,9 +73,9 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 }
 
 fn run_ops(ops: Vec<Op>) {
-    let mut tree = Tree::new();
+    let mut tree = semi_persistent_containers_verus::group::ForkHistory::new(Tree::new());
     let mut oracle = Oracle::new();
-    let mut snapshots: Vec<(BPlusToken, Oracle)> = Vec::new();
+    let mut snapshots: Vec<(GroupToken, Oracle)> = Vec::new();
 
     for op in ops {
         match op {
@@ -97,7 +96,9 @@ fn run_ops(ops: Vec<Op>) {
                 if snapshots.len() >= 10 {
                     continue;
                 }
-                let token = tree.mark(ShrinkPolicy::Never);
+                let token = tree
+                    .mark(ShrinkPolicy::Never)
+                    .expect("compat: depth in bounds");
                 snapshots.push((token, oracle.clone()));
             }
             Op::Restore(idx) => {
@@ -106,7 +107,7 @@ fn run_ops(ops: Vec<Op>) {
                 }
                 let idx = idx % snapshots.len();
                 let (token, snap) = snapshots[idx].clone();
-                tree.restore(token);
+                assert!(tree.restore(token), "compat: own live token");
                 oracle = snap;
                 snapshots.truncate(idx);
             }

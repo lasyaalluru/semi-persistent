@@ -33,6 +33,7 @@ impl<G: DenseId> RunGoal<G> {
         Cfg: EGraphConfig<G = G>,
         L: LitVal,
         MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+        Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
     {
         (eg.find_const(self.left) == eg.find_const(self.right)) == self.equal
     }
@@ -110,6 +111,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     saturate_spec(rules, eg, model, &RunSpec::budget(limit), globals)
 }
@@ -129,6 +131,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     saturate_spec_in(
         rules,
@@ -164,6 +167,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let steps_base = crate::ematch::match_steps();
     // Outside the round loop: the pool's whole purpose is to survive rounds.
@@ -224,6 +228,7 @@ where
     Cfg: EGraphConfig,
     L: LitVal,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     spec.until.is_some_and(|g| g.holds(eg))
 }
@@ -449,6 +454,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     // Per-rule scheduling-mode auto-selection: under `Auto`,
     // a rule whose join touches a skewed access path (a hub bucket) runs with
@@ -502,6 +508,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     saturate_semi_spec(rules, eg, model, &RunSpec::budget(limit), globals)
 }
@@ -521,6 +528,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     saturate_semi_spec_in(
         rules,
@@ -553,6 +561,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let limit = spec.limit;
     let steps_base = crate::ematch::match_steps();
@@ -675,6 +684,7 @@ where
     L: LitVal,
     M: LitModel<Value = L>,
     MSetCanon: VarCanon<Cfg::G, Cfg::C>,
+    Cfg::Policy: crate::config::StorePolicy<Cfg, T>,
 {
     let steps_base = crate::ematch::match_steps();
     let mut total_iter = 0;
@@ -790,8 +800,9 @@ mod tests {
         let model = NiraModel;
         let l = parse_pattern(lhs);
         let r = parse_rhs(rhs);
+        // The registry is unique-keyed, so each test rule gets its own name.
         compile_rewrite(
-            "test",
+            &format!("test_{}", rules.len()),
             lhs,
             rhs,
             &l,
@@ -821,8 +832,9 @@ mod tests {
         let l = parse_pattern(lhs);
         let whens: Vec<_> = when.iter().map(|s| parse_pattern(s)).collect();
         let r = parse_rhs(rhs);
+        // The registry is unique-keyed, so each test rule gets its own name.
         compile_rewrite(
-            "test",
+            &format!("test_{}", rules.len()),
             lhs,
             rhs,
             &l,

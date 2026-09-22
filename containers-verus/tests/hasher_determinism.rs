@@ -29,6 +29,7 @@
 //! asserted here; the global path is covered by `tests/hasher_seed_config.rs`,
 //! which runs one scenario per process.
 
+use semi_persistent_containers_verus::group::ForkHistory;
 use std::hash::{BuildHasher, Hash};
 
 use semi_persistent_containers_verus::hasher_spec::{DEFAULT_SEED, IndexHasher};
@@ -190,20 +191,20 @@ fn iteration_order_is_insertion_order() {
 #[test]
 fn identical_op_sequences_produce_identical_state() {
     let run = || {
-        let mut m: SpMap<String, u64, usize, true> = SpMap::new();
+        let mut m: ForkHistory<SpMap<String, u64, usize, true>> = ForkHistory::new(SpMap::new());
         for i in 0..50u64 {
             m.try_insert(format!("key{}", i % 20), i)
                 .expect("insert: within index word");
         }
         let tok = m
-            .try_mark(ShrinkPolicy::Never)
+            .mark(ShrinkPolicy::Never)
             .expect("mark: depth bounded by this harness");
         for i in 50..100u64 {
             m.try_insert(format!("key{}", i % 30), i)
                 .expect("insert: within index word");
         }
         let after_writes: Vec<(String, u64)> = m.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        m.try_restore(tok).expect("restore: own token");
+        assert!(m.restore(tok), "restore: own token");
         // Post-restore the index has been fully rebuilt.
         let after_restore: Vec<(String, u64)> = m.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let probes: Vec<Option<u64>> = (0..30)
@@ -218,17 +219,17 @@ fn identical_op_sequences_produce_identical_state() {
 /// invariant that makes the index a pure accelerator rather than state.
 #[test]
 fn lookups_agree_with_log_after_restore() {
-    let mut m: SpMap<u64, u64, usize, true> = SpMap::new();
+    let mut m: ForkHistory<SpMap<u64, u64, usize, true>> = ForkHistory::new(SpMap::new());
     for i in 0..100u64 {
         m.try_insert(i % 40, i).expect("insert: within index word");
     }
     let tok = m
-        .try_mark(ShrinkPolicy::Never)
+        .mark(ShrinkPolicy::Never)
         .expect("mark: depth bounded by this harness");
     for i in 100..200u64 {
         m.try_insert(i % 60, i).expect("insert: within index word");
     }
-    m.try_restore(tok).expect("restore: own token");
+    assert!(m.restore(tok), "restore: own token");
 
     // Last-write-wins over the surviving log, computed independently.
     let mut expected = std::collections::BTreeMap::new();

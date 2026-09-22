@@ -283,6 +283,7 @@ fn reason<const T: bool, const P: bool>(
                 "rewrite rule {rule_id:?} ; C2: rule id only, no substitution/instance in the log"
             )
         }
+        Justification::Assumption { lit } => format!("assumption {lit}"),
         Justification::ACSuperposition { .. }
         | Justification::ACInterReduction { .. }
         | Justification::ACAxiomCP { .. }
