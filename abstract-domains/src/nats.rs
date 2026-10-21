@@ -262,6 +262,31 @@ pub proof fn disj_bits(a: nat, b: nat)
     }
 }
 
+/// If every bit of a is a bit of b, then a <= b.
+pub proof fn and_not_zero_le(a: nat, b: nat)
+    requires bw_and_not(a, b) == 0
+    ensures a <= b
+    decreases a
+{
+    if a > 0 {
+        mapd_hd_tl(a, b, |x: Bit, y: Bit| x.and_not(y));
+        assert(hd(0 as nat) == Bit::f() && tl(0 as nat) == 0 as nat);
+        and_not_zero_le(tl(a), tl(b));
+        hd_tl(a);
+        hd_tl(b);
+    }
+}
+
+/// a and 0 are disjoint.
+pub proof fn disj_zero_r(n: nat)
+    ensures disj(n, 0)
+{
+    assert forall|i: nat| #![auto] !(bit(n, i).b() && bit(0 as nat, i).b()) by {
+        bit_zero(i);
+    };
+    disj_bits(n, 0);
+}
+
 pub proof fn disj_zero(n: nat)
     ensures disj(0, n)
 {
