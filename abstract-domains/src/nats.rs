@@ -1003,6 +1003,61 @@ pub proof fn xor_ones_complement(y: nat, w: nat)
 }
 
 /// all_ones(len(n)) >= n: the all-ones mask of bit-length n covers n.
+pub proof fn exp_succ(i: nat)
+    ensures exp(i + 1) == 2 * exp(i)
+{
+    assert(lshi(1, i + 1) == lsh(lshi(1, i)));
+}
+
+pub proof fn exp_le(a: nat, b: nat)
+    requires a <= b
+    ensures exp(a) <= exp(b)
+    decreases b
+{
+    if a < b {
+        exp_le(a, (b - 1) as nat);
+        exp_succ((b - 1) as nat);
+    }
+}
+
+/// The top bit of a nonzero n is at position len(n) - 1.
+pub proof fn len_lower(n: nat)
+    requires n > 0
+    ensures exp((len(n) - 1) as nat) <= n
+    decreases n
+{
+    if tl(n) > 0 {
+        len_lower(tl(n));
+        exp_succ((len(tl(n)) - 1) as nat);
+    } else {
+        assert(len(tl(n)) == 0);
+        assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+    }
+}
+
+/// The least all-ones value at or above n has length len(n).
+pub proof fn all_ones_len_unique(n: nat, k: nat)
+    requires
+        n <= all_ones(k),
+        k == 0 || all_ones((k - 1) as nat) < n,
+    ensures k == len(n)
+{
+    exp_pos(k);
+    len_bound(n);
+    if n == 0 {
+        if k > 0 { exp_pos((k - 1) as nat); }
+    } else {
+        len_lower(n);
+        assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+        if k == 0 {
+        } else if k < len(n) {
+            exp_le(k, (len(n) - 1) as nat);
+        } else if k > len(n) {
+            exp_le(len(n), (k - 1) as nat);
+        }
+    }
+}
+
 pub proof fn all_ones_covers(n: nat)
     ensures n <= all_ones(len(n))
 {
