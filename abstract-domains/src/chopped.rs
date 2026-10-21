@@ -95,6 +95,41 @@ impl ChoppedTnum {
     }
 
     // ================================================================
+    // Bitwise soundness at width w: the L2 theorems, and w-bit operands
+    // give a w-bit result
+    // ================================================================
+
+    pub proof fn or_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) ==> self.bw_or(t).has(bw_or(x, y))
+    {
+        self.tnum.or_sound(t.tnum);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) implies self.bw_or(t).has(bw_or(x, y)) by {
+            Self::fits_mapd(x, y, |a: Bit, b: Bit| a.or(b), self.w);
+        };
+    }
+
+    pub proof fn and_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) ==> self.bw_and(t).has(bw_and(x, y))
+    {
+        self.tnum.and_sound(t.tnum);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) implies self.bw_and(t).has(bw_and(x, y)) by {
+            Self::fits_mapd(x, y, |a: Bit, b: Bit| a.and(b), self.w);
+        };
+    }
+
+    pub proof fn xor_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) ==> self.bw_xor(t).has(bw_xor(x, y))
+    {
+        self.tnum.xor_sound(t.tnum);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) implies self.bw_xor(t).has(bw_xor(x, y)) by {
+            Self::fits_mapd(x, y, |a: Bit, b: Bit| a.xor(b), self.w);
+        };
+    }
+
+    // ================================================================
     // Bounded arithmetic: chop(op(a, b), w)
     // ================================================================
 

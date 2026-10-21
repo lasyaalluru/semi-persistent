@@ -342,10 +342,16 @@ macro_rules! abstract_domain {
                         native_or(sv, tv);
                         native_or(sm, tm);
                         native_and_not(sm | tm, v);
-                        self.wf_inv(); t.wf_inv();
-                        self.to_tn().or_sound(t.to_tn());
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.or_sound(ct_t);
+                        assert(r.to_tn() == ct_s.bw_or(ct_t).tnum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 | c2) by {
+                            native_fits(c1); native_fits(c2);
                             native_or(c1, c2);
+                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
                         };
                     }
                     r
@@ -360,10 +366,16 @@ macro_rules! abstract_domain {
                         assert(sv & sm == (0 as $uint) && tv & tm == (0 as $uint) ==> ((sv&tv) & (sm|tm) == (0 as $uint))) by(bit_vector);
                         native_and(sv, tv);
                         native_or(sm, tm);
-                        self.wf_inv(); t.wf_inv();
-                        self.to_tn().and_sound(t.to_tn());
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.and_sound(ct_t);
+                        assert(r.to_tn() == ct_s.bw_and(ct_t).tnum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 & c2) by {
+                            native_fits(c1); native_fits(c2);
                             native_and(c1, c2);
+                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
                         };
                     }
                     r
@@ -379,10 +391,16 @@ macro_rules! abstract_domain {
                         native_xor(self.val, t.val);
                         native_or(self.mask, t.mask);
                         native_and_not(v, m);
-                        self.wf_inv(); t.wf_inv();
-                        self.to_tn().xor_sound(t.to_tn());
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.xor_sound(ct_t);
+                        assert(r.to_tn() == ct_s.bw_xor(ct_t).tnum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 ^ c2) by {
+                            native_fits(c1); native_fits(c2);
                             native_xor(c1, c2);
+                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
                         };
                     }
                     r
