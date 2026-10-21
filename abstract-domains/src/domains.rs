@@ -224,6 +224,26 @@ macro_rules! abstract_domain {
                 eq_from_bits((a & !b) as nat, bw_and_not(a as nat, b as nat));
             }
 
+            /// The executable join's value equals the spec join's value: for
+            /// well-formed operands `sv & tv` has no bit in the join mask.
+            pub proof fn native_join_val(sv: $uint, sm: $uint, tv: $uint, tm: $uint)
+                requires sv & sm == (0 as $uint), tv & tm == (0 as $uint)
+                ensures ((sv & tv) & !((sv & tv) ^ ((sv ^ sm) | (tv ^ tm)))) == sv & tv
+            {
+                assert(((sv & tv) & !((sv & tv) ^ ((sv ^ sm) | (tv ^ tm)))) == sv & tv) by(bit_vector)
+                    requires sv & sm == (0 as $uint), tv & tm == (0 as $uint);
+            }
+
+            /// A value that is some word with the mask bits cleared has no bit in
+            /// the mask: normalizing it again changes nothing.
+            pub proof fn native_and_not_idem(c: $uint, m: $uint, v: $uint)
+                requires (c & !m) == v
+                ensures (v & !m) == v
+            {
+                assert((v & !m) == v) by(bit_vector)
+                    requires (c & !m) == v;
+            }
+
             /// Native right shift by one == spec rsh on nat.
             pub proof fn native_rsh(a: $uint)
                 ensures (a >> (1 as $uint)) as nat == rsh(a as nat)
@@ -507,30 +527,25 @@ macro_rules! abstract_domain {
                     let r = ExecTnum { val: v & !m, mask: m };
                     proof {
                         assert(sv & sm == (0 as $uint) && tv & tm == (0 as $uint) ==> ((v & !m) & m == (0 as $uint))) by(bit_vector);
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.join_sound(ct_t);
+                        // Bridge: native bitwise == spec bitwise
                         native_and(sv, tv);
                         native_xor(sv, sm); native_xor(tv, tm);
                         native_or(sv ^ sm, tv ^ tm);
                         native_xor(v, u);
-                        native_and_not(v, m);
-                        self.wf_inv(); t.wf_inv();
-                        self.to_tn().join_sound(t.to_tn());
-                        // r.to_tn() and spec join have same mask; vals agree mod mask
-                        // so has_bw is identical: bw_and_not(x, m) == (v&!m) <==> bw_and_not(x, m) == v
+                        native_join_val(sv, sm, tv, tm);
+                        assert(r.to_tn() == ct_s.join(ct_t).tnum);
                         assert forall|c: $uint| #![auto] self.has(c) implies r.has(c) by {
-                            self.to_tn().join_sound(t.to_tn());
-                            self.to_tn().join(t.to_tn()).has_equiv(c as nat);
-                            r.to_tn().has_equiv(c as nat);
-                            assert((c & !m) == v ==> (c & !m) == (v & !m))
-                                by(bit_vector);
-                            native_and_not(c, m);
+                            native_fits(c);
+                            assert(ct_s.has(c as nat));
                         };
                         assert forall|c: $uint| #![auto] t.has(c) implies r.has(c) by {
-                            self.to_tn().join_sound(t.to_tn());
-                            self.to_tn().join(t.to_tn()).has_equiv(c as nat);
-                            r.to_tn().has_equiv(c as nat);
-                            assert((c & !m) == v ==> (c & !m) == (v & !m))
-                                by(bit_vector);
-                            native_and_not(c, m);
+                            native_fits(c);
+                            assert(ct_t.has(c as nat));
                         };
                     }
                     r
@@ -546,20 +561,29 @@ macro_rules! abstract_domain {
                     let r = ExecTnum { val: v & !m, mask: m };
                     proof {
                         assert(((v & !m) & m) == (0 as $uint)) by(bit_vector);
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.meet_sound(ct_t);
+                        // Bridge: native bitwise == spec bitwise
                         native_or(sv, tv);
                         native_xor(sv, sm); native_xor(tv, tm);
                         native_and(sv ^ sm, tv ^ tm);
                         native_xor(v, u);
-                        native_and_not(v, m);
-                        self.wf_inv(); t.wf_inv();
-                        self.to_tn().meet_sound(t.to_tn());
+                        let spec = ct_s.meet(ct_t).tnum;
+                        assert(spec.val == v as nat && spec.mask == m as nat);
+                        // A common member makes the spec meet's value disjoint from
+                        // its mask, so the executable normalization is the identity.
                         assert forall|c: $uint| #![auto] self.has(c) && t.has(c) implies r.has(c) by {
-                            self.to_tn().meet_sound(t.to_tn());
-                            self.to_tn().meet(t.to_tn()).has_equiv(c as nat);
-                            r.to_tn().has_equiv(c as nat);
-                            assert((c & !m) == v ==> (c & !m) == (v & !m))
-                                by(bit_vector);
+                            native_fits(c);
+                            assert(ct_s.has(c as nat) && ct_t.has(c as nat));
+                            assert(spec.has(c as nat));
+                            spec.has_equiv(c as nat);
                             native_and_not(c, m);
+                            native_and_not_idem(c, m, v);
+                            native_and_not(v, m);
+                            assert(r.to_tn() == spec);
                         };
                     }
                     r
