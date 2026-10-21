@@ -16,7 +16,7 @@ macro_rules! abstract_domain {
             use crate::tnum::Tnum;
             use crate::anum::Anum;
             use crate::unum::Unum;
-            use crate::chopped::{ChoppedTnum, ChoppedUnum};
+            use crate::chopped::{ChoppedAnum, ChoppedTnum, ChoppedUnum};
             verus! {
 
             // ============================================================
@@ -772,6 +772,13 @@ macro_rules! abstract_domain {
             impl ExecAnum {
                 pub open spec fn to_an(self) -> Anum { Anum { base: self.base as nat, span: self.span as nat } }
                 pub open spec fn has(self, x: $uint) -> bool { self.to_an().has(x as nat) }
+                proof fn to_chopped(self)
+                    ensures (ChoppedAnum { anum: self.to_an(), w: $bits as nat }).inv()
+                {
+                    self.to_an().to_tnum_inv();
+                    native_fits(self.base);
+                    native_fits(self.span);
+                }
                 /// has in terms of $uint ops (for by(bit_vector) proofs)
                 proof fn has_eq_uint(self, x: $uint)
                     ensures self.has(x) <==> (x >= self.base && ((x - self.base) as $uint) & !self.span == (0 as $uint))
@@ -814,14 +821,9 @@ macro_rules! abstract_domain {
                     r
                 }
                 #[inline] pub fn top() -> ExecAnum { ExecAnum { base: 0, span: !(0 as $uint) } }
-                // No `rlimit` here, deliberately. This carried `rlimit(2000)` while
-                // the soundness fact below was one 11-variable bit-vector query;
-                // splitting it into the four single-purpose queries brought the
-                // whole function under the *default* limit at every width, so the
-                // annotation became a stale ceiling rather than a live requirement.
-                // Measured at d64: 0.7s, and it still verifies with `--rlimit 1`.
-                // Keeping it would have hidden a future regression -- an annotated
-                // limit only reports the budget it was given, never the headroom.
+                /// Sound fixed-width addition, through ChoppedAnum::add_sound: top when
+                /// a represented bound or the span sum would wrap, otherwise the spec
+                /// add, whose members cannot wrap because each is at most base + span.
                 #[inline] pub fn add(&self, t: &ExecAnum) -> (r: ExecAnum)
                     ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_add(c2))
                 {
@@ -844,64 +846,49 @@ macro_rules! abstract_domain {
                     }
                     let r = ExecAnum { base: v, span: sm };
                     proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ca_s = ChoppedAnum { anum: self.to_an(), w };
+                        let ca_t = ChoppedAnum { anum: t.to_an(), w };
+                        ca_s.add_sound(ca_t);
+                        // On this path no sum wraps: each max is above its base and
+                        // the max sum is above both maxes.
+                        let s12 = s1.wrapping_add(s2);
+                        assert(v >= b2 && max1 >= s1 && max2 >= s2 && s12 >= s1 && s12 >= s2) by(bit_vector)
+                            requires v == b1.wrapping_add(b2), v >= b1,
+                                     max1 == b1.wrapping_add(s1), max1 >= b1,
+                                     max2 == b2.wrapping_add(s2), max2 >= b2,
+                                     max_sum == max1.wrapping_add(max2), max_sum >= max1, max_sum >= max2,
+                                     s12 == s1.wrapping_add(s2);
+                        add_no_overflow(b1, b2, v);
+                        add_no_overflow(b1, s1, max1);
+                        add_no_overflow(b2, s2, max2);
+                        add_no_overflow(max1, max2, max_sum);
+                        add_no_overflow(s1, s2, s12);
+                        // Bridge: the executable span is the spec span, which adds
+                        // the two span Tnums (0, s1) + (0, s2).
+                        let mt_s = self.to_an().mask_tnum();
+                        let mt_t = t.to_an().mask_tnum();
+                        disj_zero(s1 as nat); disj_zero(s2 as nat);
+                        mt_s.add_bitwise_eq(mt_t);
+                        nat_add_correct(0, 0);
+                        nat_add_correct(0, nat_add(s1 as nat, s2 as nat));
+                        native_xor(s12, 0);
+                        assert(s12 ^ (0 as $uint) == s12) by(bit_vector);
+                        native_or(s12, s1);
+                        native_or(s12 | s1, s2);
+                        assert(r.to_an() == self.to_an().add(t.to_an()));
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_add(c2)) by {
-                            self.has_eq_uint(c1);
-                            t.has_eq_uint(c2);
-                            r.has_eq_uint(c1.wrapping_add(c2));
-                            // The soundness fact is decomposed into four
-                            // single-purpose bit-vector queries. As one query
-                            // (11 variables, 13 hypotheses, conjunction goal)
-                            // it diverges on the z3 4.16 bundled with Verus
-                            // 0.2026.08.02 — z3 4.12 proved it in ~20s — and a
-                            // by(bit_vector) assert sends the solver exactly
-                            // the requires written on it, so the split is also
-                            // what keeps every query's hypothesis set minimal.
-                            let dd1 = (c1 - b1) as $uint;
-                            let dd2 = (c2 - b2) as $uint;
-                            // (1) Interval lower bound, mask-free: on the
-                            // guarded no-overflow path, c1+c2 does not wrap
-                            // and lands at or above v.
-                            assert(
-                                max_sum >= max1 && max1 >= b1 && max2 >= b2 && v >= b1 &&
-                                c1 >= b1 && c1 <= max1 && c2 >= b2 && c2 <= max2
-                                ==> c1.wrapping_add(c2) >= v
-                            ) by(bit_vector)
-                                requires v == b1.wrapping_add(b2),
-                                         max_sum == max1.wrapping_add(max2);
-                            // (2) Offset identity, a ring fact over Z/2^N:
-                            // (c1+c2) - (b1+b2) == (c1-b1) + (c2-b2).
-                            assert(
-                                ((c1.wrapping_add(c2) - v) as $uint) == ((dd1 + dd2) as $uint)
-                            ) by(bit_vector)
-                                requires v == b1.wrapping_add(b2),
-                                         dd1 == (c1 - b1) as $uint,
-                                         dd2 == (c2 - b2) as $uint;
-                            // (3) The span sum does not wrap: each span fits
-                            // under its max, and the max sum fits.
-                            assert(
-                                max_sum >= max1 && max_sum >= max2 && max1 >= b1 && max2 >= b2
-                                ==> s1.wrapping_add(s2) >= s1
-                            ) by(bit_vector)
-                                requires max1 == b1.wrapping_add(s1),
-                                         max2 == b2.wrapping_add(s2),
-                                         max_sum == max1.wrapping_add(max2);
-                            // (4) The stride-closure core — the one hard fact,
-                            // over exactly four unconstrained variables: bits
-                            // of dd1 lie in s1 and bits of dd2 in s2, so bits
-                            // of dd1+dd2 lie in (s1+s2)|s1|s2.
-                            assert(
-                                dd1 & !s1 == (0 as $uint) && dd2 & !s2 == (0 as $uint) &&
-                                s1.wrapping_add(s2) >= s1
-                                ==>
-                                ((dd1 + dd2) as $uint) & !(s1.wrapping_add(s2) | s1 | s2) == (0 as $uint)
-                            ) by(bit_vector);
-                            // c1 <= max1: from has, c1 = b1 + d1 where d1 <= s1
-                            assert(c1 >= b1 && (((c1 - b1) as $uint) & !s1 == (0 as $uint)) && max1 >= b1
-                                ==> c1 <= max1) by(bit_vector)
-                                requires max1 == b1.wrapping_add(s1);
-                            assert(c2 >= b2 && (((c2 - b2) as $uint) & !s2 == (0 as $uint)) && max2 >= b2
-                                ==> c2 <= max2) by(bit_vector)
-                                requires max2 == b2.wrapping_add(s2);
+                            native_fits(c1); native_fits(c2);
+                            // Members are at most their max, so the sum does not wrap.
+                            self.to_an().has_le_max(c1 as nat);
+                            t.to_an().has_le_max(c2 as nat);
+                            let cs = c1.wrapping_add(c2);
+                            assert(cs as nat == c1 as nat + c2 as nat);
+                            nat_add_correct(c1 as nat, c2 as nat);
+                            native_fits(cs);
+                            assert(ca_s.has(c1 as nat) && ca_t.has(c2 as nat));
+                            assert(fits(nat_add(c1 as nat, c2 as nat), w));
                         };
                     }
                     r

@@ -30,6 +30,25 @@ impl Anum {
 
     pub open spec fn from_tnum(t: Tnum) -> Anum { Anum { base: t.val, span: t.mask } }
 
+    /// Every member is at most base + span.
+    pub proof fn has_le_max(self, x: nat)
+        requires self.has(x)
+        ensures x <= self.base + self.span
+    {
+        let d = nat_sub(x, self.base);
+        self.mask_tnum().has_equiv(d);
+        and_not_zero_le(d, self.span);
+    }
+
+    /// to_tnum is well formed for every Anum.
+    pub proof fn to_tnum_inv(self)
+        ensures self.to_tnum().inv()
+    {
+        disj_zero(self.span);
+        disj_zero_r(self.base);
+        self.mask_tnum().add_inv(self.val_tnum());
+    }
+
     /// Key lemma: hasMinus — if Tn(v,m).has(n) then Tn(0,m).has(n - v)
     pub proof fn from_tnum_sound(t: Tnum)
         requires t.inv()
