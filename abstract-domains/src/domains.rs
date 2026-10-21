@@ -244,6 +244,13 @@ macro_rules! abstract_domain {
                     requires (c & !m) == v;
             }
 
+            /// XOR with all ones is bitwise NOT.
+            pub proof fn native_xor_ones(c: $uint)
+                ensures c ^ !(0 as $uint) == !c
+            {
+                assert(c ^ !(0 as $uint) == !c) by(bit_vector);
+            }
+
             /// Native right shift by one == spec rsh on nat.
             pub proof fn native_rsh(a: $uint)
                 ensures (a >> (1 as $uint)) as nat == rsh(a as nat)
@@ -405,12 +412,34 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                #[inline] pub fn bw_not(&self) -> (r: ExecTnum) requires self.wf() ensures r.wf() {
-                    proof { assert((!(0 as $uint)) & (0 as $uint) == (0 as $uint)) by(bit_vector); }
-                    self.bw_xor(&ExecTnum { val: !(0 as $uint), mask: 0 })
+                /// XOR with the constant all-ones word.
+                #[inline] pub fn bw_not(&self) -> (r: ExecTnum)
+                    requires self.wf()
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(!c)
+                {
+                    let ones = ExecTnum::constant(!(0 as $uint));
+                    let r = self.bw_xor(&ones);
+                    proof {
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(!c) by {
+                            native_xor_ones(c);
+                            assert(r.has(c ^ !(0 as $uint)));
+                        };
+                    }
+                    r
                 }
-                #[inline] pub fn bw_and_not(&self, t: &ExecTnum) -> (r: ExecTnum) requires self.wf(), t.wf() ensures r.wf() {
-                    self.bw_and(&t.bw_not())
+                /// AND with the complement of the second operand.
+                #[inline] pub fn bw_and_not(&self, t: &ExecTnum) -> (r: ExecTnum)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & !c2)
+                {
+                    let nt = t.bw_not();
+                    let r = self.bw_and(&nt);
+                    proof {
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 & !c2) by {
+                            assert(nt.has(!c2));
+                        };
+                    }
+                    r
                 }
                 #[inline] pub fn add(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
