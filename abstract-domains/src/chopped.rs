@@ -248,6 +248,50 @@ impl ChoppedTnum {
         };
     }
 
+    /// Bounded right shift by i bits.
+    pub open spec fn rshi(self, i: nat) -> ChoppedTnum {
+        ChoppedTnum { tnum: self.tnum.rshi(i), w: self.w }
+    }
+
+    proof fn fits_rshi(n: nat, w: nat, i: nat)
+        requires fits(n, w)
+        ensures fits(rshi(n, i), w)
+        decreases i
+    {
+        if i > 0 {
+            Self::fits_rsh(n, w);
+            Self::fits_rshi(rsh(n), w, (i - 1) as nat);
+        }
+    }
+
+    pub proof fn rshi_sound(self, i: nat)
+        requires self.inv()
+        ensures forall|n: nat| #![auto] self.has(n) ==> self.rshi(i).has(rshi(n, i))
+    {
+        self.tnum.rshi_sound(i);
+        assert forall|n: nat| #![auto] self.has(n) implies self.rshi(i).has(rshi(n, i)) by {
+            Self::fits_rshi(n, self.w, i);
+        };
+    }
+
+    /// Bounded left shift by i bits (with chop).
+    pub open spec fn lshi(self, i: nat) -> ChoppedTnum {
+        ChoppedTnum { tnum: self.tnum.lshi(i).chop_tn(self.w), w: self.w }
+    }
+
+    pub proof fn lshi_sound(self, i: nat)
+        requires self.inv()
+        ensures forall|n: nat| #![auto] self.has(n) ==> self.lshi(i).has(chop(lshi(n, i), self.w))
+    {
+        self.tnum.lshi_sound(i);
+        self.tnum.lshi_inv(i);
+        assert forall|n: nat| #![auto] self.has(n)
+            implies self.lshi(i).has(chop(lshi(n, i), self.w)) by {
+            self.tnum.lshi(i).chop_sound(self.w);
+            chop_idem(lshi(n, i), self.w);
+        };
+    }
+
     /// Bounded join.
     pub open spec fn join(self, t: ChoppedTnum) -> ChoppedTnum {
         ChoppedTnum { tnum: self.tnum.join(t.tnum), w: self.w }
