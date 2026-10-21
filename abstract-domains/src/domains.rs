@@ -294,6 +294,44 @@ macro_rules! abstract_domain {
                 );
             }
 
+            /// Native right shift by k == spec rshi on nat.
+            pub proof fn native_rshi(a: $uint, k: nat)
+                requires k < ($bits as nat)
+                ensures (a >> (k as $uint)) as nat == rshi(a as nat, k)
+                decreases k
+            {
+                if k == 0 {
+                    assert(a >> (0 as $uint) == a) by(bit_vector);
+                } else {
+                    let ku = k as $uint;
+                    native_rsh(a);
+                    native_rshi(a >> (1 as $uint), (k - 1) as nat);
+                    assert(a >> ku == (a >> (1 as $uint)) >> ((ku - (1 as $uint)) as $uint)) by(bit_vector)
+                        requires ku < ($bits as $uint), ku > (0 as $uint);
+                }
+            }
+
+            /// Native left shift by k == spec lshi on nat, truncated to the width.
+            pub proof fn native_lshi(a: $uint, k: nat)
+                requires k < ($bits as nat)
+                ensures (a << (k as $uint)) as nat == chop(lshi(a as nat, k), $bits as nat)
+                decreases k
+            {
+                let w: nat = $bits as nat;
+                if k == 0 {
+                    assert(a << (0 as $uint) == a) by(bit_vector);
+                    native_fits(a);
+                } else {
+                    let ku = k as $uint;
+                    let b = a << ((ku - (1 as $uint)) as $uint);
+                    native_lshi(a, (k - 1) as nat);
+                    native_lsh(b);
+                    chop_lsh(lshi(a as nat, (k - 1) as nat), w);
+                    assert(a << ku == b << (1 as $uint)) by(bit_vector)
+                        requires ku < ($bits as $uint), ku > (0 as $uint), b == a << ((ku - (1 as $uint)) as $uint);
+                }
+            }
+
             // ============================================================
             // ExecTnum: Executable Tnum
             // ============================================================
@@ -408,6 +446,57 @@ macro_rules! abstract_domain {
                             native_fits(c1); native_fits(c2);
                             native_xor(c1, c2);
                             assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
+                        };
+                    }
+                    r
+                }
+                /// Logical shift right by k bits.
+                #[inline] pub fn rshi(&self, k: u32) -> (r: ExecTnum)
+                    requires self.wf(), k < $bits
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c >> (k as $uint))
+                {
+                    let v = self.val; let m = self.mask; let ku = k as $uint;
+                    proof { assert(v & m == (0 as $uint) ==> (v >> ku) & (m >> ku) == (0 as $uint)) by(bit_vector); }
+                    let r = ExecTnum { val: v >> ku, mask: m >> ku };
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.rshi_sound(k as nat);
+                        // Bridge: native >> k == spec rshi
+                        native_rshi(v, k as nat);
+                        native_rshi(m, k as nat);
+                        assert(r.to_tn() == ct.rshi(k as nat).tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c >> ku) by {
+                            native_fits(c);
+                            native_rshi(c, k as nat);
+                            assert(ct.has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// Shift left by k bits, truncated to the width.
+                #[inline] pub fn lshi(&self, k: u32) -> (r: ExecTnum)
+                    requires self.wf(), k < $bits
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c << (k as $uint))
+                {
+                    let v = self.val; let m = self.mask; let ku = k as $uint;
+                    proof { assert(v & m == (0 as $uint) ==> (v << ku) & (m << ku) == (0 as $uint)) by(bit_vector); }
+                    let r = ExecTnum { val: v << ku, mask: m << ku };
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.lshi_sound(k as nat);
+                        // Bridge: native << k == chop(spec lshi, W)
+                        native_lshi(v, k as nat);
+                        native_lshi(m, k as nat);
+                        assert(r.to_tn() == ct.lshi(k as nat).tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c << ku) by {
+                            native_fits(c);
+                            native_lshi(c, k as nat);
+                            assert(ct.has(c as nat));
+                            assert(ct.lshi(k as nat).has(chop(lshi(c as nat, k as nat), w)));
                         };
                     }
                     r

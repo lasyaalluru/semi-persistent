@@ -992,6 +992,18 @@ impl Tnum {
         }
     }
 
+    /// lshi preserves inv: shifting both fields keeps them disjoint.
+    pub proof fn lshi_inv(self, i: nat)
+        requires self.inv()
+        ensures self.lshi(i).inv()
+        decreases i
+    {
+        if i > 0 {
+            self.lshi_inv((i - 1) as nat);
+            disj_cons(lshi(self.val, (i - 1) as nat), Bit::f(), lshi(self.mask, (i - 1) as nat), Bit::f());
+        }
+    }
+
     /// Right shift by i bits.
     pub open spec fn rshi(self, i: nat) -> Tnum {
         Tnum { val: rshi(self.val, i), mask: rshi(self.mask, i) }
