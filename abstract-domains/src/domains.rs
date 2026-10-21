@@ -224,6 +224,13 @@ macro_rules! abstract_domain {
                 eq_from_bits((a & !b) as nat, bw_and_not(a as nat, b as nat));
             }
 
+            /// Native right shift by one == spec rsh on nat.
+            pub proof fn native_rsh(a: $uint)
+                ensures (a >> (1 as $uint)) as nat == rsh(a as nat)
+            {
+                assert((a >> (1 as $uint)) as nat == a as nat / 2) by(bit_vector);
+            }
+
             /// Native fixed-width left shift is infinite-bitstring left shift,
             /// truncated back to the native width.
             #[verifier::spinoff_prover]
@@ -440,15 +447,54 @@ macro_rules! abstract_domain {
                 #[inline] pub fn sub(&self, t: &ExecTnum) -> (r: ExecTnum) requires self.wf(), t.wf() ensures r.wf() {
                     self.add(&t.neg())
                 }
-                #[inline] pub fn rsh(&self) -> (r: ExecTnum) requires self.wf() ensures r.wf() {
+                #[inline] pub fn rsh(&self) -> (r: ExecTnum)
+                    requires self.wf()
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c >> (1 as $uint))
+                {
                     let v = self.val; let m = self.mask;
                     proof { assert(v & m == (0 as $uint) ==> (v >> (1 as $uint)) & (m >> (1 as $uint)) == (0 as $uint)) by(bit_vector); }
-                    ExecTnum { val: v >> 1, mask: m >> 1 }
+                    let r = ExecTnum { val: v >> 1, mask: m >> 1 };
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.rsh_sound();
+                        // Bridge: native >> 1 == spec rsh
+                        native_rsh(v);
+                        native_rsh(m);
+                        assert(r.to_tn() == ct.rsh().tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c >> (1 as $uint)) by {
+                            native_fits(c);
+                            native_rsh(c);
+                        };
+                    }
+                    r
                 }
-                #[inline] pub fn lsh(&self) -> (r: ExecTnum) requires self.wf() ensures r.wf() {
+                #[inline] pub fn lsh(&self) -> (r: ExecTnum)
+                    requires self.wf()
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c << (1 as $uint))
+                {
                     let v = self.val; let m = self.mask;
                     proof { assert(v & m == (0 as $uint) ==> (v << (1 as $uint)) & (m << (1 as $uint)) == (0 as $uint)) by(bit_vector); }
-                    ExecTnum { val: v << 1, mask: m << 1 }
+                    let r = ExecTnum { val: v << 1, mask: m << 1 };
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.lsh_sound();
+                        // Bridge: native << 1 == chop(spec lsh, W)
+                        native_lsh(v);
+                        native_lsh(m);
+                        assert(r.to_tn() == ct.lsh().tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c << (1 as $uint)) by {
+                            native_fits(c);
+                            native_lsh(c);
+                            assert(ct.has(c as nat));
+                            assert(ct.lsh().has(chop(lsh(c as nat), w)));
+                            assert((c << (1 as $uint)) as nat == chop(lsh(c as nat), w));
+                        };
+                    }
+                    r
                 }
                 #[inline] pub fn join(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
