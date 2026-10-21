@@ -926,59 +926,79 @@ macro_rules! abstract_domain {
                     let mask = Self::ones_mask(range);
                     let r = ExecAnum { base: min_q, span: mask };
                     proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ca = ChoppedAnum { anum: self.to_an(), w };
+                        ca.div_const_sound(d as nat);
+                        // On this path base + span does not wrap.
+                        let b = self.base; let sp = self.span;
+                        assert(max_v >= sp) by(bit_vector)
+                            requires max_v == b.wrapping_add(sp), max_v >= b;
+                        add_no_overflow(b, sp, max_v);
+                        assert(r.to_an() == self.to_an().div_const(d as nat));
                         assert forall|c: $uint| #![auto] self.has(c) implies r.has(c / d) by {
-                            self.has_eq_uint(c);
-                            r.has_eq_uint(c / d);
-                            // c >= base, (c-base) & !span == 0 ==> c <= base + span
-                            // ==> base/d <= c/d <= max_q
-                            // ==> (c/d - min_q) <= range <= mask
-                            // ==> (c/d - min_q) & !mask == 0
-                            let b = self.base; let s = self.span;
-                            assert(c >= b && (((c - b) as $uint) & !s == (0 as $uint))
-                                && max_v >= b
-                                ==> c <= max_v) by(bit_vector)
-                                requires max_v == b.wrapping_add(s);
-                            vstd::arithmetic::div_mod::lemma_div_is_ordered(self.base as int, c as int, d as int);
-                            vstd::arithmetic::div_mod::lemma_div_is_ordered(c as int, max_v as int, d as int);
-                            // c/d - min_q <= range <= mask
-                            let q = c / d;
-                            assert(q >= min_q && q <= max_q);
-                            let off: $uint = (q - min_q) as $uint;
-                            assert(off <= range) by { assert(q <= max_q); }
-                            // off <= mask (since range <= mask) and mask = 2^k-1
-                            // ==> off & !mask == 0
-                            assert(off <= mask && mask & mask.wrapping_add(1) == (0 as $uint)
-                                ==> off & !mask == (0 as $uint))
-                                by(bit_vector);
+                            native_fits(c);
+                            assert(ca.has(c as nat));
                         };
                     }
                     r
                 }
-                pub fn ones_mask(n: $uint) -> (r: $uint) ensures r >= n, r & r.wrapping_add(1) == 0 {
-                    if n == 0 { proof { assert((0 as $uint) & (0 as $uint).wrapping_add(1) == (0 as $uint)) by(bit_vector); } return 0; }
-                    let _max: $uint = !(0 as $uint);
+                /// The least 2^k - 1 at or above n, which is the spec all_ones(len(n)).
+                pub fn ones_mask(n: $uint) -> (r: $uint)
+                    ensures r >= n, r & r.wrapping_add(1) == 0, r as nat == all_ones(len(n as nat))
+                {
+                    if n == 0 {
+                        proof {
+                            assert((0 as $uint) & (0 as $uint).wrapping_add(1) == (0 as $uint)) by(bit_vector);
+                            assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+                        }
+                        return 0;
+                    }
                     // Build 2^k - 1 by repeated doubling + 1
                     let mut mask: $uint = 1;
-                    proof { assert((1 as $uint) & (1 as $uint).wrapping_add(1) == (0 as $uint)) by(bit_vector); }
-                    // At most BITS iterations since mask doubles each time
+                    proof {
+                        assert((1 as $uint) & (1 as $uint).wrapping_add(1) == (0 as $uint)) by(bit_vector);
+                        assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+                        exp_succ(0);
+                        exp_concrete($bits as nat);
+                    }
                     let mut i: u32 = 0;
                     while mask < n && i < $bits
-                        invariant i <= $bits, mask & mask.wrapping_add(1) == 0
+                        invariant
+                            n > 0,
+                            i < $bits,
+                            mask & mask.wrapping_add(1) == 0,
+                            mask as nat == all_ones((i + 1) as nat),
+                            all_ones(i as nat) < n as nat,
+                            exp($bits as nat) == ($max_val as nat) + 1,
                         decreases ($bits - i)
                     {
-                        proof { assert(mask & mask.wrapping_add(1) == (0 as $uint) ==>
-                            (mask.wrapping_add(mask).wrapping_add(1)) & (mask.wrapping_add(mask).wrapping_add(1)).wrapping_add(1) == (0 as $uint))
-                            by(bit_vector); }
+                        proof {
+                            assert(mask & mask.wrapping_add(1) == (0 as $uint) ==>
+                                (mask.wrapping_add(mask).wrapping_add(1)) & (mask.wrapping_add(mask).wrapping_add(1)).wrapping_add(1) == (0 as $uint))
+                                by(bit_vector);
+                            // mask < n <= MAX = all_ones(bits), so i + 1 < bits and doubling does not wrap.
+                            exp_succ((i + 1) as nat);
+                            exp_succ(i as nat);
+                            if (i + 1) as nat >= $bits as nat {
+                                exp_le($bits as nat, (i + 1) as nat);
+                            }
+                            assert((i + 2) as nat <= $bits as nat);
+                            exp_le((i + 2) as nat, $bits as nat);
+                            exp_pos((i + 1) as nat);
+                            assert(2 * (mask as nat) + 1 <= $max_val as nat);
+                        }
+                        let ghost old = mask;
                         mask = mask.wrapping_add(mask).wrapping_add(1);
                         i += 1;
-                    }
-                    if mask >= n { mask } else {
                         proof {
-                            assert(!(0 as $uint) >= n) by(bit_vector);
-                            assert(!(0 as $uint) & (!(0 as $uint)).wrapping_add(1) == (0 as $uint)) by(bit_vector);
+                            assert(mask as nat == 2 * (old as nat) + 1);
                         }
-                        !(0 as $uint)
                     }
+                    proof {
+                        all_ones_len_unique(n as nat, (i + 1) as nat);
+                    }
+                    mask
                 }
                 pub fn to_etn(&self) -> (r: ExecTnum) ensures r.wf() {
                     let sv = self.base; let sm = self.span;
