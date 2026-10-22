@@ -1370,7 +1370,25 @@ macro_rules! abstract_domain {
                     proof { assert(((sv & !sm) & sm) == (0 as $uint)) by(bit_vector); }
                     ExecTnum { val: sv & !sm, mask: sm }
                 }
-                #[inline] pub fn from_etn(t: &ExecTnum) -> ExecAnum requires t.wf() { ExecAnum { base: t.val, span: t.mask } }
+                /// A Tnum read as an Anum: the spec ChoppedAnum::from_tnum.
+                #[inline] pub fn from_etn(t: &ExecTnum) -> (r: ExecAnum)
+                    requires t.wf()
+                    ensures forall|c: $uint| #![auto] t.has(c) ==> r.has(c)
+                {
+                    let r = ExecAnum { base: t.val, span: t.mask };
+                    proof {
+                        let w: nat = $bits as nat;
+                        t.to_chopped();
+                        let ct = ChoppedTnum { tnum: t.to_tn(), w };
+                        ChoppedAnum::from_tnum_sound(ct);
+                        assert(r.to_an() == ChoppedAnum::from_tnum(ct).anum);
+                        assert forall|c: $uint| #![auto] t.has(c) implies r.has(c) by {
+                            native_fits(c);
+                            assert(ct.has(c as nat));
+                        };
+                    }
+                    r
+                }
                 #[inline] pub fn min_val(&self) -> (r: $uint) ensures r == self.base { self.base }
                 #[inline] pub fn max_val(&self) -> (r: $uint) ensures r == self.base.wrapping_add(self.span) { self.base.wrapping_add(self.span) }
                 proof fn has_bounds(&self, c: $uint)
