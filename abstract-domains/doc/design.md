@@ -237,7 +237,7 @@ Layer 1: bools.rs + nats.rs        — Natural number algorithms on infinite bit
 Layer 2: tbit.rs + tnum.rs         — Recursive abstract domain operations + soundness
          anum.rs + unum.rs + div.rs
 Layer 3: chopped.rs                — Bounded (w-bit) simulation via chop
-Layer 4: exec_tnum.rs + domains.rs — Machine-word execution on u8/u16/u32/u64
+Layer 4: domains.rs               — Machine-word execution on u8/u16/u32/u64
 ```
 
 ### Layer 1: Natural numbers as infinite bitstrings (`bools.rs`, `nats.rs`)
@@ -306,7 +306,7 @@ The `div` and `neg` spec functions currently have no corresponding Layer-3
 soundness theorem. All contracts that are stated in this layer verify without
 project-local admits.
 
-### Layer 4: Executable machine-word domains (`domains.rs`, `exec_tnum.rs`)
+### Layer 4: Executable machine-word domains (`domains.rs`)
 
 Native Rust implementations on u8, u16, u32, and u64 via macro generation.
 The u128 instantiation is disabled because its bitvector obligations exceed
