@@ -490,6 +490,77 @@ impl Tnum {
         self.add_bitwise(neg_t).chop_sound(w);
     }
 
+    /// Soundness of neg for every member, 0 included: the member's negation
+    /// mod 2^w is chop(2^w - y, w).
+    pub proof fn neg_sound(self, w: nat)
+        requires self.inv(), w > 0
+        ensures
+            self.neg(w).inv(),
+            forall|y: nat| #![auto]
+                self.has(y) && y < exp(w) ==> self.neg(w).has(chop((exp(w) - y) as nat, w)),
+    {
+        let ones_tn = Tnum::unit(all_ones(w));
+        assert forall|j: nat| #![auto] !(bit(all_ones(w), j).b() && bit(0 as nat, j).b()) by { bit_zero(j); };
+        disj_bits(all_ones(w), 0);
+        self.xor_sound(ones_tn);
+        let flipped = self.bw_xor(ones_tn);
+        assert forall|i: nat| #![auto] !(bit(flipped.val, i).b() && bit(flipped.mask, i).b()) by {
+            or_bit(self.mask, 0 as nat, i);
+            bit_zero(i);
+            and_not_bit(bw_xor(self.val, all_ones(w)), bw_or(self.mask, 0), i);
+        };
+        disj_bits(flipped.val, flipped.mask);
+        assert forall|j: nat| #![auto] !(bit(1 as nat, j).b() && bit(0 as nat, j).b()) by { bit_zero(j); };
+        disj_bits(1 as nat, 0);
+        flipped.add_sound(Tnum::unit(1));
+        flipped.add_bitwise_eq(Tnum::unit(1));
+        let sum = flipped.add_bitwise(Tnum::unit(1));
+        Self::add_bitwise_inv(flipped, Tnum::unit(1));
+        sum.chop_sound(w);
+        assert(self.neg(w) == sum.chop_tn(w));
+        Tnum::unit_has(all_ones(w));
+        Tnum::unit_has(1);
+        assert forall|y: nat| #![auto]
+            self.has(y) && y < exp(w)
+            implies self.neg(w).has(chop((exp(w) - y) as nat, w)) by {
+            assert(flipped.has(bw_xor(y, all_ones(w))));
+            nat_add_carry_correct(bw_xor(y, all_ones(w)), 1, Bit::f());
+            xor_ones_complement(y, w);
+            exp_pos(w);
+            assert(nat_add(bw_xor(y, all_ones(w)), 1) == (exp(w) - y) as nat);
+            assert(sum.has((exp(w) - y) as nat));
+        };
+    }
+
+    /// Soundness of sub for every pair of members: the difference mod 2^w is
+    /// chop(x + (2^w - y), w).
+    pub proof fn sub_sound_all(self, t: Tnum, w: nat)
+        requires self.inv(), t.inv(), w > 0
+        ensures forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) && x < exp(w) && y < exp(w) ==>
+            self.sub(t, w).has(chop(nat_add(x, (exp(w) - y) as nat), w))
+    {
+        t.neg_sound(w);
+        let neg_t = t.neg_tn(w);
+        assert(neg_t == t.neg(w));
+        self.add_bitwise_eq(neg_t);
+        self.add_sound(neg_t);
+        let sum = self.add_bitwise(neg_t);
+        Self::add_bitwise_inv(self, neg_t);
+        sum.chop_sound(w);
+        assert forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) && x < exp(w) && y < exp(w)
+            implies self.sub(t, w).has(chop(nat_add(x, (exp(w) - y) as nat), w)) by {
+            let ny = chop((exp(w) - y) as nat, w);
+            assert(neg_t.has(ny));
+            assert(sum.has(nat_add(x, ny)));
+            chop_nat_add(x, ny, w);
+            chop_nat_add(x, (exp(w) - y) as nat, w);
+            chop_idem((exp(w) - y) as nat, w);
+            chop_id(x, w);
+        };
+    }
+
     /// General division: Tnum / Tnum using w-bit long division.
     pub open spec fn div(self, t: Tnum, w: nat) -> (Tnum, Tnum) {
         Self::div_loop(self, t, w, w, Tnum::zero(), Tnum::zero())
