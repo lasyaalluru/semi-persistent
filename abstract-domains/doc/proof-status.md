@@ -51,7 +51,7 @@ The current **universal containment** contracts are:
 | Type | Operations with universal containment contracts |
 | --- | --- |
 | `ExecTnum` | `constant`, `bw_or`, `bw_and`, `bw_xor`, `bw_not`, `bw_and_not`, `add`, `neg`, `sub`, `mul`, `join`, `meet`, `rsh`, `lsh`, `rshi`, `lshi` |
-| `ExecAnum` | `constant`, `add`, `div_const`, `from_etn` |
+| `ExecAnum` | `constant`, `add`, `div_const`, `from_etn`, `to_etn` |
 | `ExecUnum` | `constant`, `top`, `add`, `from_interval`, `mul` |
 | `Interval` | `add`, `meet`, `join`, `div_const` |
 | `Interval<W>` | every operation: `Domain`, `meet_exact`, `add`, `sub`, `neg`, `mul`, `div`, `rem`, `and`, `or`, `xor`, `not`, `shl`, `shr` |
@@ -62,7 +62,7 @@ lemmas. #123 removed `ReducedProduct`, whose `reduce` and `add` carried
 containment theorems; `reduce::Product` replaces it.
 
 Other executable methods currently prove well-formedness only. In particular,
-this includes Anum subtraction and the Anum/Tnum conversions, and most Unum
+this includes Anum subtraction, and most Unum
 conversions/arithmetic helpers.
 Their implementations and finite mirror tests are evidence, but not universal
 containment theorems. Adding those postconditions and proofs is the remaining

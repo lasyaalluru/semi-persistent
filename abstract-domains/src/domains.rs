@@ -1365,10 +1365,36 @@ macro_rules! abstract_domain {
                     }
                     mask
                 }
-                pub fn to_etn(&self) -> (r: ExecTnum) ensures r.wf() {
-                    let sv = self.base; let sm = self.span;
-                    proof { assert(((sv & !sm) & sm) == (0 as $uint)) by(bit_vector); }
-                    ExecTnum { val: sv & !sm, mask: sm }
+                /// An Anum read as a Tnum: Tn(0, span) + Tn(base, 0), the spec
+                /// ChoppedAnum::to_tnum. The addition carries the base into the
+                /// span, so a base whose bits overlap the span is covered.
+                pub fn to_etn(&self) -> (r: ExecTnum)
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c)
+                {
+                    proof {
+                        assert((0 as $uint) & self.span == (0 as $uint)) by(bit_vector);
+                        assert(self.base & (0 as $uint) == (0 as $uint)) by(bit_vector);
+                    }
+                    let m = ExecTnum { val: 0, mask: self.span };
+                    let v = ExecTnum { val: self.base, mask: 0 };
+                    let r = m.add(&v);
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ca = ChoppedAnum { anum: self.to_an(), w };
+                        ca.to_tnum_sound();
+                        let an = self.to_an();
+                        disj_zero(an.span);
+                        disj_zero_r(an.base);
+                        an.mask_tnum().add_bitwise_eq(an.val_tnum());
+                        assert(m.to_tn() == an.mask_tnum() && v.to_tn() == an.val_tnum());
+                        assert(r.to_tn() == ca.to_tnum().tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c) by {
+                            native_fits(c);
+                            assert(ca.has(c as nat));
+                        };
+                    }
+                    r
                 }
                 /// A Tnum read as an Anum: the spec ChoppedAnum::from_tnum.
                 #[inline] pub fn from_etn(t: &ExecTnum) -> (r: ExecAnum)

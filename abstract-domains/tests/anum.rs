@@ -82,3 +82,20 @@ fn from_etn_keeps_every_member() {
         }
     }
 }
+
+/// to_etn must carry the base into the span: Anum(1, 1) is {1, 2}, which the
+/// former `(base & !span, span)` encoding gave as {0, 1}.
+#[test]
+fn to_etn_keeps_every_member() {
+    let tn_has = |t: &ExecTnum, c: u8| c & !t.mask == t.val;
+    for base in 0..=255u8 {
+        for span in 0..=255u8 {
+            let a = ExecAnum { base, span };
+            let t = a.to_etn();
+            assert_eq!(t.val & t.mask, 0);
+            for c in members(&a) {
+                assert!(tn_has(&t, c), "to_etn({base}, {span}) misses {c}");
+            }
+        }
+    }
+}
