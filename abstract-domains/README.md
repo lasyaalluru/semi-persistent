@@ -55,16 +55,20 @@ bit fields.
 - Key formula: `cout = (x1 & x2) | ((x1 | x2) & ~(x1 + x2))`
 
 **Division**: long division by iterated subtraction, dual of multiplication.
-Both constant-divisor and general Tnum/Tnum division are proved sound.
+The constant-divisor and general Tnum/Tnum quotient theorems (`div_const_sound`,
+`div_sound`) are stated against the spec long division `div1`; no lemma yet
+relates `div1(..).0` to `/`, the remainder has no theorem, and there is no
+executable Tnum division.
 
 ### Layer 3: Bounded simulation (`chopped.rs`)
 
 `ChoppedTnum`, `ChoppedAnum`, and `ChoppedUnum` pair an unbounded domain with
 a bit width. Explicit bounded containment theorems cover ChoppedTnum
-add/mul/shifts/join/meet, ChoppedAnum add/division by constant, and
-ChoppedUnum add/mul, subject to their stated fit and no-overflow preconditions.
-The ChoppedTnum bitwise helpers currently expose invariant/width preservation,
-while its `div` and `neg` spec functions have no Layer-3 containment theorem.
+add/sub/neg/mul (both accumulators)/bitwise (or, and, xor, and-not, not)/shifts
+(rsh, lsh, rshi, lshi)/join/meet, ChoppedAnum add/division by constant and the
+conversions to and from Tnum, and ChoppedUnum add/mul, subject to their stated
+fit and no-overflow preconditions. ChoppedTnum `div` has no Layer-3
+containment theorem.
 
 ### Layer 4: Executable domains (domains.rs)
 
@@ -82,10 +86,12 @@ These domains combine through `reduce::Product` and the fact records (see
 `Domain` with a `BotOr` bottom and `Refine`.
 
 Every executable method verifies its stated contract. Universal containment
-theorems currently cover `ExecTnum` bitwise/add/join/meet,
-`ExecAnum` add/division by constant, `ExecUnum` top/add/from-interval/multiply,
-`Interval` add/meet/join/division by constant. Other Layer 4 methods
-currently prove well-formedness only; see
+theorems, each derived from the Layer-3 theorem through `to_chopped()`, cover
+every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, shifts,
+join, meet) and `ExecAnum` constant/top/add/division by constant/conversions;
+they also cover `ExecUnum` top/add/from-interval/multiply and `Interval`
+add/meet/join/division by constant. Other Layer 4 methods (Anum subtraction,
+most Unum helpers) currently prove well-formedness only; see
 [the proof-status inventory](doc/proof-status.md).
 
 ### Shared domain interface (lattice.rs, word.rs, semantics.rs, transfer.rs)

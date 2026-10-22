@@ -276,7 +276,9 @@ The hardest theorem, `add_bitwise_eq`, uses
 
 **Anum** (`anum.rs`): Additive tristate numbers. Addition is exact on the
 base value. `div_const` gives an exact base quotient for division by
-constant. Tnum multiplication uses Anum as internal accumulator (`tnum_mul`).
+constant. Tnum multiplication uses Anum as internal accumulator (`tnum_mul`);
+`Tnum::tacc_mul` is the Tnum-accumulator version, with its own soundness
+theorem.
 
 **Unum** (`unum.rs`): Horizontally composable additive tristate numbers.
 The unbounded addition formula and multiplication's bilinear bound have
@@ -285,7 +287,10 @@ Membership uses borrow-tracking subtraction, and the core addition proof
 maintains `cd + br ≤ cx + b1 + b2`.
 
 **Div** (`div.rs`): Tnum division and subtraction. Long division by iterated
-subtraction; both constant-divisor and general Tnum÷Tnum proved sound.
+subtraction. The quotient theorems for constant-divisor and general Tnum÷Tnum
+division are stated against the spec long division `div1`; no lemma yet relates
+`div1(..).0` to `/`, and the remainder has no theorem. Negation and subtraction
+(`neg_sound`, `sub_sound_all`) are proved for every member.
 
 All contracts described in this Layer-2 inventory verify without admits.
 
@@ -295,15 +300,14 @@ All contracts described in this Layer-2 inventory verify without admits.
 L2 types with a bit-width. The current explicit bounded containment contracts
 are:
 
-- ChoppedTnum: add, mul, shifts (lsh, rsh), join, meet
-- ChoppedAnum: add and div_const, under their stated fit/divisor preconditions
+- ChoppedTnum: add, sub, neg, mul and mul_tacc, bitwise (or, and, xor,
+  and_not, not), shifts (lsh, rsh, lshi, rshi), join, meet
+- ChoppedAnum: add, div_const, from_tnum and to_tnum, under their stated
+  fit/divisor preconditions
 - ChoppedUnum: add and mul, under their stated no-overflow/fit preconditions
 
-ChoppedTnum bitwise `or_inv`, `and_inv`, and `xor_inv` expose
-invariant/width-preservation postconditions and call the Layer-2 soundness
-lemmas internally, but they do not state a Layer-3 containment postcondition.
-The `div` and `neg` spec functions currently have no corresponding Layer-3
-soundness theorem. All contracts that are stated in this layer verify without
+The `div` spec function currently has no corresponding Layer-3 soundness
+theorem. All contracts that are stated in this layer verify without
 project-local admits.
 
 ### Layer 4: Executable machine-word domains (`domains.rs`)
@@ -326,10 +330,18 @@ The **bitwise bridge** connects native bitwise ops to spec bitwise ops:
 Every L4 method verifies its stated contract. Universal containment is
 currently proved for:
 
-- `ExecTnum::{bw_or,bw_and,bw_xor,add,join,meet}`;
-- `ExecAnum::{add,div_const}`;
+- `ExecTnum::{constant,bw_or,bw_and,bw_xor,bw_not,bw_and_not,add,sub,neg,mul,
+  rsh,lsh,rshi,lshi,join,meet}`, each derived from its Layer-3 theorem through
+  `to_chopped()`;
+- `ExecAnum::{constant,top,add,div_const,from_etn,to_etn}`, the same way;
 - `ExecUnum::{top,add,from_interval,mul}`;
 - `Interval::{add,meet,join,div_const}`.
+
+Most `ExecTnum` operations also ensure that their result equals the Layer-3
+spec (`r.to_tn() == ct.op().tnum`), so composite operations (`neg`, `sub`,
+`mul`) chain them. `meet` does not: it normalizes, and equals the spec only when
+the operands share a member. `mul` is the meet of the Anum-accumulator
+(`mul_anum_acc`) and Tnum-accumulator (`mul_tnum_acc`) products.
 
 Other executable operations currently prove well-formedness only. L2/L3
 soundness and finite mirror tests do not by themselves establish the missing
