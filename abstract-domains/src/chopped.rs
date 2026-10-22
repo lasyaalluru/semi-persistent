@@ -444,6 +444,45 @@ impl ChoppedAnum {
         };
     }
 
+    /// Bounded subtraction: the L2 sub with its span chopped to w bits.
+    pub open spec fn sub(self, t: ChoppedAnum) -> ChoppedAnum {
+        ChoppedAnum {
+            anum: Anum {
+                base: self.anum.sub(t.anum).base,
+                span: chop(self.anum.sub(t.anum).span, self.w),
+            },
+            w: self.w,
+        }
+    }
+
+    /// sub_sound: when self's base is at least t's maximum, no difference of
+    /// members wraps, and every difference is a member of the bounded sub.
+    pub proof fn sub_sound(self, t: ChoppedAnum)
+        requires self.inv(), t.inv(), self.w == t.w, self.anum.base >= nat_add(t.anum.base, t.anum.span)
+        ensures forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) ==> self.sub(t).has((x - y) as nat)
+    {
+        self.anum.sub_sound(t.anum);
+        let s = self.anum.sub(t.anum);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) implies self.sub(t).has((x - y) as nat) by {
+            ChoppedTnum::fits_lt(x, self.w);
+            // y <= t's maximum <= self's base <= x
+            t.anum.has_le_max(y);
+            nat_add_correct(t.anum.base, t.anum.span);
+            assert(y <= x);
+            assert(s.has((x - y) as nat));
+            let off = ((x - y) - s.base) as nat;
+            // The offset is a bit subset of the span and below 2^w, so it is a
+            // bit subset of the chopped span too.
+            s.mask_tnum().has_equiv(off);
+            chop_bw_and_not(off, s.span, self.w);
+            exp_pos(self.w);
+            chop_id(off, self.w);
+            chop_id(0, self.w);
+            Tnum::ctor(0, chop(s.span, self.w)).has_equiv(off);
+            chop_id((x - y) as nat, self.w);
+        };
+    }
+
     /// div_const_sound: delegates to Anum::div_const_sound.
     pub proof fn div_const_sound(self, d: nat)
         requires self.inv(), d > 0

@@ -99,3 +99,32 @@ fn to_etn_keeps_every_member() {
         }
     }
 }
+
+#[test]
+fn sub_contains_every_difference() {
+    // A deterministic sample of operand pairs; every member pair is checked.
+    let mut s: u32 = 0x2545_f491;
+    let mut next = || {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        s
+    };
+    for _ in 0..20_000 {
+        let r = next();
+        let a = ExecAnum {
+            base: r as u8,
+            span: (r >> 8) as u8 & (r >> 24) as u8,
+        };
+        let b = ExecAnum {
+            base: (r >> 16) as u8 & 0x3f,
+            span: (r >> 4) as u8 & (r >> 12) as u8 & 0x1f,
+        };
+        let diff = a.sub(&b);
+        for x in members(&a) {
+            for y in members(&b) {
+                assert!(has(&diff, x.wrapping_sub(y)), "{x} - {y}");
+            }
+        }
+    }
+}

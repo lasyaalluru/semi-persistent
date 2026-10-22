@@ -1155,18 +1155,63 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                #[inline] pub fn sub(&self, t: &ExecAnum) -> ExecAnum {
-                    // The one ExecAnum method here with no soundness ensures: the
-                    // guards below are the hand-checked analogue of add's, until
-                    // sub gets its own has-postcondition. Without them the result
-                    // window can be disjoint from the true difference set.
-                    let max2 = t.base.wrapping_add(t.span);
-                    let v = self.base.wrapping_sub(max2);
-                    let m = self.span.wrapping_add(t.span) | self.span | t.span;
-                    if max2 < t.base || v > self.base {
-                        return ExecAnum { base: 0, span: !(0 as $uint) };
+                /// Sound fixed-width subtraction, through ChoppedAnum::sub_sound: top
+                /// when t's maximum wraps or exceeds self's base, otherwise the spec
+                /// sub, whose differences cannot wrap because every member of t is at
+                /// most t's maximum.
+                #[inline] pub fn sub(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_sub(c2))
+                {
+                    let b1 = self.base; let s1 = self.span;
+                    let b2 = t.base; let s2 = t.span;
+                    let max2 = b2.wrapping_add(s2);
+                    let v = b1.wrapping_sub(max2);
+                    let s12 = s1.wrapping_add(s2);
+                    let m = s12 | s1 | s2;
+                    if max2 < b2 || v > b1 {
+                        return Self::top();
                     }
-                    ExecAnum { base: v, span: m }
+                    let r = ExecAnum { base: v, span: m };
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ca_s = ChoppedAnum { anum: self.to_an(), w };
+                        let ca_t = ChoppedAnum { anum: t.to_an(), w };
+                        // On this path t's maximum does not wrap and is at most b1.
+                        assert(max2 >= s2 && b1 >= max2) by(bit_vector)
+                            requires max2 == b2.wrapping_add(s2), max2 >= b2,
+                                     v == b1.wrapping_sub(max2), v <= b1;
+                        add_no_overflow(b2, s2, max2);
+                        ca_s.sub_sound(ca_t);
+                        // Bridge: the executable span is the chopped spec span,
+                        // which adds the span Tnums (0, s1) + (0, s2).
+                        let mt_s = self.to_an().mask_tnum();
+                        let mt_t = t.to_an().mask_tnum();
+                        disj_zero(s1 as nat); disj_zero(s2 as nat);
+                        mt_s.add_bitwise_eq(mt_t);
+                        let sn = nat_add(s1 as nat, s2 as nat);
+                        nat_add_correct(0, 0);
+                        nat_add_correct(0, sn);
+                        bridge_add(s1, s2);
+                        native_xor(s12, 0);
+                        assert(s12 ^ (0 as $uint) == s12) by(bit_vector);
+                        native_or(s12, s1);
+                        native_or(s12 | s1, s2);
+                        exp_concrete(w);
+                        chop_id(0, w); chop_id(s1 as nat, w); chop_id(s2 as nat, w);
+                        chop_bw_xor(sn, 0, w);
+                        chop_bw_or(bw_xor(sn, 0), s1 as nat, w);
+                        chop_bw_or(bw_or(bw_xor(sn, 0), s1 as nat), s2 as nat, w);
+                        assert(r.to_an() == ca_s.sub(ca_t).anum);
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_sub(c2)) by {
+                            native_fits(c1); native_fits(c2);
+                            // Every member of t is at most max2 <= b1 <= c1, so no wrap.
+                            t.to_an().has_le_max(c2 as nat);
+                            assert(ca_s.has(c1 as nat) && ca_t.has(c2 as nat));
+                            assert(c1.wrapping_sub(c2) as nat == (c1 - c2) as nat);
+                        };
+                    }
+                    r
                 }
                 pub fn div_const(&self, d: $uint) -> (r: ExecAnum)
                     requires d > 0
