@@ -323,6 +323,46 @@ impl ChoppedTnum {
         };
     }
 
+    /// A w-bit value is below 2^w.
+    proof fn fits_lt(n: nat, w: nat)
+        requires fits(n, w)
+        ensures n < exp(w)
+    {
+        chop_is_mod(n, w);
+        exp_pos(w);
+        vstd::arithmetic::div_mod::lemma_mod_bound(n as int, exp(w) as int);
+    }
+
+    pub proof fn neg_sound(self)
+        requires self.inv(), self.w > 0
+        ensures forall|n: nat| #![auto] self.has(n) ==> self.neg().has(chop((exp(self.w) - n) as nat, self.w))
+    {
+        self.tnum.neg_sound(self.w);
+        assert forall|n: nat| #![auto] self.has(n) implies self.neg().has(chop((exp(self.w) - n) as nat, self.w)) by {
+            Self::fits_lt(n, self.w);
+            chop_idem((exp(self.w) - n) as nat, self.w);
+        };
+    }
+
+    /// Bounded subtraction: add the bounded negation.
+    pub open spec fn sub(self, t: ChoppedTnum) -> ChoppedTnum {
+        ChoppedTnum { tnum: self.tnum.sub(t.tnum, self.w), w: self.w }
+    }
+
+    pub proof fn sub_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w, self.w > 0
+        ensures forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) ==> self.sub(t).has(chop(nat_add(x, (exp(self.w) - y) as nat), self.w))
+    {
+        self.tnum.sub_sound_all(t.tnum, self.w);
+        assert forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) implies self.sub(t).has(chop(nat_add(x, (exp(self.w) - y) as nat), self.w)) by {
+            Self::fits_lt(x, self.w);
+            Self::fits_lt(y, self.w);
+            chop_idem(nat_add(x, (exp(self.w) - y) as nat), self.w);
+        };
+    }
+
     /// Bounded join.
     pub open spec fn join(self, t: ChoppedTnum) -> ChoppedTnum {
         ChoppedTnum { tnum: self.tnum.join(t.tnum), w: self.w }

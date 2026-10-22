@@ -251,6 +251,38 @@ macro_rules! abstract_domain {
                 assert(c ^ !(0 as $uint) == !c) by(bit_vector);
             }
 
+            /// Native wrapping negation == chop(2^W - c, W).
+            pub proof fn native_neg(c: $uint)
+                ensures ((0 as $uint).wrapping_sub(c)) as nat == chop((exp($bits as nat) - c as nat) as nat, $bits as nat)
+            {
+                let w: nat = $bits as nat;
+                exp_concrete(w);
+                if c == 0 {
+                    nat_add_correct(0, exp(w));
+                    chop_nat_add_pow2(0, w);
+                    chop_id(0, w);
+                } else {
+                    chop_id((exp(w) - c as nat) as nat, w);
+                }
+            }
+
+            /// Native wrapping subtraction == chop(a + (2^W - b), W).
+            pub proof fn native_sub(a: $uint, b: $uint)
+                ensures (a.wrapping_sub(b)) as nat == chop(nat_add(a as nat, (exp($bits as nat) - b as nat) as nat), $bits as nat)
+            {
+                let w: nat = $bits as nat;
+                exp_concrete(w);
+                nat_add_correct(a as nat, (exp(w) - b as nat) as nat);
+                if a >= b {
+                    let d = (a - b) as nat;
+                    nat_add_correct(d, exp(w));
+                    chop_nat_add_pow2(d, w);
+                    chop_id(d, w);
+                } else {
+                    chop_id(nat_add(a as nat, (exp(w) - b as nat) as nat), w);
+                }
+            }
+
             /// Native right shift by one == spec rsh on nat.
             pub proof fn native_rsh(a: $uint)
                 ensures (a >> (1 as $uint)) as nat == rsh(a as nat)
@@ -505,7 +537,8 @@ macro_rules! abstract_domain {
                 /// the spec XOR with the all-ones word.
                 #[inline] pub fn bw_not(&self) -> (r: ExecTnum)
                     requires self.wf()
-                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(!c)
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(!c),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).bw_not().tnum
                 {
                     let v = self.val; let m = self.mask;
                     let ones: $uint = !(0 as $uint);
@@ -567,7 +600,8 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn add(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_add(c2))
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_add(c2)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).add(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let lbv = self.val.wrapping_add(t.val);
                     let lbm = self.mask.wrapping_add(t.mask);
@@ -632,11 +666,54 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                #[inline] pub fn neg(&self) -> (r: ExecTnum) requires self.wf() ensures r.wf() {
-                    self.bw_not().add(&ExecTnum::constant(1))
+                /// Two's complement negation, encoded as NOT then add one: the spec
+                /// neg is bw_not followed by add of the unit 1.
+                #[inline] pub fn neg(&self) -> (r: ExecTnum)
+                    requires self.wf()
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has((0 as $uint).wrapping_sub(c)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).neg().tnum
+                {
+                    let n = self.bw_not();
+                    proof { assert((1 as $uint) & (0 as $uint) == (0 as $uint)) by(bit_vector); }
+                    let one = ExecTnum { val: 1, mask: 0 };
+                    let r = n.add(&one);
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.neg_sound();
+                        assert(one.to_tn() == Tnum::unit(1));
+                        assert(r.to_tn() == ct.neg().tnum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has((0 as $uint).wrapping_sub(c)) by {
+                            native_fits(c);
+                            native_neg(c);
+                            assert(ct.has(c as nat));
+                        };
+                    }
+                    r
                 }
-                #[inline] pub fn sub(&self, t: &ExecTnum) -> (r: ExecTnum) requires self.wf(), t.wf() ensures r.wf() {
-                    self.add(&t.neg())
+                /// Subtraction, encoded as adding the negation: the spec sub.
+                #[inline] pub fn sub(&self, t: &ExecTnum) -> (r: ExecTnum)
+                    requires self.wf(), t.wf()
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_sub(c2))
+                {
+                    let nt = t.neg();
+                    let r = self.add(&nt);
+                    proof {
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.sub_sound(ct_t);
+                        assert(t.to_tn().neg_tn(w) == t.to_tn().neg(w));
+                        assert(r.to_tn() == ct_s.sub(ct_t).tnum);
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_sub(c2)) by {
+                            native_fits(c1); native_fits(c2);
+                            native_sub(c1, c2);
+                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
+                        };
+                    }
+                    r
                 }
                 #[inline] pub fn rsh(&self) -> (r: ExecTnum)
                     requires self.wf()
