@@ -417,7 +417,8 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn bw_or(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 | c2)
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 | c2),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).bw_or(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let sv = self.val; let sm = self.mask; let tv = t.val; let tm = t.mask;
                     let v = sv | tv; let m = (sm | tm) & !v;
@@ -443,7 +444,8 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn bw_and(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & c2)
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & c2),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).bw_and(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let sv = self.val; let sm = self.mask; let tv = t.val; let tm = t.mask;
                     let r = ExecTnum { val: sv & tv, mask: sm | tm };
@@ -467,7 +469,8 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn bw_xor(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 ^ c2)
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 ^ c2),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).bw_xor(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let v = self.val ^ t.val; let m = self.mask | t.mask;
                     let r = ExecTnum { val: v & !m, mask: m };
@@ -493,7 +496,8 @@ macro_rules! abstract_domain {
                 /// Logical shift right by k bits.
                 #[inline] pub fn rshi(&self, k: u32) -> (r: ExecTnum)
                     requires self.wf(), k < $bits
-                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c >> (k as $uint))
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c >> (k as $uint)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).rshi(k as nat).tnum
                 {
                     let v = self.val; let m = self.mask; let ku = k as $uint;
                     proof { assert(v & m == (0 as $uint) ==> (v >> ku) & (m >> ku) == (0 as $uint)) by(bit_vector); }
@@ -518,7 +522,8 @@ macro_rules! abstract_domain {
                 /// Shift left by k bits, truncated to the width.
                 #[inline] pub fn lshi(&self, k: u32) -> (r: ExecTnum)
                     requires self.wf(), k < $bits
-                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c << (k as $uint))
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c << (k as $uint)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).lshi(k as nat).tnum
                 {
                     let v = self.val; let m = self.mask; let ku = k as $uint;
                     proof { assert(v & m == (0 as $uint) ==> (v << ku) & (m << ku) == (0 as $uint)) by(bit_vector); }
@@ -580,7 +585,8 @@ macro_rules! abstract_domain {
                 /// bw_and_not, computed directly.
                 #[inline] pub fn bw_and_not(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & !c2)
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & !c2),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).bw_and_not(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let sv = self.val; let sm = self.mask; let tv = t.val; let tm = t.mask;
                     let v = (sv & !tv) & !tm;
@@ -703,7 +709,8 @@ macro_rules! abstract_domain {
                 /// Subtraction, encoded as adding the negation: the spec sub.
                 #[inline] pub fn sub(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_sub(c2))
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_sub(c2)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).sub(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let nt = t.neg();
                     let r = self.add(&nt);
@@ -776,7 +783,8 @@ macro_rules! abstract_domain {
                 }
                 #[inline] pub fn join(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c), forall|c: $uint| #![auto] t.has(c) ==> r.has(c)
+                    ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(c), forall|c: $uint| #![auto] t.has(c) ==> r.has(c),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).join(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let sv = self.val; let sm = self.mask; let tv = t.val; let tm = t.mask;
                     let v = sv & tv;
