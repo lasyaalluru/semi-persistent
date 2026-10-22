@@ -223,6 +223,28 @@ impl ChoppedTnum {
         };
     }
 
+    /// Bounded multiplication with a Tnum accumulator: tacc_mul chopped to w bits.
+    pub open spec fn mul_tacc(self, t: ChoppedTnum) -> ChoppedTnum {
+        ChoppedTnum { tnum: Tnum::tacc_mul(self.tnum, t.tnum).chop_tn(self.w), w: self.w }
+    }
+
+    pub proof fn mul_tacc_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) ==>
+            self.mul_tacc(t).has(chop(nat_mul_acc(x, y, 0), self.w))
+    {
+        Tnum::tacc_mul_sound(self.tnum, t.tnum);
+        let prod = Tnum::tacc_mul(self.tnum, t.tnum);
+        prod.chop_sound(self.w);
+        assert forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y)
+            implies self.mul_tacc(t).has(chop(nat_mul_acc(x, y, 0), self.w)) by {
+            assert(prod.has(nat_mul_acc(x, y, 0)));
+            chop_idem(nat_mul_acc(x, y, 0), self.w);
+        };
+    }
+
     /// Bounded division.
     pub open spec fn div(self, t: ChoppedTnum) -> ChoppedTnum {
         ChoppedTnum { tnum: self.tnum.div(t.tnum, self.w).0, w: self.w }
