@@ -861,7 +861,8 @@ macro_rules! abstract_domain {
                 /// L3 ChoppedTnum::mul.
                 pub fn mul(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2))
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2)),
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).mul(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let ghost w: nat = $bits as nat;
                     let ghost t0 = self.to_tn();

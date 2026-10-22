@@ -64,7 +64,7 @@ executable Tnum division.
 
 `ChoppedTnum`, `ChoppedAnum`, and `ChoppedUnum` pair an unbounded domain with
 a bit width. Explicit bounded containment theorems cover ChoppedTnum
-add/sub/neg/mul (both accumulators)/bitwise (or, and, xor, and-not, not)/shifts
+add/sub/neg/mul/bitwise (or, and, xor, and-not, not)/shifts
 (rsh, lsh, rshi, lshi)/join/meet, ChoppedAnum add/sub/division by constant and
 the conversions to and from Tnum, and ChoppedUnum add/mul, subject to their stated
 fit and no-overflow preconditions. ChoppedTnum `div` has no Layer-3
