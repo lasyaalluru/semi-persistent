@@ -720,7 +720,6 @@ macro_rules! abstract_domain {
                         let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
                         let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
                         ct_s.sub_sound(ct_t);
-                        assert(t.to_tn().neg_tn(w) == t.to_tn().neg(w));
                         assert(r.to_tn() == ct_s.sub(ct_t).tnum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_sub(c2)) by {
                             native_fits(c1); native_fits(c2);
@@ -853,16 +852,6 @@ macro_rules! abstract_domain {
                         };
                     }
                     r
-                }
-                pub fn mul_bit(&self, bv: bool, bm: bool) -> (r: ExecTnum)
-                    requires self.wf(), !(bv && bm) ensures r.wf()
-                {
-                    if bv { *self }
-                    else if bm {
-                        proof { assert((0 as $uint) & (self.val | self.mask) == (0 as $uint)) by(bit_vector); }
-                        ExecTnum { val: 0, mask: self.val | self.mask }
-                    }
-                    else { ExecTnum::constant(0) }
                 }
                 /// Multiplication with an Anum accumulator, following
                 /// Anum::mul_step_rc: the exact product of the known bits is computed
