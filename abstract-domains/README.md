@@ -65,8 +65,8 @@ executable Tnum division.
 `ChoppedTnum`, `ChoppedAnum`, and `ChoppedUnum` pair an unbounded domain with
 a bit width. Explicit bounded containment theorems cover ChoppedTnum
 add/sub/neg/mul (both accumulators)/bitwise (or, and, xor, and-not, not)/shifts
-(rsh, lsh, rshi, lshi)/join/meet, ChoppedAnum add/division by constant and the
-conversions to and from Tnum, and ChoppedUnum add/mul, subject to their stated
+(rsh, lsh, rshi, lshi)/join/meet, ChoppedAnum add/sub/division by constant and
+the conversions to and from Tnum, and ChoppedUnum add/mul, subject to their stated
 fit and no-overflow preconditions. ChoppedTnum `div` has no Layer-3
 containment theorem.
 
@@ -88,10 +88,10 @@ These domains combine through `reduce::Product` and the fact records (see
 Every executable method verifies its stated contract. Universal containment
 theorems, each derived from the Layer-3 theorem through `to_chopped()`, cover
 every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, shifts,
-join, meet) and `ExecAnum` constant/top/add/division by constant/conversions;
+join, meet) and `ExecAnum` constant/top/add/sub/division by constant/conversions;
 they also cover `ExecUnum` top/add/from-interval/multiply and `Interval`
-add/meet/join/division by constant. Other Layer 4 methods (Anum subtraction,
-most Unum helpers) currently prove well-formedness only; see
+add/meet/join/division by constant. Other Layer 4 methods (most Unum helpers)
+currently prove well-formedness only; see
 [the proof-status inventory](doc/proof-status.md).
 
 ### Shared domain interface (lattice.rs, word.rs, semantics.rs, transfer.rs)

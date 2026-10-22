@@ -302,7 +302,7 @@ are:
 
 - ChoppedTnum: add, sub, neg, mul and mul_tacc, bitwise (or, and, xor,
   and_not, not), shifts (lsh, rsh, lshi, rshi), join, meet
-- ChoppedAnum: add, div_const, from_tnum and to_tnum, under their stated
+- ChoppedAnum: add, sub, div_const, from_tnum and to_tnum, under their stated
   fit/divisor preconditions
 - ChoppedUnum: add and mul, under their stated no-overflow/fit preconditions
 
@@ -333,7 +333,7 @@ currently proved for:
 - `ExecTnum::{constant,bw_or,bw_and,bw_xor,bw_not,bw_and_not,add,sub,neg,mul,
   rsh,lsh,rshi,lshi,join,meet}`, each derived from its Layer-3 theorem through
   `to_chopped()`;
-- `ExecAnum::{constant,top,add,div_const,from_etn,to_etn}`, the same way;
+- `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn}`, the same way;
 - `ExecUnum::{top,add,from_interval,mul}`;
 - `Interval::{add,meet,join,div_const}`.
 

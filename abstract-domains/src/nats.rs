@@ -277,6 +277,43 @@ pub proof fn and_not_zero_le(a: nat, b: nat)
     }
 }
 
+/// 0 and-not anything is 0.
+pub proof fn and_not_zero_left(s: nat)
+    ensures bw_and_not(0, s) == 0
+{
+    assert forall|i: nat| #![auto] bit(bw_and_not(0, s), i) == bit(0 as nat, i) by {
+        and_not_bit(0, s, i);
+        bit_zero(i);
+    };
+    eq_from_bits(bw_and_not(0, s), 0);
+}
+
+/// If every bit of d is a bit of s, then subtracting d from s borrows nothing:
+/// s - d is again a bit subset of s.
+pub proof fn sub_submask(s: nat, d: nat)
+    requires bw_and_not(d, s) == 0
+    ensures d <= s, bw_and_not((s - d) as nat, s) == 0
+    decreases s
+{
+    and_not_zero_le(d, s);
+    if s == 0 {
+        and_not_zero_left(0);
+    } else {
+        mapd_hd_tl(d, s, |x: Bit, y: Bit| x.and_not(y));
+        assert(hd(0 as nat) == Bit::f() && tl(0 as nat) == 0 as nat);
+        sub_submask(tl(s), tl(d));
+        hd_tl(s);
+        hd_tl(d);
+        let b = Bit::ctor_n((hd(s).n() - hd(d).n()) as nat);
+        let e = (s - d) as nat;
+        assert(e == cons((tl(s) - tl(d)) as nat, b));
+        hd_cons((tl(s) - tl(d)) as nat, b);
+        mapd_hd_tl(e, s, |x: Bit, y: Bit| x.and_not(y));
+        let z = bw_and_not(e, s);
+        hd_tl(z);
+    }
+}
+
 /// a and 0 are disjoint.
 pub proof fn disj_zero_r(n: nat)
     ensures disj(n, 0)
