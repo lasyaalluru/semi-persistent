@@ -501,31 +501,66 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                /// XOR with the constant all-ones word.
+                /// Bitwise NOT: flip the known bits, keep the unknown ones. This is
+                /// the spec XOR with the all-ones word.
                 #[inline] pub fn bw_not(&self) -> (r: ExecTnum)
                     requires self.wf()
                     ensures r.wf(), forall|c: $uint| #![auto] self.has(c) ==> r.has(!c)
                 {
-                    let ones = ExecTnum::constant(!(0 as $uint));
-                    let r = self.bw_xor(&ones);
+                    let v = self.val; let m = self.mask;
+                    let ones: $uint = !(0 as $uint);
+                    let x = v ^ ones;
+                    let r = ExecTnum { val: x & !m, mask: m };
                     proof {
+                        assert(((x & !m) & m) == (0 as $uint)) by(bit_vector);
+                        let w: nat = $bits as nat;
+                        self.to_chopped();
+                        let ct = ChoppedTnum { tnum: self.to_tn(), w };
+                        ct.not_sound();
+                        // Bridge: the native all-ones word is spec all_ones(W).
+                        exp_concrete(w);
+                        assert(ones == $max_val) by(bit_vector) requires ones == !(0 as $uint);
+                        assert(ones as nat == all_ones(w));
+                        native_xor(v, ones);
+                        native_or(m, 0);
+                        assert(m | (0 as $uint) == m) by(bit_vector);
+                        native_and_not(x, m);
+                        assert(r.to_tn() == ct.bw_not().tnum);
                         assert forall|c: $uint| #![auto] self.has(c) implies r.has(!c) by {
+                            native_fits(c);
+                            native_xor(c, ones);
                             native_xor_ones(c);
-                            assert(r.has(c ^ !(0 as $uint)));
+                            assert(ct.has(c as nat));
                         };
                     }
                     r
                 }
-                /// AND with the complement of the second operand.
+                /// AND with the complement of the second operand: the spec
+                /// bw_and_not, computed directly.
                 #[inline] pub fn bw_and_not(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
                     ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & !c2)
                 {
-                    let nt = t.bw_not();
-                    let r = self.bw_and(&nt);
+                    let sv = self.val; let sm = self.mask; let tv = t.val; let tm = t.mask;
+                    let v = (sv & !tv) & !tm;
+                    let m = sm | tm;
+                    let r = ExecTnum { val: v, mask: m };
                     proof {
+                        assert(sv & sm == (0 as $uint) ==> (((sv & !tv) & !tm) & (sm | tm)) == (0 as $uint)) by(bit_vector);
+                        let w: nat = $bits as nat;
+                        self.to_chopped(); t.to_chopped();
+                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                        ct_s.and_not_sound(ct_t);
+                        // Bridge: native bitwise == spec bitwise
+                        native_and_not(sv, tv);
+                        native_and_not(sv & !tv, tm);
+                        native_or(sm, tm);
+                        assert(r.to_tn() == ct_s.bw_and_not(ct_t).tnum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 & !c2) by {
-                            assert(nt.has(!c2));
+                            native_fits(c1); native_fits(c2);
+                            native_and_not(c1, c2);
+                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
                         };
                     }
                     r

@@ -209,6 +209,18 @@ impl Tnum {
         Tnum { val: bw_and_not(bw_and_not(self.val, t.val), t.mask), mask: bw_or(self.mask, t.mask) }
     }
 
+    /// A constant Tnum contains its value.
+    pub proof fn unit_has(n: nat)
+        ensures Tnum::unit(n).has(n)
+    {
+        Tnum::unit(n).has_equiv(n);
+        assert forall|i: nat| #![auto] bit(bw_and_not(n, 0), i) == bit(n, i) by {
+            and_not_bit(n, 0, i);
+            bit_zero(i);
+        };
+        eq_from_bits(bw_and_not(n, 0), n);
+    }
+
     pub proof fn and_not_sound(self, t: Tnum)
         ensures forall|c: nat, tc: nat| #![auto] self.has(c) && t.has(tc) ==> self.bw_and_not(t).has(bw_and_not(c, tc))
     {

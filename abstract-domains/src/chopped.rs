@@ -129,6 +129,37 @@ impl ChoppedTnum {
         };
     }
 
+    pub open spec fn bw_and_not(self, t: ChoppedTnum) -> ChoppedTnum { Self::mk(self.tnum.bw_and_not(t.tnum), self.w) }
+
+    pub proof fn and_not_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) ==> self.bw_and_not(t).has(bw_and_not(x, y))
+    {
+        self.tnum.and_not_sound(t.tnum);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) implies self.bw_and_not(t).has(bw_and_not(x, y)) by {
+            Self::fits_mapd(x, y, |a: Bit, b: Bit| a.and_not(b), self.w);
+        };
+    }
+
+    /// Bounded NOT: XOR with the w-bit all-ones constant.
+    pub open spec fn bw_not(self) -> ChoppedTnum {
+        Self::mk(self.tnum.bw_xor(Tnum::unit(all_ones(self.w))), self.w)
+    }
+
+    pub proof fn not_sound(self)
+        requires self.inv()
+        ensures forall|n: nat| #![auto] self.has(n) ==> self.bw_not().has(bw_xor(n, all_ones(self.w)))
+    {
+        let ones = all_ones(self.w);
+        exp_pos(self.w);
+        chop_id(ones, self.w);
+        Tnum::unit_has(ones);
+        self.tnum.xor_sound(Tnum::unit(ones));
+        assert forall|n: nat| #![auto] self.has(n) implies self.bw_not().has(bw_xor(n, ones)) by {
+            Self::fits_mapd(n, ones, |a: Bit, b: Bit| a.xor(b), self.w);
+        };
+    }
+
     // ================================================================
     // Bounded arithmetic: chop(op(a, b), w)
     // ================================================================
