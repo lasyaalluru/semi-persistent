@@ -21,7 +21,7 @@ use crate::tnum::*;
 /// The ABSTRACT remainder may exceed `d` (due to over-approximation in sub_const),
 /// but every CONCRETE value tracked by the abstract state satisfies `rv < dv`.
 ///
-/// Also provides general Tnum/Tnum division via `neg_tn` (two's complement negation)
+/// Also provides general Tnum/Tnum division via `neg` (two's complement negation)
 /// and `sub_tn` (abstract subtraction). Negation soundness proved via `xor_ones_complement`.
 /// and building the quotient bit by bit via conditional subtraction.
 use vstd::prelude::*;
@@ -345,22 +345,18 @@ impl Tnum {
     // General division: Tnum / Tnum via iterated subtraction
     // ================================================================
 
-    /// Two's complement negation of a Tnum (w-bit).
-    pub open spec fn neg_tn(self, w: nat) -> Tnum {
-        self.bw_xor(Tnum::unit(all_ones(w))).add_bitwise(Tnum::unit(1)).chop_tn(w)
-    }
-
     /// Abstract subtraction of Tnum from Tnum (w-bit).
     pub open spec fn sub(self, t: Tnum, w: nat) -> Tnum {
-        self.add_bitwise(t.neg_tn(w)).chop_tn(w)
+        self.add_bitwise(t.neg(w)).chop_tn(w)
     }
 
-    /// Soundness of neg_tn.
-    pub proof fn neg_tn_sound(self, w: nat)
+    /// Soundness of neg for nonzero members, in two's-complement form;
+    /// neg_sound below covers every member.
+    pub proof fn neg_twos_comp_sound(self, w: nat)
         requires self.inv(), w > 0
         ensures forall|y: nat| #![auto]
             self.has(y) && y > 0 && y < exp(w) ==>
-            self.neg_tn(w).has(twos_comp(y, w))
+            self.neg(w).has(twos_comp(y, w))
     {
         let ones_tn = Tnum::unit(all_ones(w));
         // ones_tn.inv(): disj(all_ones(w), 0)
@@ -392,7 +388,7 @@ impl Tnum {
         eq_from_bits(bw_and_not(1, 0), 1);
         assert forall|y: nat| #![auto]
             self.has(y) && y > 0 && y < exp(w)
-            implies self.neg_tn(w).has(twos_comp(y, w)) by {
+            implies self.neg(w).has(twos_comp(y, w)) by {
             assert(flipped.has(bw_xor(y, all_ones(w)))) by {
                 ones_tn.has_equiv(all_ones(w));
                 assert forall|i: nat| #![auto] bit(bw_and_not(all_ones(w), 0 as nat), i) == bit(all_ones(w), i) by {
@@ -408,8 +404,8 @@ impl Tnum {
                 eq_from_bits(bw_and_not(1, 0), 1);
             };
             nat_add_carry_correct(bw_xor(y, all_ones(w)), 1, Bit::f());
-            // neg_tn(w) == sum.chop_tn(w)
-            assert(self.neg_tn(w) == sum.chop_tn(w));
+            // neg(w) == sum.chop_tn(w)
+            assert(self.neg(w) == sum.chop_tn(w));
             // twos_comp(y, w) = exp(w) - y = bw_xor(y, all_ones(w)) + 1
             xor_ones_complement(y, w);
             exp_pos(w);
@@ -430,9 +426,9 @@ impl Tnum {
             self.has(x) && t.has(y) && x >= y && y > 0 && x < exp(w) && y < exp(w) ==>
             self.sub(t, w).has(chop((x - y) as nat, w))
     {
-        t.neg_tn_sound(w);
-        let neg_t = t.neg_tn(w);
-        // neg_t.inv(): neg_tn = chop_tn(add_bitwise(flipped, unit(1)), w)
+        t.neg_twos_comp_sound(w);
+        let neg_t = t.neg(w);
+        // neg_t.inv(): neg = chop_tn(add_bitwise(flipped, unit(1)), w)
         // flipped.inv() (from xor with unit(all_ones(w)))
         let ones_tn = Tnum::unit(all_ones(w));
         assert forall|j: nat| #![auto] !(bit(all_ones(w), j).b() && bit(0 as nat, j).b()) by { bit_zero(j); };
@@ -484,7 +480,7 @@ impl Tnum {
         disj_bits(1 as nat, 0);
         Self::add_bitwise_inv(flipped, Tnum::unit(1));
         flipped.add_bitwise(Tnum::unit(1)).chop_sound(w);
-        let neg_t = t.neg_tn(w);
+        let neg_t = t.neg(w);
         assert(neg_t.inv());
         Self::add_bitwise_inv(self, neg_t);
         self.add_bitwise(neg_t).chop_sound(w);
@@ -541,8 +537,7 @@ impl Tnum {
             self.sub(t, w).has(chop(nat_add(x, (exp(w) - y) as nat), w))
     {
         t.neg_sound(w);
-        let neg_t = t.neg_tn(w);
-        assert(neg_t == t.neg(w));
+        let neg_t = t.neg(w);
         self.add_bitwise_eq(neg_t);
         self.add_sound(neg_t);
         let sum = self.add_bitwise(neg_t);

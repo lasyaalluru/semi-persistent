@@ -1046,7 +1046,7 @@ impl Tnum {
 
     /// Two's complement negation of a Tnum (w-bit).
     /// We prove this via xor_sound + add_sound + chop_sound.
-    /// Note: neg_tn is also defined in div.rs with full soundness proof.
+    /// Its soundness theorems (neg_sound, neg_twos_comp_sound) are in div.rs.
     pub open spec fn neg(self, w: nat) -> Tnum {
         self.bw_xor(Tnum::unit(all_ones(w))).add_bitwise(Tnum::unit(1)).chop_tn(w)
     }
