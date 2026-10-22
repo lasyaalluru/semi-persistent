@@ -285,10 +285,11 @@ Membership uses borrow-tracking subtraction, and the core addition proof
 maintains `cd + br ≤ cx + b1 + b2`.
 
 **Div** (`div.rs`): Tnum division and subtraction. Long division by iterated
-subtraction. The quotient theorems for constant-divisor and general Tnum÷Tnum
-division are stated against the spec long division `div1`; no lemma yet relates
-`div1(..).0` to `/`, and the remainder has no theorem. Negation and subtraction
-(`neg_sound`, `sub_sound_all`) are proved for every member.
+subtraction. `div1_div_mod` proves that the spec long division `div1` computes
+`n / d` and `n % d` for every `n` below `2^w`, so `div_const_sound_div` and
+`div_sound_div` state that the quotient and remainder Tnums contain `/` and `%`
+of every such member (constant divisor and general Tnum÷Tnum). Negation and
+subtraction (`neg_sound`, `sub_sound_all`) are proved for every member.
 
 All contracts described in this Layer-2 inventory verify without admits.
 

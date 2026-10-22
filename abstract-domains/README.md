@@ -55,10 +55,11 @@ bit fields.
 - Key formula: `cout = (x1 & x2) | ((x1 | x2) & ~(x1 + x2))`
 
 **Division**: long division by iterated subtraction, dual of multiplication.
-The constant-divisor and general Tnum/Tnum quotient theorems (`div_const_sound`,
-`div_sound`) are stated against the spec long division `div1`; no lemma yet
-relates `div1(..).0` to `/`, the remainder has no theorem, and there is no
-executable Tnum division.
+The spec long division `div1` computes `n / d` and `n % d` for every `n`
+below `2^w` (`div1_div_mod`), so the constant-divisor and general Tnum/Tnum
+theorems (`div_const_sound_div`, `div_sound_div`) state that the quotient and
+the remainder Tnums contain `/` and `%` of every such member. There is no
+executable Tnum division yet.
 
 ### Layer 3: Bounded simulation (`chopped.rs`)
 

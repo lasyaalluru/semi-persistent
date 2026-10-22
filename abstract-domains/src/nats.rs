@@ -974,6 +974,151 @@ pub open spec fn div1(n: nat, d: nat, q: nat, r: nat, i: nat) -> (nat, nat)
     }
 }
 
+/// Bit i of n is the low bit of n / 2^i.
+pub proof fn bit_rshi(n: nat, i: nat)
+    ensures bit(n, i) == hd(rshi(n, i))
+    decreases i
+{
+    if i > 0 {
+        bit_rshi(tl(n), (i - 1) as nat);
+    }
+}
+
+/// OR with 0 is the identity.
+pub proof fn or_zero_r(x: nat)
+    ensures bw_or(x, 0) == x
+{
+    assert forall|i: nat| #![auto] bit(bw_or(x, 0), i) == bit(x, i) by {
+        or_bit(x, 0, i);
+        bit_zero(i);
+    };
+    eq_from_bits(bw_or(x, 0), x);
+}
+
+/// Setting bit k of a multiple of 2^(k+1) adds 2^k.
+pub proof fn or_exp_low(q: nat, k: nat)
+    requires q % exp(k + 1) == 0
+    ensures bw_or(q, exp(k)) == q + exp(k)
+    decreases k
+{
+    exp_succ(k);
+    exp_pos(k);
+    let f = |x: Bit, y: Bit| x.or(y);
+    let z = bw_or(q, exp(k));
+    mapd_hd_tl(q, exp(k), f);
+    hd_tl(z);
+    hd_tl(q);
+    // q is even, so its low bit is 0 and q == 2 * tl(q).
+    vstd::arithmetic::div_mod::lemma_mod_mod(q as int, 2, exp(k) as int);
+    assert(q % 2 == 0);
+    if k == 0 {
+        assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+        assert(tl(1 as nat) == 0 && hd(1 as nat) == Bit::t());
+        or_zero_r(tl(q));
+        assert(z == cons(tl(q), Bit::t()));
+    } else {
+        exp_succ((k - 1) as nat);
+        exp_pos((k - 1) as nat);
+        // exp(k) == 2 * exp(k - 1): its low bit is 0 and its tail is exp(k - 1).
+        assert(hd(exp(k)) == Bit::f() && tl(exp(k)) == exp((k - 1) as nat));
+        // tl(q) is a multiple of 2^k.
+        vstd::arithmetic::div_mod::lemma_div_denominator(q as int, 2, exp(k) as int);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(q as int, exp(k + 1) as int);
+        let m = q / exp(k + 1);
+        assert(q == exp(k + 1) * m);
+        vstd::arithmetic::mul::lemma_mul_is_commutative(m as int, exp(k + 1) as int);
+        assert(q == m * exp(k + 1));
+        assert(tl(q) == m * exp(k)) by(nonlinear_arith)
+            requires q == m * exp(k + 1), exp(k + 1) == 2 * exp(k), tl(q) == q / 2;
+        vstd::arithmetic::div_mod::lemma_mod_multiples_basic(m as int, exp(k) as int);
+        or_exp_low(tl(q), (k - 1) as nat);
+        assert(z == cons(tl(q) + exp((k - 1) as nat), Bit::f()));
+    }
+}
+
+/// Long-division invariant: after the bits above position i, q holds the
+/// quotient of n / 2^i shifted back up by i, and r its remainder.
+pub proof fn div1_inv(n: nat, d: nat, q: nat, r: nat, i: nat)
+    requires
+        d > 0,
+        q == ((n / exp(i)) / d) * exp(i),
+        r == (n / exp(i)) % d,
+    ensures div1(n, d, q, r, i) == (n / d, n % d)
+    decreases i
+{
+    if i == 0 {
+        assert(exp(0) == 1) by { assert(lshi(1, 0) == 1); }
+        vstd::arithmetic::div_mod::lemma_div_basics(n as int);
+        assert((n / d) * 1 == n / d);
+    } else {
+        let i1 = (i - 1) as nat;
+        let e1 = exp(i1);
+        let e = exp(i);
+        exp_succ(i1);
+        exp_pos(i1);
+        let ni = n / e;
+        let n1 = n / e1;
+        // n / 2^(i-1) == 2 * (n / 2^i) + bit(n, i-1)
+        vstd::arithmetic::div_mod::lemma_div_denominator(n as int, e1 as int, 2);
+        assert(n1 / 2 == ni);
+        bit_rshi(n, i1);
+        rsh_div(n, i1);
+        let b = bit(n, i1).n();
+        assert(b == n1 % 2);
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(n1 as int, 2);
+        assert(n1 == 2 * ni + b);
+        // ni == qn * d + rn
+        let qn = ni / d;
+        let rn = ni % d;
+        vstd::arithmetic::div_mod::lemma_fundamental_div_mod(ni as int, d as int);
+        vstd::arithmetic::div_mod::lemma_mod_pos_bound(ni as int, d as int);
+        assert(ni == d * qn + rn);
+        let r1 = nat_add(lsh(r), b);
+        nat_add_correct(lsh(r), b);
+        assert(r1 == 2 * rn + b);
+        assert(n1 == 2 * qn * d + r1) by(nonlinear_arith)
+            requires n1 == 2 * ni + b, ni == d * qn + rn, r1 == 2 * rn + b;
+        // q is a multiple of 2^i
+        assert(q == qn * e);
+        vstd::arithmetic::div_mod::lemma_mod_multiples_basic(qn as int, e as int);
+        assert(q == (2 * qn) * e1) by(nonlinear_arith) requires q == qn * e, e == 2 * e1;
+        if r1 >= d {
+            let r2 = (r1 - d) as nat;
+            assert(r1 < 2 * d);
+            assert(n1 == (2 * qn + 1) * d + r2) by(nonlinear_arith)
+                requires n1 == 2 * qn * d + r1, r2 == r1 - d, r1 >= d;
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(n1 as int, d as int, (2 * qn + 1) as int, r2 as int);
+            or_exp_low(q, i1);
+            let q1 = bw_or(q, e1);
+            assert(q1 == (n1 / d) * e1) by(nonlinear_arith)
+                requires q1 == q + e1, q == (2 * qn) * e1, n1 / d == 2 * qn + 1;
+            div1_inv(n, d, q1, r2, i1);
+            assert(div1(n, d, q, r, i) == div1(n, d, q1, r2, i1));
+        } else {
+            assert(n1 == (2 * qn) * d + r1) by(nonlinear_arith)
+                requires n1 == 2 * qn * d + r1;
+            vstd::arithmetic::div_mod::lemma_fundamental_div_mod_converse(n1 as int, d as int, (2 * qn) as int, r1 as int);
+            assert(q == (n1 / d) * e1);
+            div1_inv(n, d, q, r1, i1);
+            assert(div1(n, d, q, r, i) == div1(n, d, q, r1, i1));
+        }
+    }
+}
+
+/// div1 from the zero state computes n / d and n % d for every n below 2^w.
+pub proof fn div1_div_mod(n: nat, d: nat, w: nat)
+    requires d > 0, n < exp(w)
+    ensures div1(n, d, 0, 0, w) == (n / d, n % d)
+{
+    exp_pos(w);
+    vstd::arithmetic::div_mod::lemma_basic_div(n as int, exp(w) as int);
+    assert(n / exp(w) == 0);
+    vstd::arithmetic::div_mod::lemma_div_of0(d as int);
+    vstd::arithmetic::div_mod::lemma_small_mod(0, d as nat);
+    assert(0 * exp(w) == 0) by(nonlinear_arith);
+    div1_inv(n, d, 0, 0, w);
+}
+
 /// Two's complement negation: 2^w - d (for d > 0, d < 2^w).
 pub open spec fn twos_comp(d: nat, w: nat) -> nat
     recommends d > 0
