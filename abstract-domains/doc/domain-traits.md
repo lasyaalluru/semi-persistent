@@ -107,8 +107,9 @@ Width-specific facts go in the trait as lemmas proved in `impl_word!`. They are
 not re-proved inside domain code. The bit lemmas are proved there `by
 (bit_vector)` at every width, u128 included. `shr` and `checked_shl` shift
 natively up to u64, with `x <= MAX >> k` as the overflow test; vstd has no
-u128 shift lemma, so at u128 `checked_shl` multiplies by `1 << k`. The per-width `abstract_domain!` stamping in `domains.rs` is the
-pattern being replaced.
+u128 shift lemma, so at u128 `checked_shl` multiplies by `1 << k`. The
+per-width `abstract_domain!` stamping in `domains.rs` is the pattern being
+replaced.
 
 ## 4. Semantics (`semantics.rs`)
 
