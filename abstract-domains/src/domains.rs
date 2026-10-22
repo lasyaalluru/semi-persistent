@@ -1075,7 +1075,17 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                #[inline] pub fn top() -> ExecAnum { ExecAnum { base: 0, span: !(0 as $uint) } }
+                #[inline] pub fn top() -> (r: ExecAnum)
+                    ensures forall|n: $uint| #![auto] r.has(n)
+                {
+                    let r = ExecAnum { base: 0, span: !(0 as $uint) };
+                    proof {
+                        assert forall|n: $uint| #![auto] r.has(n) by {
+                            ExecAnum::top_has(n);
+                        };
+                    }
+                    r
+                }
                 /// Sound fixed-width addition, through ChoppedAnum::add_sound: top when
                 /// a represented bound or the span sum would wrap, otherwise the spec
                 /// add, whose members cannot wrap because each is at most base + span.
@@ -1090,7 +1100,7 @@ macro_rules! abstract_domain {
                     let max1 = b1.wrapping_add(s1);
                     let max2 = b2.wrapping_add(s2);
                     let max_sum = max1.wrapping_add(max2);
-                    if max1 < b1 || max2 < b2 || max_sum < max1 || max_sum < max2 || v < b1 || sm < s1 {
+                    if max1 < b1 || max2 < b2 || max_sum < max1 || max_sum < max2 || v < b1 {
                         let r = ExecAnum { base: 0, span: !(0 as $uint) };
                         proof {
                             assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_add(c2)) by {
@@ -1156,7 +1166,7 @@ macro_rules! abstract_domain {
                     let max2 = t.base.wrapping_add(t.span);
                     let v = self.base.wrapping_sub(max2);
                     let m = self.span.wrapping_add(t.span) | self.span | t.span;
-                    if max2 < t.base || v > self.base || m < self.span {
+                    if max2 < t.base || v > self.base {
                         return ExecAnum { base: 0, span: !(0 as $uint) };
                     }
                     ExecAnum { base: v, span: m }
