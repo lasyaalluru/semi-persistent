@@ -22,7 +22,7 @@ definitions rather than constituting a second formal verification.
 ## Architecture
 
 ```
-Layer 4: exec_tnum.rs / domains.rs  -- Executable u8/u16/u32/u64 implementations
+Layer 4: domains.rs                -- Executable u8/u16/u32/u64 implementations
 Layer 3: chopped.rs                 -- Bounded-width simulation
 Layer 2: tnum.rs / anum.rs / unum.rs / div.rs -- Unbounded theory with soundness proofs
 Layer 1: nats.rs / bools.rs         -- Natural numbers as infinite bitstrings
@@ -66,7 +66,7 @@ ChoppedUnum add/mul, subject to their stated fit and no-overflow preconditions.
 The ChoppedTnum bitwise helpers currently expose invariant/width preservation,
 while its `div` and `neg` spec functions have no Layer-3 containment theorem.
 
-### Layer 4: Executable domains (exec_tnum.rs, domains.rs)
+### Layer 4: Executable domains (domains.rs)
 
 Native Rust implementations on u8/u16/u32/u64 (`u128` is disabled because its
 bitvector obligations exceed current solver capacity):
