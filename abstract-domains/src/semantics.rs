@@ -16,9 +16,9 @@
 //!
 //! Division by zero has no meaning here: every division contract excludes zero
 //! divisors and reports them through `transfer::DivZero`.
-// `pow2` is used only by spec functions, which are erased outside Verus.
-#![allow(unused_imports)]
 use crate::word::*;
+// `pow2` is used only by spec functions, which are erased outside Verus.
+#[allow(unused_imports)]
 use vstd::arithmetic::power2::*;
 use vstd::prelude::*;
 
