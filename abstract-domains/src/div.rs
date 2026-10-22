@@ -175,12 +175,14 @@ impl Tnum {
         }
     }
 
-    /// Soundness of div_const.
+    /// Soundness of div_const against the spec long division div1: both the
+    /// quotient and the remainder. div_const_sound_div restates it for / and %.
     pub proof fn div_const_sound(self, d: nat, w: nat)
         requires self.inv(), d > 0, d <= exp(w)
         ensures forall|n: nat| #![auto]
             self.has(n) ==>
             self.div_const(d, w).0.has(div1(n, d, 0, 0, w).0)
+            && self.div_const(d, w).1.has(div1(n, d, 0, 0, w).1)
     {
         let z = Tnum::zero();
         disj_zero(0 as nat);
@@ -190,7 +192,8 @@ impl Tnum {
         };
         Self::div_const_loop_sound(self, d, w, w, z, z);
         assert forall|n: nat| #![auto] self.has(n)
-            implies self.div_const(d, w).0.has(div1(n, d, 0, 0, w).0) by {
+            implies self.div_const(d, w).0.has(div1(n, d, 0, 0, w).0)
+            && self.div_const(d, w).1.has(div1(n, d, 0, 0, w).1) by {
             assert(z.has(0 as nat));
             assert((0 as nat) < d);
         };
@@ -556,6 +559,37 @@ impl Tnum {
         };
     }
 
+    /// div_const contains the quotient n / d and the remainder n % d of every
+    /// member below 2^w.
+    pub proof fn div_const_sound_div(self, d: nat, w: nat)
+        requires self.inv(), d > 0, d <= exp(w)
+        ensures forall|n: nat| #![auto]
+            self.has(n) && n < exp(w) ==>
+            self.div_const(d, w).0.has(n / d) && self.div_const(d, w).1.has(n % d)
+    {
+        self.div_const_sound(d, w);
+        assert forall|n: nat| #![auto] self.has(n) && n < exp(w) implies
+            self.div_const(d, w).0.has(n / d) && self.div_const(d, w).1.has(n % d) by {
+            div1_div_mod(n, d, w);
+        };
+    }
+
+    /// div contains the quotient x / y and the remainder x % y of every pair of
+    /// members with x below 2^w.
+    pub proof fn div_sound_div(self, t: Tnum, w: nat)
+        requires self.inv(), t.inv(), t.min() > 0, t.max() < exp(w)
+        ensures forall|x: nat, y: nat| #![auto]
+            self.has(x) && t.has(y) && x < exp(w) ==>
+            self.div(t, w).0.has(x / y) && self.div(t, w).1.has(x % y)
+    {
+        self.div_sound(t, w);
+        assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) && x < exp(w) implies
+            self.div(t, w).0.has(x / y) && self.div(t, w).1.has(x % y) by {
+            t.has_bounds(y);
+            div1_div_mod(x, y, w);
+        };
+    }
+
     /// General division: Tnum / Tnum using w-bit long division.
     pub open spec fn div(self, t: Tnum, w: nat) -> (Tnum, Tnum) {
         Self::div_loop(self, t, w, w, Tnum::zero(), Tnum::zero())
@@ -585,11 +619,14 @@ impl Tnum {
     }
 
     /// Soundness of general Tnum division.
+    /// Soundness of div against the spec long division div1: both the quotient
+    /// and the remainder. div_sound_div restates it for / and %.
     pub proof fn div_sound(self, t: Tnum, w: nat)
         requires self.inv(), t.inv(), t.min() > 0, t.max() < exp(w)
         ensures forall|x: nat, y: nat| #![auto]
             self.has(x) && t.has(y) ==>
             self.div(t, w).0.has(div1(x, y, 0, 0, w).0)
+            && self.div(t, w).1.has(div1(x, y, 0, 0, w).1)
     {
         let z = Tnum::zero();
         disj_zero(0 as nat);
@@ -599,7 +636,8 @@ impl Tnum {
         Self::div_loop_sound(self, t, w, w, z, z);
         assert forall|x: nat, y: nat| #![auto]
             self.has(x) && t.has(y)
-            implies self.div(t, w).0.has(div1(x, y, 0, 0, w).0) by {
+            implies self.div(t, w).0.has(div1(x, y, 0, 0, w).0)
+            && self.div(t, w).1.has(div1(x, y, 0, 0, w).1) by {
             assert(z.has(0 as nat));
             assert((0 as nat) < y) by { t.has_bounds(y); };
         };
