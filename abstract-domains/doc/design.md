@@ -276,9 +276,7 @@ The hardest theorem, `add_bitwise_eq`, uses
 
 **Anum** (`anum.rs`): Additive tristate numbers. Addition is exact on the
 base value. `div_const` gives an exact base quotient for division by
-constant. Tnum multiplication uses Anum as internal accumulator (`tnum_mul`);
-`Tnum::tacc_mul` is the Tnum-accumulator version, with its own soundness
-theorem.
+constant. Tnum multiplication uses Anum as internal accumulator (`tnum_mul`).
 
 **Unum** (`unum.rs`): Horizontally composable additive tristate numbers.
 The unbounded addition formula and multiplication's bilinear bound have
@@ -300,7 +298,7 @@ All contracts described in this Layer-2 inventory verify without admits.
 L2 types with a bit-width. The current explicit bounded containment contracts
 are:
 
-- ChoppedTnum: add, sub, neg, mul and mul_tacc, bitwise (or, and, xor,
+- ChoppedTnum: add, sub, neg, mul, bitwise (or, and, xor,
   and_not, not), shifts (lsh, rsh, lshi, rshi), join, meet
 - ChoppedAnum: add, sub, div_const, from_tnum and to_tnum, under their stated
   fit/divisor preconditions
@@ -337,11 +335,13 @@ currently proved for:
 - `ExecUnum::{top,add,from_interval,mul}`;
 - `Interval::{add,meet,join,div_const}`.
 
-Most `ExecTnum` operations also ensure that their result equals the Layer-3
-spec (`r.to_tn() == ct.op().tnum`), so composite operations (`neg`, `sub`,
-`mul`) chain them. `meet` does not: it normalizes, and equals the spec only when
-the operands share a member. `mul` is the meet of the Anum-accumulator
-(`mul_anum_acc`) and Tnum-accumulator (`mul_tnum_acc`) products.
+Most `ExecTnum` operations also ensure, as a clause separate from containment,
+that their result equals the Layer-3 spec (`r.to_tn() == ct.op().tnum`). This
+lets composite operations chain them (`neg` and `sub` through `bw_not` and
+`add`; the `mul` loop invariant through `add`, `rsh` and `lsh`), and it pins
+precision: a less precise `add` would still be sound but would break these
+proofs. `meet` does not export it: it normalizes, and equals the spec only when
+the operands share a member. `mul` follows `Anum::mul_step_rc`.
 
 Other executable operations currently prove well-formedness only. L2/L3
 soundness and finite mirror tests do not by themselves establish the missing

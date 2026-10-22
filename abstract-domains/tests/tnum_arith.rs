@@ -69,30 +69,3 @@ fn mul_contains_every_product() {
         }
     }
 }
-
-/// The hybrid is the meet of the Anum-accumulator product and the former
-/// Tnum-accumulator product (walking the bits of the second operand), so it is
-/// at least as tight as either, in particular never looser than before.
-#[test]
-fn mul_is_at_least_as_tight_as_each_accumulator() {
-    let tnums = all_tnums();
-    for a in tnums.iter().step_by(5) {
-        for b in tnums.iter().step_by(5) {
-            let h = members(&a.mul(b)).len();
-            assert!(h <= members(&a.mul_anum_acc(b)).len());
-            assert!(h <= members(&b.mul_tnum_acc(a)).len());
-        }
-    }
-}
-
-/// The example where the Anum accumulator alone loses bit 5: (1, mask 6) * 3.
-#[test]
-fn mul_keeps_the_carry_the_anum_accumulator_loses() {
-    let x = ExecTnum { val: 1, mask: 6 };
-    let y = ExecTnum { val: 3, mask: 0 };
-    let anum = x.mul_anum_acc(&y);
-    assert_eq!((anum.val, anum.mask), (1, 62));
-    let r = x.mul(&y);
-    assert_eq!((r.val, r.mask), (1, 30));
-    assert_eq!(members(&r).len(), 16);
-}

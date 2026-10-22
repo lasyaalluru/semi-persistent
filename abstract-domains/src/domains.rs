@@ -853,15 +853,15 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                /// Multiplication with an Anum accumulator, following
-                /// Anum::mul_step_rc: the exact product of the known bits is computed
-                /// once, and an accumulator Tnum with val 0 collects only the
-                /// uncertainty masks of the shifted multiplicand. The loop simulates
-                /// mul_step_rc through to_chopped(), and Anum::mul_step_r equates
-                /// mul_step_rc with tnum_mul, which is the L3 ChoppedTnum::mul.
-                pub fn mul_anum_acc(&self, t: &ExecTnum) -> (r: ExecTnum)
+                /// Multiplication following Anum::mul_step_rc: the exact product of the
+                /// known bits is computed once, and an accumulator Tnum with val 0
+                /// collects only the uncertainty masks of the shifted multiplicand.
+                /// The loop simulates mul_step_rc through to_chopped(), and
+                /// Anum::mul_step_r equates mul_step_rc with tnum_mul, which is the
+                /// L3 ChoppedTnum::mul.
+                pub fn mul(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
-                    ensures r.wf(),
+                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2)),
                         r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).mul(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let ghost w: nat = $bits as nat;
@@ -967,121 +967,12 @@ macro_rules! abstract_domain {
                         let ct_s = ChoppedTnum { tnum: t0, w };
                         let ct_t = ChoppedTnum { tnum: t1, w };
                         assert(r.to_tn() == ct_s.mul(ct_t).tnum);
-                    }
-                    r
-                }
-                /// Multiplication with a Tnum accumulator: for each bit of the
-                /// multiplier, add the shifted multiplicand when the bit is known one
-                /// and its uncertainty when unknown. The loop simulates Tnum::mul_tacc
-                /// through to_chopped(), so the result is the L3 ChoppedTnum::mul_tacc.
-                pub fn mul_tnum_acc(&self, t: &ExecTnum) -> (r: ExecTnum)
-                    requires self.wf(), t.wf()
-                    ensures r.wf(),
-                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).mul_tacc(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
-                {
-                    let ghost w: nat = $bits as nat;
-                    let ghost t0 = self.to_tn();
-                    let ghost t1 = t.to_tn();
-                    proof { assert((0 as $uint) & (0 as $uint) == (0 as $uint)) by(bit_vector); }
-                    let mut acc = ExecTnum { val: 0, mask: 0 };
-                    let mut p = *self;
-                    let mut q = *t;
-                    let ghost mut ps = t0;
-                    let ghost mut qs = t1;
-                    let ghost mut accs = Tnum::zero();
-                    proof {
-                        t.wf_inv();
-                        native_fits(t.val); native_fits(t.mask);
-                        exp_pos(w);
-                        chop_id(0, w);
-                        disj_zero(0);
-                    }
-                    while !(p.val == 0 && p.mask == 0)
-                        invariant
-                            w == $bits as nat,
-                            p.wf(), q.wf(), acc.wf(),
-                            p.to_tn() == ps,
-                            q.to_tn() == qs.chop_tn(w),
-                            acc.to_tn() == accs.chop_tn(w),
-                            qs.inv(), accs.inv(),
-                            Tnum::mul_tacc(ps, qs, accs) == Tnum::tacc_mul(t0, t1),
-                        decreases p.val as nat + p.mask as nat
-                    {
-                        let ghost ps0 = ps;
-                        let ghost qs0 = qs;
-                        let ghost accs0 = accs;
-                        proof {
-                            native_low_bit(p.val);
-                            native_low_bit(p.mask);
-                            exp_pos(w);
-                            chop_id(0, w);
-                        }
-                        if (p.val & 1) == 1 {
-                            acc = acc.add(&q);
-                            proof {
-                                Tnum::chop_add_bitwise(accs0, qs0, w);
-                                accs0.add_bitwise_eq(qs0);
-                                accs0.add_inv(qs0);
-                                accs = accs0.add(qs0);
-                            }
-                        } else if (p.mask & 1) == 1 {
-                            proof { assert((0 as $uint) & (q.val | q.mask) == (0 as $uint)) by(bit_vector); }
-                            let add_t = ExecTnum { val: 0, mask: q.val | q.mask };
-                            acc = acc.add(&add_t);
-                            proof {
-                                let c = qs0.add_zero();
-                                native_or(q.val, q.mask);
-                                chop_bw_or(qs0.val, qs0.mask, w);
-                                assert(add_t.to_tn() == c.chop_tn(w));
-                                Tnum::chop_add_bitwise(accs0, c, w);
-                                disj_zero(qs0.max());
-                                accs0.add_bitwise_eq(c);
-                                accs0.add_inv(c);
-                                accs = accs0.add(c);
-                            }
-                        }
-                        p = p.rsh();
-                        q = q.lsh();
-                        proof {
-                            ps = ps0.rsh();
-                            qs = qs0.lsh();
-                            qs0.lsh_inv();
-                            Tnum::chop_lsh_tn(qs0, w);
-                        }
-                    }
-                    proof {
-                        assert(ps.is_zero());
-                        assert(accs == Tnum::tacc_mul(t0, t1));
-                    }
-                    acc
-                }
-                /// Hybrid multiplication: the Anum-accumulator product of self by t and
-                /// the Tnum-accumulator product walking the bits of t (the former
-                /// algorithm) each contain every concrete product, so their meet does
-                /// too, and it is at least as tight as either.
-                pub fn mul(&self, t: &ExecTnum) -> (r: ExecTnum)
-                    requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2))
-                {
-                    let a = self.mul_anum_acc(t);
-                    let b = t.mul_tnum_acc(self);
-                    let r = a.meet(&b);
-                    proof {
-                        let w: nat = $bits as nat;
-                        self.to_chopped(); t.to_chopped();
-                        let ct_s = ChoppedTnum { tnum: self.to_tn(), w };
-                        let ct_t = ChoppedTnum { tnum: t.to_tn(), w };
                         ct_s.mul_sound(ct_t);
-                        ct_t.mul_tacc_sound(ct_s);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_mul(c2)) by {
                             native_fits(c1); native_fits(c2);
                             assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
                             nat_mul_acc_correct(c1 as nat, c2 as nat, 0);
-                            nat_mul_acc_correct(c2 as nat, c1 as nat, 0);
-                            assert((c2 as nat) * (c1 as nat) == (c1 as nat) * (c2 as nat)) by(nonlinear_arith);
                             bridge_mul(c1, c2);
-                            assert(a.has(c1.wrapping_mul(c2)));
-                            assert(b.has(c1.wrapping_mul(c2)));
                         };
                     }
                     r
