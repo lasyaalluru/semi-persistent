@@ -3,7 +3,7 @@
 //! Runtime checks of the u8 Anum against brute-force concretization. The
 //! Verus proofs cover all widths; these tests run the executable code
 //! (contracts are erased at runtime).
-use semi_persistent_abstract_domains::domains::d8::ExecAnum;
+use semi_persistent_abstract_domains::domains::d8::{ExecAnum, ExecTnum};
 
 fn has(a: &ExecAnum, c: u8) -> bool {
     c >= a.base && (c - a.base) & !a.span == 0
@@ -65,6 +65,19 @@ fn add_contains_every_sum() {
         for x in members(&a) {
             for y in members(&b) {
                 assert!(has(&sum, x.wrapping_add(y)), "{x} + {y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn from_etn_keeps_every_member() {
+    for mask in 0..=255u8 {
+        for val in (0..=255u8).filter(|v| v & mask == 0) {
+            let t = ExecTnum { val, mask };
+            let a = ExecAnum::from_etn(&t);
+            for c in (0..=255u8).filter(|&c| c & !mask == val) {
+                assert!(has(&a, c), "from_etn({val}, {mask}) misses {c}");
             }
         }
     }

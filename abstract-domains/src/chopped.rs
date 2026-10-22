@@ -415,6 +415,18 @@ impl ChoppedAnum {
     }
 
 
+    /// A w-bit Tnum read as an Anum: base is the known bits, span the unknown ones.
+    pub open spec fn from_tnum(t: ChoppedTnum) -> ChoppedAnum {
+        ChoppedAnum { anum: Anum::from_tnum(t.tnum), w: t.w }
+    }
+
+    pub proof fn from_tnum_sound(t: ChoppedTnum)
+        requires t.inv()
+        ensures forall|n: nat| #![auto] t.has(n) ==> Self::from_tnum(t).has(n)
+    {
+        Anum::from_tnum_sound(t.tnum);
+    }
+
     /// div_const_sound: delegates to Anum::div_const_sound.
     pub proof fn div_const_sound(self, d: nat)
         requires self.inv(), d > 0
