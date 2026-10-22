@@ -52,3 +52,20 @@ fn sub_contains_every_difference() {
         }
     }
 }
+
+#[test]
+fn mul_contains_every_product() {
+    let tnums = all_tnums();
+    for a in tnums.iter().step_by(7) {
+        let ma = members(a);
+        for b in tnums.iter().step_by(11) {
+            let r = a.mul(b);
+            assert_eq!(r.val & r.mask, 0);
+            for &x in &ma {
+                for y in members(b) {
+                    assert!(has(&r, x.wrapping_mul(y)), "{x} * {y}");
+                }
+            }
+        }
+    }
+}

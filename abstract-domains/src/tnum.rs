@@ -1127,6 +1127,50 @@ impl Tnum {
         Tnum { val: chop(self.val, i), mask: chop(self.mask, i) }
     }
 
+    /// Chop distributes through add_bitwise: only the low w bits of the
+    /// operands reach the low w bits of the sum.
+    pub proof fn chop_add_bitwise(a: Tnum, b: Tnum, w: nat)
+        ensures a.add_bitwise(b).chop_tn(w) == a.chop_tn(w).add_bitwise(b.chop_tn(w)).chop_tn(w)
+    {
+        let (av, am, bv, bm) = (a.val, a.mask, b.val, b.mask);
+        let (cav, cam, cbv, cbm) = (chop(av, w), chop(am, w), chop(bv, w), chop(bm, w));
+        // Left: the full sum, chopped.
+        let lbv = nat_add(av, bv);
+        let lbm = nat_add(am, bm);
+        let ub = nat_add(lbv, lbm);
+        let mask = bw_or(bw_or(bw_xor(ub, lbv), am), bm);
+        // Right: the sum of the chopped operands, chopped.
+        let lbv2 = nat_add(cav, cbv);
+        let lbm2 = nat_add(cam, cbm);
+        let ub2 = nat_add(lbv2, lbm2);
+        let mask2 = bw_or(bw_or(bw_xor(ub2, lbv2), cam), cbm);
+        chop_nat_add(av, bv, w);
+        chop_nat_add(am, bm, w);
+        chop_nat_add(lbv, lbm, w);
+        chop_nat_add(lbv2, lbm2, w);
+        chop_nat_add(cav, cbv, w);
+        chop_nat_add(cam, cbm, w);
+        chop_idem(av, w); chop_idem(am, w); chop_idem(bv, w); chop_idem(bm, w);
+        chop_idem(lbv, w); chop_idem(lbm, w);
+        assert(chop(lbv2, w) == chop(lbv, w));
+        assert(chop(lbm2, w) == chop(lbm, w));
+        assert(chop(ub2, w) == chop(ub, w));
+        chop_bw_xor(ub, lbv, w); chop_bw_xor(ub2, lbv2, w);
+        chop_bw_or(bw_xor(ub, lbv), am, w); chop_bw_or(bw_or(bw_xor(ub, lbv), am), bm, w);
+        chop_bw_or(bw_xor(ub2, lbv2), cam, w); chop_bw_or(bw_or(bw_xor(ub2, lbv2), cam), cbm, w);
+        assert(chop(mask2, w) == chop(mask, w));
+        chop_bw_and_not(lbv, mask, w);
+        chop_bw_and_not(lbv2, mask2, w);
+    }
+
+    /// Chop distributes through lsh.
+    pub proof fn chop_lsh_tn(a: Tnum, w: nat)
+        ensures a.lsh().chop_tn(w) == a.chop_tn(w).lsh().chop_tn(w)
+    {
+        chop_lsh(a.val, w);
+        chop_lsh(a.mask, w);
+    }
+
     pub proof fn chop_sound(self, i: nat)
         requires self.inv()
         ensures

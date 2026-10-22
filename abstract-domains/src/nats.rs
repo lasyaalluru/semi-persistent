@@ -452,6 +452,40 @@ pub open spec fn nat_mul_acc(a: nat, u: nat, acc: nat) -> nat
     else { nat_mul_acc(tl(a), lsh(u), nat_add(acc, nat_mul_bit(u, hd(a)))) }
 }
 
+/// Shift-add multiplication computes acc + a * u.
+pub proof fn nat_mul_acc_correct(a: nat, u: nat, acc: nat)
+    ensures nat_mul_acc(a, u, acc) == acc + a * u
+    decreases a
+{
+    if a > 0 {
+        let t = tl(a);
+        let h = hd(a).n();
+        nat_mul_acc_correct(t, lsh(u), nat_add(acc, nat_mul_bit(u, hd(a))));
+        nat_add_correct(acc, nat_mul_bit(u, hd(a)));
+        hd_tl(a);
+        if hd(a).b() {
+            assert(h == 1 && nat_mul_bit(u, hd(a)) == u);
+        } else {
+            assert(h == 0 && nat_mul_bit(u, hd(a)) == 0);
+        }
+        assert(nat_mul_bit(u, hd(a)) == h * u) by(nonlinear_arith)
+            requires h == 0 || h == 1, h == 1 ==> nat_mul_bit(u, hd(a)) == u, h == 0 ==> nat_mul_bit(u, hd(a)) == 0;
+        assert(lsh(u) == 2 * u);
+        let mb = nat_mul_bit(u, hd(a));
+        assert(a == h + 2 * t);
+        assert(nat_mul_acc(a, u, acc) == nat_mul_acc(t, lsh(u), nat_add(acc, mb)));
+        assert(nat_mul_acc(t, lsh(u), nat_add(acc, mb)) == acc + mb + t * lsh(u));
+        assert(t * lsh(u) == t * (2 * u));
+        assert(acc + h * u + t * (2 * u) == acc + a * u) by(nonlinear_arith)
+            requires a == h + 2 * t;
+        assert(mb == h * u);
+        assert(nat_mul_acc(a, u, acc) == acc + h * u + t * (2 * u));
+    } else {
+        assert(nat_mul_acc(0, u, acc) == acc);
+        assert(0 * u == 0) by(nonlinear_arith);
+    }
+}
+
 // ============================================================
 // Chop: discard all but the i low-order bits
 // ============================================================
