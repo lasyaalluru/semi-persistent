@@ -29,6 +29,7 @@ pub mod bools;
 pub mod chopped;
 pub mod div;
 pub mod domains;
+pub mod exec_tnum;
 pub mod facts;
 pub mod facts_ops;
 pub mod facts_z;

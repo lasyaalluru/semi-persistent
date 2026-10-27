@@ -87,6 +87,18 @@ pub proof fn lemma_sub<W: Word>(a: W, b: W)
     vstd::arithmetic::div_mod::lemma_mod_add_multiples_vanish(a.view() as int - b.view() as int, m);
 }
 
+/// Wrapping negation is the chopped two's complement.
+pub proof fn lemma_neg<W: Word>(c: W)
+    ensures W::from_int(0 - c.view() as int).view() == chop((exp(W::bits()) - c.view()) as nat, W::bits())
+{
+    let m = W::modulus() as int;
+    lemma_exp_bits::<W>();
+    lemma_fits(c);
+    W::lemma_from_int(0 - c.view() as int);
+    chop_is_mod((exp(W::bits()) - c.view()) as nat, W::bits());
+    vstd::arithmetic::div_mod::lemma_mod_add_multiples_vanish(0 - c.view() as int, m);
+}
+
 /// Bitwise not is xor with the all-ones word.
 pub proof fn lemma_not<W: Word>(a: W)
     ensures a.not().view() == bw_xor(a.view(), all_ones(W::bits()))
@@ -110,44 +122,10 @@ pub proof fn lemma_and_not<W: BitWord>(a: W, b: W)
         and_bit(a.view(), bw_xor(b.view(), ones), i);
         xor_bit(b.view(), ones, i);
         and_not_bit(a.view(), b.view(), i);
-        all_ones_r_bit(w, i);
-        all_ones_bit_r(w, i);
+        all_ones_bit(w, i);
         if i >= w { bit_above(a.view(), w, i); }
     };
     eq_from_bits(bw_and(a.view(), bw_xor(b.view(), ones)), bw_and_not(a.view(), b.view()));
-}
-
-/// all_ones(w) has exactly the bits below w.
-proof fn all_ones_bit_r(w: nat, i: nat)
-    ensures bit(all_ones(w), i).b() <==> i < w
-{
-    exp_pos(w);
-    if i < w {
-        exp_succ(i);
-        exp_le(i + 1, w);
-    }
-    all_ones_ge(w, i);
-}
-
-/// The bits of exp(w) - 1, via the shifts of exp.
-proof fn all_ones_ge(w: nat, i: nat)
-    ensures bit(all_ones(w), i).b() <==> i < w
-    decreases w
-{
-    exp_pos(w);
-    if w == 0 {
-        assert(all_ones(0) == 0) by { assert(exp(0) == 1); };
-        bit_zero(i);
-    } else {
-        // all_ones(w) = cons(all_ones(w - 1), T)
-        let v = (w - 1) as nat;
-        exp_succ(v);
-        exp_pos(v);
-        assert(all_ones(w) == 1 + 2 * all_ones(v));
-        assert(all_ones(w) == cons(all_ones(v), Bit::t()));
-        bit_cons(all_ones(v), Bit::t(), i);
-        if i > 0 { all_ones_ge(v, (i - 1) as nat); }
-    }
 }
 
 /// Logical right shift is rshi.
