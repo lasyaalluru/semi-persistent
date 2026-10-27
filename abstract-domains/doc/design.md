@@ -122,6 +122,18 @@ we get `base/d ≤ x/d ≤ (base+span)/d`. The result Anum has base `base/d`
 **Improvement over Tnum**: the base adds exactly, so precision loss only
 affects the offset. But the offset still suffers from carry expansion.
 
+The other Anum operations come in three kinds. `lshi`, `neg` and `join` are
+native: `lshi` shifts base and span together; `neg` reflects through `2^w`
+(`Anum::reflect`, base `2^w - (base + span)`, same span, since `span - δ` is a
+bit subset of `span` when `δ` is); `join` takes the lower base and covers the
+join of both offset Tnums above it (`Anum::cover`: a member of a Tnum is a bit
+subset of `val | mask`). Bitwise ops, `rshi` and `meet` go through Tnum, as
+`from_tnum(op(to_tnum a, to_tnum b))`, since an Anum has no better
+representation for them. `mul` is the bounded `Anum::mul_anum`: the partial
+products of one operand's Tnum by each bit of the other are summed in an Anum
+accumulator. At width `w`, `lshi`, `neg`, `add` (and so `mul`) widen to top
+when a bound would wrap.
+
 ### Unum: horizontally composable additive tristate numbers
 
 A Unum `{base, walls, extent}` partitions the bits into fields. Within each
@@ -303,8 +315,10 @@ are:
 
 - ChoppedTnum: add, sub, neg, mul, bitwise (or, and, xor,
   and_not, not), shifts (lsh, rsh, lshi, rshi), join, meet
-- ChoppedAnum: add, sub, div_const, from_tnum and to_tnum, under their stated
-  fit/divisor preconditions
+- ChoppedAnum: add, add_w (top on overflow), sub, div_const, from_tnum and
+  to_tnum, under their stated fit/divisor preconditions; lshi, neg, join; bitwise
+  (and, or, xor, not) and rshi through Tnum; mul (`mul_step`, the bounded
+  `Anum::mul_step_anum`)
 - ChoppedUnum: add and mul, under their stated no-overflow/fit preconditions
 
 The `div` spec function currently has no corresponding Layer-3 soundness
@@ -339,18 +353,22 @@ currently proved for:
 - `ExecTnum::{constant,top,bw_or,bw_and,bw_xor,bw_not,bw_and_not,add,sub,neg,
   mul,divrem_g,divrem,rsh,lsh,rshi,lshi,join,meet}`, each derived from its
   Layer-3 theorem through `lemma_ct()`;
-- `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn}`, the same way;
+- `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn,neg,lshi,join,
+  bw_and,bw_or,bw_xor,bw_not,rshi,meet,mul}`, the same way;
 - `ExecUnum::{top,add,from_interval,mul}`;
 - `Interval::{add,meet,join,div_const}`.
 
-Most `ExecTnum` operations, and the conversions `ExecAnum::to_etn` and
-`from_etn`, also ensure, as a clause separate from containment,
-that their result equals the Layer-3 spec (`r.to_tn() == ct.op().tnum`). This
+Most `ExecTnum` operations, and `ExecAnum::{top,add,neg,lshi,join,bw_and,
+bw_or,bw_xor,bw_not,rshi,mul,to_etn,from_etn}`, also ensure, as a clause
+separate from containment, that their result equals the Layer-3 spec
+(`r.to_tn() == ct.op().tnum`, `r.to_an() == ca.op().anum`). This
 lets composite operations chain them (`neg` and `sub` through `bw_not` and
 `add`; the `mul` loop invariant through `add` and `join`), and it pins
 precision: a less precise `add` would still be sound but would break these
 proofs. `meet` does not export it: it normalizes, and equals the spec only when
-the operands share a member. `mul` is pair-join multiplication
+the operands share a member; neither does `ExecAnum::meet`, which is built on
+it. `ExecAnum::mul` follows `ChoppedAnum::mul_step` with the exec `add`, so its
+loop invariant is the spec equality. `ExecTnum::mul` is pair-join multiplication
 (`ChoppedTnum::mul`, `Tnum::pair_mul`): starting from the exact product of the
 known bits, each unknown bit keeps both sums with `join(acc, acc + c)`. See
 `future/tnum-mul-div-precision.md`.

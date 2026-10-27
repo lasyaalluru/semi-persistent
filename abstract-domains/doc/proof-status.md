@@ -53,7 +53,7 @@ The current **universal containment** contracts are:
 | Type | Operations with universal containment contracts |
 | --- | --- |
 | `ExecTnum` | `constant`, `bw_or`, `bw_and`, `bw_xor`, `bw_not`, `bw_and_not`, `add`, `neg`, `sub`, `mul`, `divrem_g`, `divrem`, `join`, `meet`, `rsh`, `lsh`, `rshi`, `lshi` |
-| `ExecAnum` | `constant`, `top`, `add`, `sub`, `div_const`, `from_etn`, `to_etn` |
+| `ExecAnum` | `constant`, `top`, `add`, `sub`, `neg`, `mul`, `div_const`, `bw_and`, `bw_or`, `bw_xor`, `bw_not`, `lshi`, `rshi`, `join`, `meet`, `from_etn`, `to_etn` |
 | `ExecUnum` | `constant`, `top`, `add`, `from_interval`, `mul` |
 | `Interval` | `add`, `meet`, `join`, `div_const` |
 | `Interval<W>` | every operation: `Domain`, `meet_exact`, `add`, `sub`, `neg`, `mul`, `div`, `rem`, `and`, `or`, `xor`, `not`, `shl`, `shr` |

@@ -20,6 +20,7 @@ macro_rules! abstract_domain {
             use crate::chopped::{ChoppedAnum, ChoppedTnum, ChoppedUnum};
             use crate::div::*;
             use crate::tbit::TBit;
+            use crate::bitword::BitWord;
             verus! {
 
             // ============================================================
@@ -263,6 +264,38 @@ macro_rules! abstract_domain {
                 );
             }
 
+            /// A native addition wraps exactly when it lands below its first
+            /// operand; then the operands sum to at least 2^W.
+            pub proof fn add_wraps(a: $uint, b: $uint)
+                ensures
+                    a.wrapping_add(b) < a ==> a as nat + b as nat >= exp($bits as nat),
+                    a.wrapping_add(b) >= a ==> a.wrapping_add(b) as nat == a as nat + b as nat,
+            {
+                exp_concrete($bits as nat);
+            }
+
+            /// Native negation is the chopped two's complement.
+            pub proof fn bridge_neg(c: $uint)
+                ensures (0 as $uint).wrapping_sub(c) as nat == chop((exp($bits as nat) - c) as nat, $bits as nat)
+            {
+                let w: nat = $bits as nat;
+                exp_concrete(w);
+                chop_is_mod((exp(w) - c) as nat, w);
+                if c == 0 {
+                    vstd::arithmetic::div_mod::lemma_mod_self_0(exp(w) as int);
+                } else {
+                    vstd::arithmetic::div_mod::lemma_small_mod((exp(w) - c) as nat, exp(w));
+                }
+            }
+
+            /// The all-ones word is all_ones(W).
+            pub proof fn native_ones()
+                ensures !(0 as $uint) as nat == all_ones($bits as nat)
+            {
+                exp_concrete($bits as nat);
+                assert(!(0 as $uint) == $max_val) by(bit_vector);
+            }
+
             // ============================================================
             // ExecTnum: the generic exec_tnum::ExecTnum at this width
             // ============================================================
@@ -276,8 +309,10 @@ macro_rules! abstract_domain {
             impl ExecAnum {
                 pub open spec fn to_an(self) -> Anum { Anum { base: self.base as nat, span: self.span as nat } }
                 pub open spec fn has(self, x: $uint) -> bool { self.to_an().has(x as nat) }
+                /// The Layer-3 Anum at this width.
+                pub open spec fn ca(self) -> ChoppedAnum { ChoppedAnum { anum: self.to_an(), w: $bits as nat } }
                 proof fn to_chopped(self)
-                    ensures (ChoppedAnum { anum: self.to_an(), w: $bits as nat }).inv()
+                    ensures self.ca().inv()
                 {
                     self.to_an().to_tnum_inv();
                     native_fits(self.base);
@@ -325,10 +360,11 @@ macro_rules! abstract_domain {
                     r
                 }
                 #[inline] pub fn top() -> (r: ExecAnum)
-                    ensures forall|n: $uint| #![auto] r.has(n)
+                    ensures forall|n: $uint| #![auto] r.has(n), r.to_an() == ChoppedAnum::top($bits as nat).anum
                 {
                     let r = ExecAnum { base: 0, span: !(0 as $uint) };
                     proof {
+                        native_ones();
                         assert forall|n: $uint| #![auto] r.has(n) by {
                             ExecAnum::top_has(n);
                         };
@@ -339,7 +375,8 @@ macro_rules! abstract_domain {
                 /// a represented bound or the span sum would wrap, otherwise the spec
                 /// add, whose members cannot wrap because each is at most base + span.
                 #[inline] pub fn add(&self, t: &ExecAnum) -> (r: ExecAnum)
-                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_add(c2))
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_add(c2)),
+                        r.to_an() == self.ca().add_w(t.ca()).anum
                 {
                     let b1 = self.base; let s1 = self.span;
                     let b2 = t.base; let s2 = t.span;
@@ -350,13 +387,12 @@ macro_rules! abstract_domain {
                     let max2 = b2.wrapping_add(s2);
                     let max_sum = max1.wrapping_add(max2);
                     if max1 < b1 || max2 < b2 || max_sum < max1 || max_sum < max2 || v < b1 {
-                        let r = ExecAnum { base: 0, span: !(0 as $uint) };
                         proof {
-                            assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_add(c2)) by {
-                                ExecAnum::top_has(c1.wrapping_add(c2));
-                            };
+                            // Some sum wraps, so the maxima sum to at least 2^W.
+                            add_wraps(b1, s1); add_wraps(b2, s2); add_wraps(b1, b2);
+                            add_wraps(max1, max2);
                         }
-                        return r;
+                        return Self::top();
                     }
                     let r = ExecAnum { base: v, span: sm };
                     proof {
@@ -392,6 +428,7 @@ macro_rules! abstract_domain {
                         native_or(s12, s1);
                         native_or(s12 | s1, s2);
                         assert(r.to_an() == self.to_an().add(t.to_an()));
+                        assert(r.to_an() == self.ca().add_w(t.ca()).anum);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_add(c2)) by {
                             native_fits(c1); native_fits(c2);
                             // Members are at most their max, so the sum does not wrap.
@@ -610,6 +647,282 @@ macro_rules! abstract_domain {
                         };
                     }
                     r
+                }
+                /// Negation through ChoppedAnum::neg_sound: {0} stays {0}; a positive
+                /// base whose maximum does not wrap reflects to base 0 - max with the
+                /// same span; top otherwise.
+                pub fn neg(&self) -> (r: ExecAnum)
+                    ensures forall|c: $uint| #![auto] self.has(c) ==> r.has((0 as $uint).wrapping_sub(c)),
+                        r.to_an() == self.ca().neg().anum
+                {
+                    let b = self.base; let s = self.span;
+                    let max = b.wrapping_add(s);
+                    let r = if b == 0 && s == 0 {
+                        *self
+                    } else if b > 0 && max >= b {
+                        ExecAnum { base: (0 as $uint).wrapping_sub(max), span: s }
+                    } else {
+                        Self::top()
+                    };
+                    proof {
+                        let w: nat = $bits as nat;
+                        exp_concrete(w);
+                        add_wraps(b, s);
+                        self.to_chopped();
+                        self.ca().neg_sound();
+                        assert(r.to_an() == self.ca().neg().anum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has((0 as $uint).wrapping_sub(c)) by {
+                            native_fits(c);
+                            bridge_neg(c);
+                            assert(self.ca().has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// Left shift by k < W through ChoppedAnum::lshi_sound: base and span
+                /// shift together when the maximum is below 2^(W-k); top otherwise.
+                pub fn lshi(&self, k: u32) -> (r: ExecAnum)
+                    requires k < $bits
+                    ensures forall|c: $uint| #![auto] self.has(c) ==> r.to_an().has(chop(lshi(c as nat, k as nat), $bits as nat)),
+                        r.to_an() == self.ca().lshi(k as nat).anum
+                {
+                    let b = self.base; let s = self.span;
+                    let max = b.wrapping_add(s);
+                    let r = if max < b {
+                        Self::top()
+                    } else if k == 0 {
+                        *self
+                    } else if max < crate::exec_tnum::pow2_word::<$uint>($bits - k) {
+                        ExecAnum { base: b.shl_wrap(k), span: s.shl_wrap(k) }
+                    } else {
+                        Self::top()
+                    };
+                    proof {
+                        let w: nat = $bits as nat;
+                        exp_concrete(w);
+                        add_wraps(b, s);
+                        exp_le((w - k) as nat, w);
+                        self.to_chopped();
+                        self.ca().lshi_sound(k as nat);
+                        assert(lshi(b as nat, 0) == b as nat);
+                        assert(lshi(s as nat, 0) == s as nat);
+                        assert(r.to_an() == self.ca().lshi(k as nat).anum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.to_an().has(chop(lshi(c as nat, k as nat), w)) by {
+                            native_fits(c);
+                            assert(self.ca().has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// Join through ChoppedAnum::join_sound: the lower base, and the span
+                /// val | mask of the join of both offset Tnums above it.
+                pub fn join(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures
+                        forall|c: $uint| #![auto] self.has(c) ==> r.has(c),
+                        forall|c: $uint| #![auto] t.has(c) ==> r.has(c),
+                        r.to_an() == self.ca().join(t.ca()).anum
+                {
+                    let lo = if self.base <= t.base { self.base } else { t.base };
+                    proof {
+                        disj_zero(self.span as nat);
+                        disj_zero(t.span as nat);
+                        disj_zero_r((self.base - lo) as nat);
+                        disj_zero_r((t.base - lo) as nat);
+                    }
+                    let m1 = ExecTnum { val: 0, mask: self.span };
+                    let v1 = ExecTnum { val: self.base - lo, mask: 0 };
+                    let m2 = ExecTnum { val: 0, mask: t.span };
+                    let v2 = ExecTnum { val: t.base - lo, mask: 0 };
+                    let o1 = m1.add(&v1);
+                    let o2 = m2.add(&v2);
+                    let j = o1.join(&o2);
+                    let r = ExecAnum { base: lo, span: j.val | j.mask };
+                    proof {
+                        native_or(j.val, j.mask);
+                        self.to_chopped(); t.to_chopped();
+                        self.ca().join_sound(t.ca());
+                        assert(r.to_an() == self.ca().join(t.ca()).anum);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(c) by {
+                            native_fits(c);
+                            assert(self.ca().has(c as nat));
+                        };
+                        assert forall|c: $uint| #![auto] t.has(c) implies r.has(c) by {
+                            native_fits(c);
+                            assert(t.ca().has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// AND through Tnum (ChoppedAnum::and_sound).
+                pub fn bw_and(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 & c2),
+                        r.to_an() == self.ca().bw_and(t.ca()).anum
+                {
+                    let a = self.to_etn();
+                    let b = t.to_etn();
+                    let x = a.bw_and(&b);
+                    let r = Self::from_etn(&x);
+                    proof {
+                        self.to_chopped(); t.to_chopped();
+                        self.ca().and_sound(t.ca());
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 & c2) by {
+                            native_fits(c1); native_fits(c2); native_fits(c1 & c2);
+                            native_and(c1, c2);
+                            assert(self.ca().has(c1 as nat) && t.ca().has(c2 as nat));
+                        };
+                    }
+                    r
+                }
+                /// OR through Tnum (ChoppedAnum::or_sound).
+                pub fn bw_or(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 | c2),
+                        r.to_an() == self.ca().bw_or(t.ca()).anum
+                {
+                    let a = self.to_etn();
+                    let b = t.to_etn();
+                    let x = a.bw_or(&b);
+                    let r = Self::from_etn(&x);
+                    proof {
+                        self.to_chopped(); t.to_chopped();
+                        self.ca().or_sound(t.ca());
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 | c2) by {
+                            native_fits(c1); native_fits(c2); native_fits(c1 | c2);
+                            native_or(c1, c2);
+                            assert(self.ca().has(c1 as nat) && t.ca().has(c2 as nat));
+                        };
+                    }
+                    r
+                }
+                /// XOR through Tnum (ChoppedAnum::xor_sound).
+                pub fn bw_xor(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1 ^ c2),
+                        r.to_an() == self.ca().bw_xor(t.ca()).anum
+                {
+                    let a = self.to_etn();
+                    let b = t.to_etn();
+                    let x = a.bw_xor(&b);
+                    let r = Self::from_etn(&x);
+                    proof {
+                        self.to_chopped(); t.to_chopped();
+                        self.ca().xor_sound(t.ca());
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1 ^ c2) by {
+                            native_fits(c1); native_fits(c2); native_fits(c1 ^ c2);
+                            native_xor(c1, c2);
+                            assert(self.ca().has(c1 as nat) && t.ca().has(c2 as nat));
+                        };
+                    }
+                    r
+                }
+                /// NOT through Tnum (ChoppedAnum::not_sound).
+                pub fn bw_not(&self) -> (r: ExecAnum)
+                    ensures forall|c: $uint| #![auto] self.has(c) ==> r.has(!c),
+                        r.to_an() == self.ca().bw_not().anum
+                {
+                    let a = self.to_etn();
+                    let x = a.bw_not();
+                    let r = Self::from_etn(&x);
+                    proof {
+                        self.to_chopped();
+                        self.ca().not_sound();
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.has(!c) by {
+                            native_fits(c); native_fits(!c);
+                            crate::bitword::lemma_not::<$uint>(c);
+                            assert(self.ca().has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// Logical right shift by k < W through Tnum (ChoppedAnum::rshi_sound).
+                pub fn rshi(&self, k: u32) -> (r: ExecAnum)
+                    requires k < $bits
+                    ensures forall|c: $uint| #![auto] self.has(c) ==> r.to_an().has(rshi(c as nat, k as nat)),
+                        r.to_an() == self.ca().rshi(k as nat).anum
+                {
+                    let a = self.to_etn();
+                    let x = a.rshi(k);
+                    let r = Self::from_etn(&x);
+                    proof {
+                        self.to_chopped();
+                        self.ca().rshi_sound(k as nat);
+                        assert forall|c: $uint| #![auto] self.has(c) implies r.to_an().has(rshi(c as nat, k as nat)) by {
+                            native_fits(c);
+                            assert(self.ca().has(c as nat));
+                        };
+                    }
+                    r
+                }
+                /// Meet through Tnum. Like ExecTnum::meet it is normalized, so it
+                /// has a containment contract but no spec equality.
+                pub fn meet(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c: $uint| #![auto] self.has(c) && t.has(c) ==> r.has(c)
+                {
+                    let a = self.to_etn();
+                    let b = t.to_etn();
+                    let x = a.meet(&b);
+                    Self::from_etn(&x)
+                }
+                /// Multiplication, the bounded Anum::mul_anum (ChoppedAnum::mul): for
+                /// each bit of self's Tnum, add the partial product t * bit to an Anum
+                /// accumulator by add, then shift. The loop follows
+                /// ChoppedAnum::mul_step, so the result is the spec mul.
+                pub fn mul(&self, t: &ExecAnum) -> (r: ExecAnum)
+                    ensures forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2)),
+                        r.to_an() == self.ca().mul(t.ca()).anum
+                {
+                    let ghost w: nat = $bits as nat;
+                    let ghost whole = self.ca().mul(t.ca());
+                    let mut p = self.to_etn();
+                    let mut y = t.to_etn();
+                    let mut acc = ExecAnum { base: 0, span: 0 };
+                    proof {
+                        self.to_chopped(); t.to_chopped();
+                        self.ca().to_tnum_inv(); t.ca().to_tnum_inv();
+                        assert(acc.ca() == ChoppedAnum::zero(w));
+                    }
+                    while !(p.val == 0 && p.mask == 0)
+                        invariant
+                            w == $bits as nat,
+                            p.wf(), y.wf(),
+                            ChoppedAnum::mul_step(p.to_tn(), y.to_tn(), acc.ca()) == whole,
+                        decreases p.val as nat + p.mask as nat
+                    {
+                        let ghost (p0, y0, acc0) = (p.to_tn(), y.to_tn(), acc.ca());
+                        let hv = crate::exec_tnum::low_bit(p.val);
+                        let hm = crate::exec_tnum::low_bit(p.mask);
+                        proof {
+                            disj_zero((y.val | y.mask) as nat);
+                            disj_zero(0);
+                            native_or(y.val, y.mask);
+                        }
+                        let pb = if hv {
+                            y
+                        } else if hm {
+                            ExecTnum { val: 0, mask: y.val | y.mask }
+                        } else {
+                            ExecTnum { val: 0, mask: 0 }
+                        };
+                        proof {
+                            assert(pb.to_tn() == y0.mul_bit(p0.head()));
+                        }
+                        let part = Self::from_etn(&pb);
+                        acc = acc.add(&part);
+                        p = p.rsh();
+                        y = y.lsh();
+                        proof {
+                            assert(acc.ca() == acc0.add_w(ChoppedAnum { anum: Anum::from_tnum(y0.mul_bit(p0.head())), w }));
+                            assert(ChoppedAnum::mul_step(p0, y0, acc0) == ChoppedAnum::mul_step(p.to_tn(), y.to_tn(), acc.ca()));
+                        }
+                    }
+                    proof {
+                        assert(ChoppedAnum::mul_step(p.to_tn(), y.to_tn(), acc.ca()) == acc.ca());
+                        self.ca().mul_sound(t.ca());
+                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies acc.has(c1.wrapping_mul(c2)) by {
+                            native_fits(c1); native_fits(c2);
+                            bridge_mul(c1, c2);
+                            assert(self.ca().has(c1 as nat) && t.ca().has(c2 as nat));
+                        };
+                    }
+                    acc
                 }
                 #[inline] pub fn min_val(&self) -> (r: $uint) ensures r == self.base { self.base }
                 #[inline] pub fn max_val(&self) -> (r: $uint) ensures r == self.base.wrapping_add(self.span) { self.base.wrapping_add(self.span) }
