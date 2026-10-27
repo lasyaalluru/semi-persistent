@@ -88,8 +88,8 @@ These domains combine through `reduce::Product` and the fact records (see
 
 Every executable method verifies its stated contract. Universal containment
 theorems, each derived from the Layer-3 theorem through `to_chopped()`, cover
-every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, shifts,
-join, meet) and `ExecAnum` constant/top/add/sub/division by constant/conversions;
+every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, division,
+shifts, join, meet) and `ExecAnum` constant/top/add/sub/division by constant/conversions;
 they also cover `ExecUnum` top/add/from-interval/multiply and `Interval`
 add/meet/join/division by constant. Other Layer 4 methods (most Unum helpers)
 currently prove well-formedness only; see

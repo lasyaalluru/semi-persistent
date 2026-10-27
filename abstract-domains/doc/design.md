@@ -313,10 +313,15 @@ project-local admits.
 
 ### Layer 4: Executable machine-word domains (`domains.rs`)
 
-Native Rust implementations on u8, u16, u32, and u64 via macro generation.
-The u128 instantiation is disabled because its bitvector obligations exceed
-current solver capacity. Four domain types are enabled at each active width:
-ExecTnum, ExecAnum, ExecUnum, and Interval.
+Native Rust implementations on u8, u16, u32, and u64. ExecAnum, ExecUnum and
+Interval come from macro generation; the u128 instantiation is disabled because
+its bitvector obligations exceed current solver capacity. ExecTnum is written
+once, generic over the width, in `exec_tnum.rs` (`impl<W: BitWord>
+ExecTnum<W>`), and each `dN` module aliases it. Its bridges are the `BitWord`
+lemmas of `bitword.rs` (`lemma_and`, `lemma_or`, `lemma_xor`, `mul_wrap`,
+`shl_wrap`, and the generic `lemma_add`, `lemma_sub`, `lemma_neg`,
+`lemma_not`, `lemma_and_not`, `lemma_shr`, `lemma_low_bit`), and its
+well-formedness is `to_tn().inv()`, taken from the Layer-3 inv lemmas.
 
 The **value bridge** connects native wrapping arithmetic to spec chopping:
 - `bridge_add(a, b)`: `wrapping_add(a,b) as nat == chop(nat_add(a,b), W)`
@@ -331,9 +336,9 @@ The **bitwise bridge** connects native bitwise ops to spec bitwise ops:
 Every L4 method verifies its stated contract. Universal containment is
 currently proved for:
 
-- `ExecTnum::{constant,bw_or,bw_and,bw_xor,bw_not,bw_and_not,add,sub,neg,mul,
-  rsh,lsh,rshi,lshi,join,meet}`, each derived from its Layer-3 theorem through
-  `to_chopped()`;
+- `ExecTnum::{constant,top,bw_or,bw_and,bw_xor,bw_not,bw_and_not,add,sub,neg,
+  mul,divrem_g,divrem,rsh,lsh,rshi,lshi,join,meet}`, each derived from its
+  Layer-3 theorem through `lemma_ct()`;
 - `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn}`, the same way;
 - `ExecUnum::{top,add,from_interval,mul}`;
 - `Interval::{add,meet,join,div_const}`.

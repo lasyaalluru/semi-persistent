@@ -111,6 +111,14 @@ u128 shift lemma, so at u128 `checked_shl` multiplies by `1 << k`. The
 per-width `abstract_domain!` stamping in `domains.rs` is the pattern being
 replaced.
 
+`BitWord` (`bitword.rs`) extends `Word` with the bridge to the nat bitstring
+model of `nats.rs`: `and`, `or` and `xor` are `bw_and`, `bw_or` and `bw_xor`,
+and `mul_wrap` and `shl_wrap` are the chopped product and left shift. Its
+per-bit lemmas are proved in `impl_bitword!` at every width, u128 included;
+not, and-not, add, sub, right shift and the low bit follow generically. The
+executable Tnum is written once on it, `impl<W: BitWord> ExecTnum<W>` in
+`exec_tnum.rs`, and `domains.rs` aliases it per width.
+
 ## 4. Semantics (`semantics.rs`)
 
 A `Semantics` names a value type `V` and gives the spec meaning of `zero`,
