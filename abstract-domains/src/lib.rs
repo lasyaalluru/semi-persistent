@@ -23,6 +23,7 @@
 //!   (Bool4). See doc/reduced-product.md.
 
 pub mod anum;
+pub mod bitword;
 pub mod bool4;
 pub mod bools;
 pub mod chopped;
