@@ -201,40 +201,18 @@ impl ChoppedTnum {
         // fits(chop(_, w), w) from chop_idem
     }
 
-    /// Bounded multiplication: times chopped to w bits.
+    /// Bounded multiplication: pair-join (`Tnum::pair_mul`) chopped to w bits.
     pub open spec fn mul(self, t: ChoppedTnum) -> ChoppedTnum {
-        ChoppedTnum { tnum: Anum::tnum_mul(self.tnum, t.tnum).chop_tn(self.w), w: self.w }
+        ChoppedTnum { tnum: Tnum::pair_mul(self.tnum, t.tnum).chop_tn(self.w), w: self.w }
     }
 
     pub proof fn mul_sound(self, t: ChoppedTnum)
         requires self.inv(), t.inv(), self.w == t.w
-        ensures forall|x: nat, y: nat| #![auto]
-            self.has(x) && t.has(y) ==>
-            self.mul(t).has(chop(nat_mul_acc(x, y, 0), self.w))
-    {
-        Anum::tnum_mul_sound(self.tnum, t.tnum);
-        assert forall|x: nat, y: nat| #![auto]
-            self.has(x) && t.has(y)
-            implies self.mul(t).has(chop(nat_mul_acc(x, y, 0), self.w)) by {
-            let prod = Anum::tnum_mul(self.tnum, t.tnum);
-            assert(prod.has(nat_mul_acc(x, y, 0)));
-            prod.chop_sound(self.w);
-            chop_idem(nat_mul_acc(x, y, 0), self.w);
-        };
-    }
-
-    /// Bounded pair-join multiplication: `Tnum::pair_mul` chopped to w bits.
-    pub open spec fn pair_mul(self, t: ChoppedTnum) -> ChoppedTnum {
-        ChoppedTnum { tnum: Tnum::pair_mul(self.tnum, t.tnum).chop_tn(self.w), w: self.w }
-    }
-
-    pub proof fn pair_mul_sound(self, t: ChoppedTnum)
-        requires self.inv(), t.inv(), self.w == t.w
         ensures
-            self.pair_mul(t).inv(),
+            self.mul(t).inv(),
             forall|x: nat, y: nat| #![auto]
                 self.has(x) && t.has(y) ==>
-                self.pair_mul(t).has(chop(nat_mul_acc(x, y, 0), self.w))
+                self.mul(t).has(chop(nat_mul_acc(x, y, 0), self.w))
     {
         let prod = Tnum::pair_mul(self.tnum, t.tnum);
         Tnum::pair_mul_sound(self.tnum, t.tnum);
@@ -243,7 +221,7 @@ impl ChoppedTnum {
         chop_idem(prod.mask, self.w);
         assert forall|x: nat, y: nat| #![auto]
             self.has(x) && t.has(y)
-            implies self.pair_mul(t).has(chop(nat_mul_acc(x, y, 0), self.w)) by {
+            implies self.mul(t).has(chop(nat_mul_acc(x, y, 0), self.w)) by {
             assert(prod.has(nat_mul_acc(x, y, 0)));
             chop_idem(nat_mul_acc(x, y, 0), self.w);
         };

@@ -947,131 +947,7 @@ macro_rules! abstract_domain {
                     }
                     r
                 }
-                /// Multiplication following Anum::mul_step_rc: the exact product of the
-                /// known bits is computed once, and an accumulator Tnum with val 0
-                /// collects only the uncertainty masks of the shifted multiplicand.
-                /// The loop simulates mul_step_rc through to_chopped(), and
-                /// Anum::mul_step_r equates mul_step_rc with tnum_mul, which is the
-                /// L3 ChoppedTnum::mul.
-                pub fn mul(&self, t: &ExecTnum) -> (r: ExecTnum)
-                    requires self.wf(), t.wf()
-                    ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2)),
-                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).mul(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
-                {
-                    let ghost w: nat = $bits as nat;
-                    let ghost t0 = self.to_tn();
-                    let ghost t1 = t.to_tn();
-                    let ghost avs = Tnum::ctor(mul(t0.val, t1.val), 0);
-                    // The exact product of the known bits.
-                    let pv = self.val.wrapping_mul(t.val);
-                    proof { assert(pv & (0 as $uint) == (0 as $uint)) by(bit_vector); }
-                    let acc_v = ExecTnum { val: pv, mask: 0 };
-                    proof { assert((0 as $uint) & (0 as $uint) == (0 as $uint)) by(bit_vector); }
-                    let mut acc_m = ExecTnum { val: 0, mask: 0 };
-                    let mut p = *self;
-                    let mut q = *t;
-                    let ghost mut ps = t0;
-                    let ghost mut qs = t1;
-                    let ghost mut ams = Tnum::ctor(0, 0);
-                    let ghost mut a_s = Anum::zero();
-                    proof {
-                        // From the initial state, mul_step_rc is tnum_mul.
-                        nat_mul_acc_correct(t0.val, t1.val, 0);
-                        Anum::mul_step_r(t0, t1, t0, t1, avs, ams, a_s);
-                        // The executable state is the chopped spec state.
-                        native_fits(t.val); native_fits(t.mask);
-                        exp_pos(w);
-                        chop_id(0, w);
-                        disj_zero(0);
-                    }
-                    while !(p.val == 0 && p.mask == 0)
-                        invariant
-                            w == $bits as nat,
-                            p.wf(), q.wf(), acc_m.wf(),
-                            p.to_tn() == ps,
-                            q.to_tn() == qs.chop_tn(w),
-                            acc_m.to_tn() == ams.chop_tn(w),
-                            ams.inv(),
-                            Anum::mul_step_rc(t0, t1, ps, qs, avs, ams, a_s) == Anum::tnum_mul(t0, t1),
-                        decreases p.val as nat + p.mask as nat
-                    {
-                        let ghost ps0 = ps;
-                        let ghost qs0 = qs;
-                        let ghost ams0 = ams;
-                        let ghost a0 = a_s;
-                        proof {
-                            // The branch tests are the spec head bit of p.
-                            native_low_bit(p.val);
-                            native_low_bit(p.mask);
-                            exp_pos(w);
-                            chop_id(0, w);
-                        }
-                        if (p.val & 1) == 1 {
-                            proof { assert((0 as $uint) & q.mask == (0 as $uint)) by(bit_vector); }
-                            let add_t = ExecTnum { val: 0, mask: q.mask };
-                            acc_m = acc_m.add(&add_t);
-                            proof {
-                                let c = Tnum::ctor(0, qs0.mask);
-                                assert(add_t.to_tn() == c.chop_tn(w));
-                                Tnum::chop_add_bitwise(ams0, c, w);
-                                disj_zero(qs0.mask);
-                                ams0.add_bitwise_eq(c);
-                                ams0.add_inv(c);
-                                ams = ams0.add(c);
-                            }
-                        } else if (p.mask & 1) == 1 {
-                            proof { assert((0 as $uint) & (q.val | q.mask) == (0 as $uint)) by(bit_vector); }
-                            let add_t = ExecTnum { val: 0, mask: q.val | q.mask };
-                            acc_m = acc_m.add(&add_t);
-                            proof {
-                                let c = Tnum::ctor(0, qs0.max());
-                                native_or(q.val, q.mask);
-                                chop_bw_or(qs0.val, qs0.mask, w);
-                                assert(add_t.to_tn() == c.chop_tn(w));
-                                Tnum::chop_add_bitwise(ams0, c, w);
-                                disj_zero(qs0.max());
-                                ams0.add_bitwise_eq(c);
-                                ams0.add_inv(c);
-                                ams = ams0.add(c);
-                            }
-                        }
-                        proof { a_s = a0.add(Anum::from_tnum(qs0.mul_bit(ps0.head()))); }
-                        p = p.rsh();
-                        q = q.lsh();
-                        proof {
-                            ps = ps0.rsh();
-                            qs = qs0.lsh();
-                            Tnum::chop_lsh_tn(qs0, w);
-                        }
-                    }
-                    let r = acc_m.add(&acc_v);
-                    proof {
-                        // p is zero, so mul_step_rc has returned ams + avs.
-                        assert(ps.is_zero());
-                        assert(ams.add(avs) == Anum::tnum_mul(t0, t1));
-                        // Bridge: the native product is the chopped spec product.
-                        bridge_mul(self.val, t.val);
-                        exp_pos(w);
-                        chop_id(0, w);
-                        assert(acc_v.to_tn() == avs.chop_tn(w));
-                        Tnum::chop_add_bitwise(ams, avs, w);
-                        disj_zero_r(mul(t0.val, t1.val));
-                        ams.add_bitwise_eq(avs);
-                        self.to_chopped(); t.to_chopped();
-                        let ct_s = ChoppedTnum { tnum: t0, w };
-                        let ct_t = ChoppedTnum { tnum: t1, w };
-                        assert(r.to_tn() == ct_s.mul(ct_t).tnum);
-                        ct_s.mul_sound(ct_t);
-                        assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_mul(c2)) by {
-                            native_fits(c1); native_fits(c2);
-                            assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
-                            nat_mul_acc_correct(c1 as nat, c2 as nat, 0);
-                            bridge_mul(c1, c2);
-                        };
-                    }
-                    r
-                }
-                /// Pair-join multiplication (Tnum::pair_mul on W-bit registers).
+                /// Multiplication by pair-join (Tnum::pair_mul on W-bit registers).
                 /// Start from the exact product of the known parts; for each
                 /// unknown bit l of t, join the accumulator with itself plus the
                 /// constant self.val << l; then for each unknown bit k of self,
@@ -1079,10 +955,10 @@ macro_rules! abstract_domain {
                 /// registers as the L2 recursions pj_const and pj_tnum do, and
                 /// each step is the chopped L2 step (chop_add_bitwise, chop_join,
                 /// chop_lsh_tn).
-                pub fn mul_pj(&self, t: &ExecTnum) -> (r: ExecTnum)
+                pub fn mul(&self, t: &ExecTnum) -> (r: ExecTnum)
                     requires self.wf(), t.wf()
                     ensures r.wf(), forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) ==> r.has(c1.wrapping_mul(c2)),
-                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).pair_mul(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
+                        r.to_tn() == (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).mul(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat }).tnum
                 {
                     let ghost w: nat = $bits as nat;
                     let ghost t0 = self.to_tn();
@@ -1198,8 +1074,8 @@ macro_rules! abstract_domain {
                         self.to_chopped(); t.to_chopped();
                         let ct_s = ChoppedTnum { tnum: t0, w };
                         let ct_t = ChoppedTnum { tnum: t1, w };
-                        assert(r.to_tn() == ct_s.pair_mul(ct_t).tnum);
-                        ct_s.pair_mul_sound(ct_t);
+                        assert(r.to_tn() == ct_s.mul(ct_t).tnum);
+                        ct_s.mul_sound(ct_t);
                         assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) implies r.has(c1.wrapping_mul(c2)) by {
                             native_fits(c1); native_fits(c2);
                             assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));

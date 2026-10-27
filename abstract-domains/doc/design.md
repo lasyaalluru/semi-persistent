@@ -276,7 +276,9 @@ The hardest theorem, `add_bitwise_eq`, uses
 
 **Anum** (`anum.rs`): Additive tristate numbers. Addition is exact on the
 base value. `div_const` gives an exact base quotient for division by
-constant. Tnum multiplication uses Anum as internal accumulator (`tnum_mul`).
+constant. `Anum::tnum_mul` multiplies Tnums with an Anum accumulator; the
+executable Tnum multiplication uses pair-join (`Tnum::pair_mul`, `pair_mul.rs`)
+instead, which is more precise.
 
 **Unum** (`unum.rs`): Horizontally composable additive tristate numbers.
 The unbounded addition formula and multiplication's bilinear bound have
@@ -340,10 +342,13 @@ Most `ExecTnum` operations, and the conversions `ExecAnum::to_etn` and
 `from_etn`, also ensure, as a clause separate from containment,
 that their result equals the Layer-3 spec (`r.to_tn() == ct.op().tnum`). This
 lets composite operations chain them (`neg` and `sub` through `bw_not` and
-`add`; the `mul` loop invariant through `add`, `rsh` and `lsh`), and it pins
+`add`; the `mul` loop invariant through `add` and `join`), and it pins
 precision: a less precise `add` would still be sound but would break these
 proofs. `meet` does not export it: it normalizes, and equals the spec only when
-the operands share a member. `mul` follows `Anum::mul_step_rc`.
+the operands share a member. `mul` is pair-join multiplication
+(`ChoppedTnum::mul`, `Tnum::pair_mul`): starting from the exact product of the
+known bits, each unknown bit keeps both sums with `join(acc, acc + c)`. See
+`future/tnum-mul-div-precision.md`.
 
 Other executable operations currently prove well-formedness only. L2/L3
 soundness and finite mirror tests do not by themselves establish the missing

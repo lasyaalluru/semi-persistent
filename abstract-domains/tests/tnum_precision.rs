@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Exhaustive u8 checks of the precision-optimized Tnum multiplication and division
-//! (`mul_pj`, `divrem_g`) against the existing `mul`, on every pair of Tnums: soundness
+//! (`mul` by pair-join, `divrem_g`), on every pair of Tnums: soundness
 //! against the concrete results, and the number of unknown bits relative to the best
 //! Tnum (the AND and OR of every concrete result). Run with `--release --ignored`.
 use semi_persistent_abstract_domains::domains::d8::ExecTnum;
@@ -48,7 +48,7 @@ fn best<I: Iterator<Item = u8>>(it: I) -> u32 {
 fn exhaustive_u8_mul_and_divrem_precision() {
     let ts = tnums();
     let (mut n_mul, mut n_div) = (0u64, 0u64);
-    let (mut opt_old, mut opt_pj, mut lost_old, mut lost_pj) = (0u64, 0u64, 0u64, 0u64);
+    let (mut opt_m, mut lost_m) = (0u64, 0u64);
     let (mut opt_q, mut opt_r, mut lost_q, mut lost_r) = (0u64, 0u64, 0u64, 0u64);
     for a in &ts {
         let xs = members(a);
@@ -59,17 +59,15 @@ fn exhaustive_u8_mul_and_divrem_precision() {
                 xs.iter()
                     .flat_map(|&x| ys.iter().map(move |&y| x.wrapping_mul(y))),
             );
-            let (old, pj) = (a.mul(b), a.mul_pj(b));
+            let p = a.mul(b);
             for &x in &xs {
                 for &y in &ys {
-                    assert!(has(&old, x.wrapping_mul(y)) && has(&pj, x.wrapping_mul(y)));
+                    assert!(has(&p, x.wrapping_mul(y)));
                 }
             }
-            let (lo, lp) = (old.mask.count_ones() - bm, pj.mask.count_ones() - bm);
-            opt_old += (lo == 0) as u64;
-            opt_pj += (lp == 0) as u64;
-            lost_old += lo as u64;
-            lost_pj += lp as u64;
+            let lm = p.mask.count_ones() - bm;
+            opt_m += (lm == 0) as u64;
+            lost_m += lm as u64;
             if b.val == 0 {
                 continue;
             }
@@ -92,11 +90,9 @@ fn exhaustive_u8_mul_and_divrem_precision() {
     let pct = |a: u64, n: u64| 100.0 * a as f64 / n as f64;
     let avg = |a: u64, n: u64| a as f64 / n as f64;
     println!(
-        "mul ({n_mul} pairs): mul optimal {:.1}%, {:.3} bits lost; mul_pj optimal {:.1}%, {:.3} bits lost",
-        pct(opt_old, n_mul),
-        avg(lost_old, n_mul),
-        pct(opt_pj, n_mul),
-        avg(lost_pj, n_mul)
+        "mul ({n_mul} pairs): optimal {:.1}%, {:.3} bits lost",
+        pct(opt_m, n_mul),
+        avg(lost_m, n_mul)
     );
     println!(
         "divrem_g ({n_div} pairs): q optimal {:.1}%, {:.3} bits lost; r optimal {:.1}%, {:.3} bits lost",
