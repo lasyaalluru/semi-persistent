@@ -221,71 +221,7 @@ impl Anum {
         self.mask_tnum().add_carry_zero();
     }
 
-    /// Multiplication: t0 * t using Anum accumulator.
-    pub open spec fn mul_step(t0: Tnum, t: Tnum, a: Anum) -> Tnum
-        decreases t0.size()
-    {
-        if t0.is_zero() { a.to_tnum() }
-        else {
-            Anum::mul_step(
-                t0.rsh(),
-                t.lsh(),
-                a.add(Anum::from_tnum(t.mul_bit(t0.head()))),
-            )
-        }
-    }
-
-    pub proof fn mul_step_sound(t0: Tnum, t: Tnum, a: Anum)
-        requires t0.inv(), t.inv()
-        ensures forall|x: nat, y: nat, z: nat| #![auto]
-            t0.has(x) && t.has(y) && a.has(z) ==>
-            Anum::mul_step(t0, t, a).has(nat_mul_acc(x, y, z))
-        decreases t0.size()
-    {
-        assert forall|x: nat, y: nat, z: nat| #![auto]
-            t0.has(x) && t.has(y) && a.has(z)
-            implies Anum::mul_step(t0, t, a).has(nat_mul_acc(x, y, z)) by {
-            Anum::mul_step_sound1(t0, t, a, x, y, z);
-        };
-    }
-
-    proof fn mul_step_sound1(t0: Tnum, t: Tnum, a: Anum, x: nat, y: nat, z: nat)
-        requires t0.inv(), t.inv(), t0.has(x), t.has(y), a.has(z)
-        ensures Anum::mul_step(t0, t, a).has(nat_mul_acc(x, y, z))
-        decreases t0.size()
-    {
-        if t0.is_zero() {
-            assert(x == 0);
-            Anum::tnum_has_from_anum(a, z);
-        } else {
-            // Step: chain the component lemmas
-            let tb = t.mul_bit(t0.head());
-
-            // 1. rsh/lsh preserve inv
-            Anum::rsh_inv(t0);
-            Anum::lsh_inv(t);
-
-            // 2. times_b is sound and preserves inv
-            t.times_b_inv(t0.head());
-
-            // 3. Build new accumulator
-            let a1 = a.add(Anum::from_tnum(tb));
-
-            // 4. New accumulator has the right concrete value
-            assert(t0.head().has(hd(x))) by {
-                if t0.is_zero() {} // contradiction
-            };
-            Anum::mul_step_acc(t, t0.head(), a, x, y, z);
-
-            // 5. Unfold times1
-            Anum::times1_unfold(x, y, z);
-
-            // 6. IH
-            Anum::mul_step_sound1(t0.rsh(), t.lsh(), a1, tl(x), lsh(y), nat_add(z, nat_mul_bit(y, hd(x))));
-        }
-    }
-
-    /// Base case: a.has(z) ==> a.to_tnum().has(z)
+    /// a.has(z) ==> a.to_tnum().has(z)
     pub proof fn tnum_has_from_anum(a: Anum, z: nat)
         requires a.has(z)
         ensures a.to_tnum().has(z)
@@ -358,126 +294,11 @@ impl Anum {
         // else: direct from definition
     }
 
-    pub open spec fn tnum_mul(t0: Tnum, t1: Tnum) -> Tnum {
-        Anum::mul_step(t0, t1, Anum::zero())
-    }
-
-    pub proof fn tnum_mul_sound(t0: Tnum, t1: Tnum)
-        requires t0.inv(), t1.inv()
-        ensures
-            Anum::tnum_mul(t0, t1).inv(),
-            forall|x: nat, y: nat| #![auto]
-                t0.has(x) && t1.has(y) ==> Anum::tnum_mul(t0, t1).has(nat_mul_acc(x, y, 0))
-    {
-        Anum::mul_step_sound(t0, t1, Anum::zero());
-        Anum::times2_inv(t0, t1, Anum::zero());
-    }
-
-    proof fn times2_inv(t0: Tnum, t: Tnum, a: Anum)
-        requires t0.inv(), t.inv()
-        ensures Anum::mul_step(t0, t, a).inv()
-        decreases t0.size()
-    {
-        if t0.is_zero() {
-            disj_zero(a.span);
-            assert forall|j: nat| #![auto] !(bit(a.base, j).b() && bit(0 as nat, j).b()) by { bit_zero(j); };
-            disj_bits(a.base, 0);
-            Tnum::ctor(0, a.span).add_inv(Tnum::ctor(a.base, 0));
-        } else {
-            Anum::rsh_inv(t0);
-            Anum::lsh_inv(t);
-            t.times_b_inv(t0.head());
-            Anum::times2_inv(t0.rsh(), t.lsh(), a.add(Anum::from_tnum(t.mul_bit(t0.head()))));
-        }
-    }
-
-    // ================================================================
-    // mul_step_rc / times2R: tail-recursive multiplication for bounded simulation
-    //
-    // ================================================================
-
-    /// Raw tail-recursive multiplication loop.
-    /// Uses add (not add_bitwise) so no linking lemma is needed at Layer 2.
-    /// The bounded Layer 4 version will use add_bitwise and prove simulation.
-    pub open spec fn mul_step_rc(t0: Tnum, t: Tnum, p: Tnum, q: Tnum, acc_v: Tnum, acc_m: Tnum, a: Anum) -> Tnum
-        decreases p.size()
-    {
-        if p.is_zero() {
-            acc_m.add(acc_v)
-        } else {
-            let a1 = a.add(Anum::from_tnum(q.mul_bit(p.head())));
-            let p1 = p.rsh();
-            let q1 = q.lsh();
-            if p.head().val.b() {
-                Anum::mul_step_rc(t0, t, p1, q1, acc_v, acc_m.add(Tnum::ctor(0, q.mask)), a1)
-            } else if p.head().mask.b() {
-                Anum::mul_step_rc(t0, t, p1, q1, acc_v, acc_m.add(Tnum::ctor(0, q.max())), a1)
-            } else {
-                Anum::mul_step_rc(t0, t, p1, q1, acc_v, acc_m, a1)
-            }
-        }
-    }
-
-    /// Simulation proof: mul_step_rc equals mul_step(t0, t, Anum::zero()).
-    pub proof fn mul_step_r(t0: Tnum, t: Tnum, p: Tnum, q: Tnum, acc_v: Tnum, acc_m: Tnum, a: Anum)
-        requires
-            Anum::mul_step(t0, t, Anum::zero()) == Anum::mul_step(p, q, a),
-            acc_v == Tnum::ctor(mul(t0.val, t.val), 0),
-            acc_m == a.mask_tnum(),
-            mul(t0.val, t.val) == nat_mul_acc(p.val, q.val, a.base),
-        ensures
-            Anum::mul_step_rc(t0, t, p, q, acc_v, acc_m, a) == Anum::mul_step(t0, t, Anum::zero()),
-        decreases p.size()
-    {
-        a.add_zero();
-        if p.is_zero() {
-            // p.val == 0, so nat_mul_acc(0, q.val, a.base) == a.base
-            // Therefore mul(t0.val, t.val) == a.base
-            // acc_v == Tnum::ctor(a.base, 0) == a.val_tnum()
-            // acc_m == a.mask_tnum()
-            // acc_m.add(acc_v) == a.mask_tnum().add(a.val_tnum()) == a.to_tnum()
-            // mul_step(p, q, a) == a.to_tnum() (since p.is_zero())
-        } else {
-            let a1 = a.add(Anum::from_tnum(q.mul_bit(p.head())));
-            let p1 = p.rsh();
-            let q1 = q.lsh();
-
-            // times1 invariant maintenance:
-            // nat_mul_acc(p.val, q.val, a.base) unfolds when p.val != 0
-            Anum::times1_unfold(p.val, q.val, a.base);
-
-            if p.head().val.b() {
-                // q.mul_bit(Tb(T,F)) == q, from_tnum(q).mask_tnum() == Tn(0, q.mask)
-                // a1.mask == a.mask_tnum().add(Tn(0, q.mask)).m
-                // acc_m' == a.mask_tnum().add(Tn(0, q.mask))
-                // acc_m'.v == 0 by add_carry_val_zero
-                let acc_m1 = acc_m.add(Tnum::ctor(0, q.mask));
-                assert(acc_m1.val == 0) by {
-                    a.mask_tnum().add_carry_val_zero(Tnum::ctor(0, q.mask), TBit { val: Bit::f(), mask: Bit::f() });
-                };
-                // So acc_m' == Tn(0, acc_m'.m) == a1.mask_tnum()
-                Anum::mul_step_r(t0, t, p1, q1, acc_v, acc_m1, a1);
-            } else if p.head().mask.b() {
-                // q.mul_bit(Tb(F,T)) == q.add_zero() == Tn(0, q.val|q.mask) = Tn(0, q.max())
-                // from_tnum(Tn(0, q.max())).mask_tnum() == Tn(0, q.max())
-                let acc_m1 = acc_m.add(Tnum::ctor(0, q.max()));
-                assert(acc_m1.val == 0) by {
-                    a.mask_tnum().add_carry_val_zero(Tnum::ctor(0, q.max()), TBit { val: Bit::f(), mask: Bit::f() });
-                };
-                Anum::mul_step_r(t0, t, p1, q1, acc_v, acc_m1, a1);
-            } else {
-                // p.head() == Tb(F,F): q.mul_bit(Tb(F,F)) == zero
-                // a1 == a.add(from_tnum(zero)) == a.add(Anum::zero()) == a
-                // acc_m unchanged
-                Anum::mul_step_r(t0, t, p1, q1, acc_v, acc_m, a1);
-            }
-        }
-    }
     // ================================================================
     // Anum-level multiplication: Anum × An → An (preserves additive structure)
     // ================================================================
 
-    /// Anum multiplication loop — same as times2 but returns Anum, not Tn.
+    /// Anum multiplication loop: shift-and-add with an Anum accumulator.
     /// The accumulator stays as An throughout, preserving the exact base.
     pub open spec fn mul_step_anum(t0: Tnum, t: Tnum, a: Anum) -> Anum
         decreases t0.size()
@@ -498,7 +319,7 @@ impl Anum {
         Anum::mul_step_anum(t0, t1, Anum::zero())
     }
 
-    /// Soundness of mul_step_anum — same as mul_step_sound.
+    /// Soundness of mul_step_anum.
     pub proof fn mul_step_anum_sound(t0: Tnum, t: Tnum, a: Anum)
         requires t0.inv(), t.inv()
         ensures forall|x: nat, y: nat, z: nat| #![auto]

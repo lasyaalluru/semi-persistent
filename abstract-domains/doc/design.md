@@ -288,9 +288,9 @@ The hardest theorem, `add_bitwise_eq`, uses
 
 **Anum** (`anum.rs`): Additive tristate numbers. Addition is exact on the
 base value. `div_const` gives an exact base quotient for division by
-constant. `Anum::tnum_mul` multiplies Tnums with an Anum accumulator; the
-executable Tnum multiplication uses pair-join (`Tnum::pair_mul`, `pair_mul.rs`)
-instead, which is more precise.
+constant. `Anum::mul_anum` multiplies Tnums into an Anum by shift-and-add
+with an Anum accumulator; it is the model of Anum `mul`. Tnum multiplication
+uses pair-join (`Tnum::pair_mul`, `pair_mul.rs`), which is more precise.
 
 **Unum** (`unum.rs`): Horizontally composable additive tristate numbers.
 The unbounded addition formula and multiplication's bilinear bound have

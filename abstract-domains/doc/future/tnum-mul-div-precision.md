@@ -27,8 +27,9 @@ loss of the algorithm. Only the second can be recovered inside the Tnum domain.
     x * y = x.v * y.v + sum_l v_l * (x.v << l) + sum_k u_k * (y << k)   (mod 2^W)
 
 where `v_l` ranges over the unknown bits of `y` and `u_k` over those of `x`. Each term is
-one of two values, `{0, c}`. `Anum::mul_step_rc` (the loop of the current
-`ExecTnum::mul`) adds each term as the Tnum `(0, c)`, which has 2^popcount(c) members.
+one of two values, `{0, c}`. `Anum::mul_step_rc` (the loop of `ExecTnum::mul` before
+pair-join, since removed) added each term as the Tnum `(0, c)`, which has 2^popcount(c)
+members.
 That is where most of its loss comes from.
 
 **Algorithm.** Start from the exact product of the known parts, then, for each unknown
@@ -76,7 +77,7 @@ invariant `acc.to_tn() == chop(acc_spec, W)`. Each step needs:
 
 | algorithm | u8: optimal | u8: bits lost | u16: optimal | u16: bits lost |
 | --- | --- | --- | --- | --- |
-| `mul_step_rc` (current) | 90.0% | 0.129 | 58.1% | 0.831 |
+| `mul_step_rc` (before pair-join) | 90.0% | 0.129 | 58.1% | 0.831 |
 | pair-join | **97.2%** | **0.029** | **89.8%** | **0.120** |
 | pair-join, both operand orders, meet | 97.6% | 0.025 | 91.8% | 0.093 |
 
