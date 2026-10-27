@@ -320,7 +320,7 @@ impl Anum {
     }
 
     /// rsh preserves inv
-    proof fn rsh_inv(t: Tnum)
+    pub proof fn rsh_inv(t: Tnum)
         requires t.inv()
         ensures t.rsh().inv()
     {
@@ -333,7 +333,7 @@ impl Anum {
     }
 
     /// lsh preserves inv
-    proof fn lsh_inv(t: Tnum)
+    pub proof fn lsh_inv(t: Tnum)
         requires t.inv()
         ensures t.lsh().inv()
     {
@@ -609,6 +609,69 @@ impl Anum {
             };
             eq_from_bits(bw_and_not(k, mask), 0);
         };
+    }
+
+    // ================================================================
+    // Shift, reflection and cover
+    // ================================================================
+
+    /// Left shift by k: x = base + d with d a bit subset of span gives
+    /// x << k = (base << k) + (d << k), and d << k is a bit subset of span << k.
+    pub open spec fn lshi(self, k: nat) -> Anum {
+        Anum { base: lshi(self.base, k), span: lshi(self.span, k) }
+    }
+
+    pub proof fn lshi_sound(self, k: nat)
+        ensures forall|x: nat| #![auto] self.has(x) ==> self.lshi(k).has(lshi(x, k))
+    {
+        self.mask_tnum().lshi_sound(k);
+        lsh_exp(0, k);
+        assert(self.mask_tnum().lshi(k) == self.lshi(k).mask_tnum());
+        assert forall|x: nat| #![auto] self.has(x) implies self.lshi(k).has(lshi(x, k)) by {
+            let d = nat_sub(x, self.base);
+            lsh_exp(x, k);
+            lsh_exp(self.base, k);
+            lsh_exp(d, k);
+            vstd::arithmetic::mul::lemma_mul_is_distributive_add_other_way(exp(k) as int, self.base as int, d as int);
+            assert(nat_sub(lshi(x, k), lshi(self.base, k)) == lshi(d, k));
+        };
+    }
+
+    /// Reflection through m >= base + span: m - x for every member x. The
+    /// offset span - d of a bit subset d of span is again one (sub_submask).
+    pub open spec fn reflect(self, m: nat) -> Anum {
+        Anum { base: (m - (self.base + self.span)) as nat, span: self.span }
+    }
+
+    pub proof fn reflect_sound(self, m: nat)
+        requires self.base + self.span <= m
+        ensures forall|x: nat| #![auto] self.has(x) ==> self.reflect(m).has((m - x) as nat)
+    {
+        assert forall|x: nat| #![auto] self.has(x) implies self.reflect(m).has((m - x) as nat) by {
+            self.has_le_max(x);
+            let d = nat_sub(x, self.base);
+            self.mask_tnum().has_equiv(d);
+            sub_submask(self.span, d);
+            let e = (self.span - d) as nat;
+            self.mask_tnum().has_equiv(e);
+            assert(nat_sub((m - x) as nat, self.reflect(m).base) == e);
+        };
+    }
+
+    /// A member of a Tnum is a bit subset of its maximum val | mask.
+    pub proof fn cover(t: Tnum, n: nat)
+        requires t.has(n)
+        ensures Tnum::ctor(0, t.max()).has(n)
+    {
+        t.has_equiv(n);
+        Tnum::ctor(0, t.max()).has_equiv(n);
+        assert forall|i: nat| #![auto] bit(bw_and_not(n, t.max()), i) == bit(0 as nat, i) by {
+            and_not_bit(n, t.mask, i);
+            or_bit(t.val, t.mask, i);
+            and_not_bit(n, t.max(), i);
+            bit_zero(i);
+        };
+        eq_from_bits(bw_and_not(n, t.max()), 0);
     }
 }
 
