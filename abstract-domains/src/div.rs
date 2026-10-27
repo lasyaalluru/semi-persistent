@@ -847,6 +847,32 @@ pub proof fn bit_above(n: nat, p: nat, j: nat)
 }
 
 /// One more bit of the prefix: n >> i1 == 2 (n >> (i1 + 1)) + bit(n, i1).
+/// The highest set bit of a nonzero n is bit len(n) - 1.
+pub proof fn top_bit(n: nat)
+    requires n > 0
+    ensures
+        len(n) > 0,
+        bit(n, (len(n) - 1) as nat).b(),
+        forall|j: nat| #![auto] j >= len(n) ==> bit(n, j) == Bit::f(),
+{
+    len_bound(n);
+    if len(n) == 0 {
+        assert(exp(0) == 1);
+    }
+    let i = (len(n) - 1) as nat;
+    let e = exp(i);
+    len_lower(n);
+    exp_succ(i);
+    exp_pos(i);
+    rsh_div(n, i);
+    assert(n / e == 1) by(nonlinear_arith)
+        requires e <= n, n < 2 * e, e > 0;
+    bit_rshi(n, i);
+    assert forall|j: nat| #![auto] j >= len(n) implies bit(n, j) == Bit::f() by {
+        bit_above(n, len(n), j);
+    };
+}
+
 pub proof fn rshi_step(n: nat, i1: nat)
     ensures rshi(n, i1) == 2 * rshi(n, i1 + 1) + bit(n, i1).n()
 {

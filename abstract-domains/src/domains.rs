@@ -1285,6 +1285,100 @@ macro_rules! abstract_domain {
                     }
                     (qf, rf)
                 }
+                /// Equality of an executable division result with the Layer-3 one.
+                pub open spec fn eq_div(res: Option<(ExecTnum, ExecTnum)>, g: Option<(ChoppedTnum, ChoppedTnum)>) -> bool {
+                    match (res, g) {
+                        (None, None) => true,
+                        (Some(p), Some(c)) => p.0.wf() && p.1.wf() && p.0.to_tn() == c.0.tnum && p.1.to_tn() == c.1.tnum,
+                        _ => false,
+                    }
+                }
+                /// Division by the nonzero members of t (ChoppedTnum::div_nz on W-bit
+                /// registers). When t.val > 0 this is divrem_g. Otherwise t may be
+                /// zero: divrem_g runs on the top piece (2^i, t.mask & (2^i - 1)) of
+                /// each unknown bit i of t, the members whose highest set bit is i,
+                /// and the results are joined. None when t is {0}, i.e. every
+                /// divisor is zero; t.val == 0 tells the caller that some may be.
+                pub fn divrem(&self, t: &ExecTnum) -> (res: Option<(ExecTnum, ExecTnum)>)
+                    requires self.wf(), t.wf()
+                    ensures
+                        res is None <==> (t.val == 0 && t.mask == 0),
+                        ExecTnum::eq_div(res, (ChoppedTnum { tnum: self.to_tn(), w: $bits as nat }).div_nz(ChoppedTnum { tnum: t.to_tn(), w: $bits as nat })),
+                        match res {
+                            Some(p) => p.0.wf() && p.1.wf()
+                                && forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) && c2 != 0 ==> p.0.has(c1 / c2) && p.1.has(c1 % c2),
+                            None => true,
+                        },
+                {
+                    let ghost w: nat = $bits as nat;
+                    let ghost ct_s = ChoppedTnum { tnum: self.to_tn(), w };
+                    let ghost ct_t = ChoppedTnum { tnum: t.to_tn(), w };
+                    proof {
+                        self.to_chopped(); t.to_chopped();
+                        ct_s.div_nz_sound(ct_t);
+                    }
+                    if t.val > 0 {
+                        return Some(self.divrem_g(t));
+                    }
+                    let mut acc: Option<(ExecTnum, ExecTnum)> = None;
+                    let mut i: $uint = 0;
+                    while i < ($bits as $uint)
+                        invariant
+                            w == $bits as nat,
+                            i <= ($bits as $uint),
+                            t.val == 0, self.wf(), t.wf(),
+                            ct_s == (ChoppedTnum { tnum: self.to_tn(), w }),
+                            ct_t == (ChoppedTnum { tnum: t.to_tn(), w }),
+                            ct_s.inv(), ct_t.inv(),
+                            ExecTnum::eq_div(acc, ct_s.div_z(ct_t, i as nat)),
+                        decreases ($bits as $uint) - i
+                    {
+                        let ghost acc0 = acc;
+                        let ghost iv: nat = i as nat;
+                        proof {
+                            native_rshi(t.mask, iv);
+                            native_low_bit(t.mask >> i);
+                            bit_rshi(t.mask as nat, iv);
+                        }
+                        if ((t.mask >> i) & 1) == 1 {
+                            let bitv: $uint = (1 as $uint) << i;
+                            proof {
+                                native_lshi(1 as $uint, iv);
+                                exp_pos(iv);
+                                exp_succ(iv);
+                                exp_le(iv + 1, w);
+                                exp_concrete(w);
+                                chop_id(exp(iv), w);
+                            }
+                            let piece = ExecTnum { val: bitv, mask: t.mask & (bitv - 1) };
+                            proof {
+                                native_and(t.mask, (bitv - 1) as $uint);
+                                chop_and_ones(t.mask as nat, iv);
+                                assert(piece.to_tn() == ct_t.top_piece(iv).tnum);
+                                ct_t.top_piece_inv(iv);
+                                native_and(piece.val, piece.mask);
+                            }
+                            let p = self.divrem_g(&piece);
+                            proof { assert((ChoppedTnum { tnum: piece.to_tn(), w }) == ct_t.top_piece(iv)); }
+                            acc = match acc {
+                                None => Some(p),
+                                Some(a) => Some((a.0.join(&p.0), a.1.join(&p.1))),
+                            };
+                        }
+                        i += 1;
+                    }
+                    proof {
+                        // The loop ran over every bit, so acc is div_z(t, w), which is div_nz.
+                        if let Some(pp) = acc {
+                            assert forall|c1: $uint, c2: $uint| #![auto] self.has(c1) && t.has(c2) && c2 != 0
+                                implies pp.0.has(c1 / c2) && pp.1.has(c1 % c2) by {
+                                native_fits(c1); native_fits(c2);
+                                assert(ct_s.has(c1 as nat) && ct_t.has(c2 as nat));
+                            };
+                        }
+                    }
+                    acc
+                }
                 #[inline] pub fn min_val(&self) -> (r: $uint) ensures r == self.val { self.val }
                 #[inline] pub fn max_val(&self) -> (r: $uint) ensures r == (self.val | self.mask) { self.val | self.mask }
                 proof fn has_bounds(&self, c: $uint)

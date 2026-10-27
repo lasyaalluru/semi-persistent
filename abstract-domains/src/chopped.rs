@@ -3,6 +3,7 @@
 #![allow(unused_imports, unused_variables)]
 use crate::anum::*;
 use crate::bools::*;
+use crate::div::*;
 use crate::nats::*;
 use crate::tbit::*;
 use crate::tnum::*;
@@ -271,6 +272,189 @@ impl ChoppedTnum {
             chop_id(x / y, w);
             chop_id(x % y, w);
         };
+    }
+
+    /// The members of t whose highest set bit is i, for t.val == 0: bit i set,
+    /// the unknown bits below i free. Its min is 2^i > 0, so div_g applies.
+    pub open spec fn top_piece(self, i: nat) -> ChoppedTnum {
+        ChoppedTnum { tnum: Tnum::ctor(exp(i), chop(self.tnum.mask, i)), w: self.w }
+    }
+
+    /// div_g over the top pieces of t at its unknown bits below j, joined;
+    /// None when t has no unknown bit below j.
+    pub open spec fn div_z(self, t: ChoppedTnum, j: nat) -> Option<(ChoppedTnum, ChoppedTnum)>
+        decreases j
+    {
+        if j == 0 { None }
+        else {
+            let i = (j - 1) as nat;
+            let acc = self.div_z(t, i);
+            if bit(t.tnum.mask, i).b() {
+                let p = self.div_g(t.top_piece(i));
+                match acc {
+                    None => Some(p),
+                    Some(a) => Some((a.0.join(p.0), a.1.join(p.1))),
+                }
+            } else { acc }
+        }
+    }
+
+    /// Division by the nonzero members of t: div_g when t.min() > 0, otherwise
+    /// the join of div_g over the top pieces of t. None when t is {0}.
+    pub open spec fn div_nz(self, t: ChoppedTnum) -> Option<(ChoppedTnum, ChoppedTnum)> {
+        if t.tnum.val > 0 { Some(self.div_g(t)) } else { self.div_z(t, self.w) }
+    }
+
+    /// A nonzero member y of t (t.val == 0) is in the top piece at bit
+    /// len(y) - 1, which is an unknown bit of t below w.
+    pub proof fn top_piece_has(self, y: nat)
+        requires self.inv(), self.tnum.val == 0, self.has(y), y > 0
+        ensures
+            len(y) > 0,
+            (len(y) - 1) < self.w,
+            bit(self.tnum.mask, (len(y) - 1) as nat).b(),
+            self.top_piece((len(y) - 1) as nat).has(y),
+    {
+        let m = self.tnum.mask;
+        top_bit(y);
+        let i = (len(y) - 1) as nat;
+        Self::fits_lt(y, self.w);
+        len_le(y, self.w);
+        self.tnum.has_equiv(y);
+        assert forall|j: nat| #![auto] bit(y, j).b() implies bit(m, j).b() by {
+            and_not_bit(y, m, j);
+            bit_zero(j);
+        };
+        let p = self.top_piece(i).tnum;
+        p.has_equiv(y);
+        assert forall|j: nat| #![auto] bit(bw_and_not(y, chop(m, i)), j) == bit(exp(i), j) by {
+            and_not_bit(y, chop(m, i), j);
+            chop_bit(m, i, j);
+            bit_exp(i, j);
+            if j > i {
+                assert(j >= len(y));
+            }
+        };
+        eq_from_bits(bw_and_not(y, chop(m, i)), exp(i));
+    }
+
+    /// A top piece below w is well formed and has a positive min.
+    pub proof fn top_piece_inv(self, i: nat)
+        requires self.inv(), i < self.w
+        ensures self.top_piece(i).inv(), self.top_piece(i).tnum.min() > 0
+    {
+        let m = self.tnum.mask;
+        exp_pos(i);
+        assert forall|j: nat| #![auto] !(bit(exp(i), j).b() && bit(chop(m, i), j).b()) by {
+            bit_exp(i, j);
+            chop_bit(m, i, j);
+        };
+        disj_bits(exp(i), chop(m, i));
+        exp_succ(i);
+        exp_le(i + 1, self.w);
+        chop_id(exp(i), self.w);
+        chop_lt(m, i);
+        chop_id(chop(m, i), self.w);
+    }
+
+    /// div_z is Some exactly when t has an unknown bit below j; then it is well
+    /// formed and contains x / y and x % y for every member y != 0 of t below 2^j.
+    pub proof fn div_z_sound(self, t: ChoppedTnum, j: nat)
+        requires self.inv(), t.inv(), self.w == t.w, t.tnum.val == 0, j <= self.w
+        ensures
+            self.div_z(t, j) is Some <==> exists|i: nat| i < j && #[trigger] bit(t.tnum.mask, i).b(),
+            match self.div_z(t, j) {
+                Some(p) => p.0.inv() && p.1.inv() && p.0.w == self.w && p.1.w == self.w
+                    && forall|x: nat, y: nat| #![auto]
+                        self.has(x) && t.has(y) && y > 0 && len(y) <= j ==> p.0.has(x / y) && p.1.has(x % y),
+                None => true,
+            },
+        decreases j
+    {
+        if j > 0 {
+            let i = (j - 1) as nat;
+            self.div_z_sound(t, i);
+            let acc = self.div_z(t, i);
+            if bit(t.tnum.mask, i).b() {
+                let tp = t.top_piece(i);
+                t.top_piece_inv(i);
+                self.div_g_sound(tp);
+                let p = self.div_g(tp);
+                if let Some(a) = acc {
+                    a.0.tnum.join_inv(p.0.tnum);
+                    a.1.tnum.join_inv(p.1.tnum);
+                    a.0.tnum.join_sound(p.0.tnum);
+                    a.1.tnum.join_sound(p.1.tnum);
+                    Self::join_fits(a.0, p.0);
+                    Self::join_fits(a.1, p.1);
+                }
+                assert forall|x: nat, y: nat| #![auto]
+                    self.has(x) && t.has(y) && y > 0 && len(y) <= j
+                    implies self.div_z(t, j).unwrap().0.has(x / y) && self.div_z(t, j).unwrap().1.has(x % y) by {
+                    t.top_piece_has(y);
+                    if len(y) == j {
+                        assert(tp.has(y));
+                    } else {
+                        assert(bit(t.tnum.mask, (len(y) - 1) as nat).b());
+                    }
+                };
+            } else {
+                assert forall|x: nat, y: nat| #![auto]
+                    self.has(x) && t.has(y) && y > 0 && len(y) <= j
+                    implies len(y) <= i by {
+                    t.top_piece_has(y);
+                };
+            }
+            if exists|k: nat| k < j && #[trigger] bit(t.tnum.mask, k).b() {
+                let k = choose|k: nat| k < j && #[trigger] bit(t.tnum.mask, k).b();
+                if k < i { assert(bit(t.tnum.mask, k).b()); }
+            }
+        }
+    }
+
+    /// The join of two w-bit Tnums fits in w bits.
+    proof fn join_fits(a: ChoppedTnum, b: ChoppedTnum)
+        requires a.inv(), b.inv(), a.w == b.w
+        ensures fits(a.join(b).tnum.val, a.w), fits(a.join(b).tnum.mask, a.w)
+    {
+        let (av, bv) = (a.tnum.val, b.tnum.val);
+        Self::fits_mapd(av, bv, |x: Bit, y: Bit| x.and(y), a.w);
+        Self::fits_mapd(av, a.tnum.mask, |x: Bit, y: Bit| x.xor(y), a.w);
+        Self::fits_mapd(bv, b.tnum.mask, |x: Bit, y: Bit| x.xor(y), a.w);
+        Self::fits_mapd(a.tnum.u(), b.tnum.u(), |x: Bit, y: Bit| x.or(y), a.w);
+        Self::fits_mapd(bw_and(av, bv), bw_or(a.tnum.u(), b.tnum.u()), |x: Bit, y: Bit| x.xor(y), a.w);
+    }
+
+    /// div_nz is None exactly when t is {0}; otherwise it is well formed and
+    /// contains x / y and x % y for every member x of self and member y != 0 of t.
+    pub proof fn div_nz_sound(self, t: ChoppedTnum)
+        requires self.inv(), t.inv(), self.w == t.w
+        ensures
+            self.div_nz(t) is None <==> (t.tnum.val == 0 && t.tnum.mask == 0),
+            match self.div_nz(t) {
+                Some(p) => p.0.inv() && p.1.inv() && p.0.w == self.w && p.1.w == self.w
+                    && forall|x: nat, y: nat| #![auto]
+                        self.has(x) && t.has(y) && y > 0 ==> p.0.has(x / y) && p.1.has(x % y),
+                None => true,
+            },
+    {
+        if t.tnum.val > 0 {
+            self.div_g_sound(t);
+        } else {
+            let m = t.tnum.mask;
+            self.div_z_sound(t, self.w);
+            assert forall|x: nat, y: nat| #![auto] self.has(x) && t.has(y) && y > 0 implies len(y) <= self.w by {
+                t.top_piece_has(y);
+            };
+            if m == 0 {
+                assert forall|i: nat| #![auto] !bit(m, i).b() by { bit_zero(i); };
+            } else {
+                top_bit(m);
+                Self::fits_lt(m, self.w);
+                len_le(m, self.w);
+                assert(bit(m, (len(m) - 1) as nat).b());
+            }
+        }
     }
 
     /// Bounded negation.

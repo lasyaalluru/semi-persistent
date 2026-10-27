@@ -1,7 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 //! Exhaustive u8 checks of the precision-optimized Tnum multiplication and division
-//! (`mul` by pair-join, `divrem_g`), on every pair of Tnums: soundness
+//! (`mul` by pair-join, `divrem_g`, and `divrem` for divisors that may be zero), on
+//! every pair of Tnums: soundness
 //! against the concrete results, and the number of unknown bits relative to the best
 //! Tnum (the AND and OR of every concrete result). Run with `--release --ignored`.
 use semi_persistent_abstract_domains::domains::d8::ExecTnum;
@@ -50,6 +51,8 @@ fn exhaustive_u8_mul_and_divrem_precision() {
     let (mut n_mul, mut n_div) = (0u64, 0u64);
     let (mut opt_m, mut lost_m) = (0u64, 0u64);
     let (mut opt_q, mut opt_r, mut lost_q, mut lost_r) = (0u64, 0u64, 0u64, 0u64);
+    let mut n_z = 0u64;
+    let (mut opt_zq, mut opt_zr, mut lost_zq, mut lost_zr) = (0u64, 0u64, 0u64, 0u64);
     for a in &ts {
         let xs = members(a);
         for b in &ts {
@@ -69,6 +72,25 @@ fn exhaustive_u8_mul_and_divrem_precision() {
             opt_m += (lm == 0) as u64;
             lost_m += lm as u64;
             if b.val == 0 {
+                if b.mask == 0 {
+                    continue;
+                }
+                // The divisor may be zero: divrem covers the nonzero members.
+                n_z += 1;
+                let (q, r) = a.divrem(b).unwrap();
+                let nz: Vec<u8> = ys.iter().copied().filter(|&y| y != 0).collect();
+                for &x in &xs {
+                    for &y in &nz {
+                        assert!(has(&q, x / y) && has(&r, x % y));
+                    }
+                }
+                let bq = best(xs.iter().flat_map(|&x| nz.iter().map(move |&y| x / y)));
+                let br = best(xs.iter().flat_map(|&x| nz.iter().map(move |&y| x % y)));
+                let (lq, lr) = (q.mask.count_ones() - bq, r.mask.count_ones() - br);
+                opt_zq += (lq == 0) as u64;
+                opt_zr += (lr == 0) as u64;
+                lost_zq += lq as u64;
+                lost_zr += lr as u64;
                 continue;
             }
             n_div += 1;
@@ -100,5 +122,12 @@ fn exhaustive_u8_mul_and_divrem_precision() {
         avg(lost_q, n_div),
         pct(opt_r, n_div),
         avg(lost_r, n_div)
+    );
+    println!(
+        "divrem, divisor may be zero ({n_z} pairs): q optimal {:.1}%, {:.3} bits lost; r optimal {:.1}%, {:.3} bits lost",
+        pct(opt_zq, n_z),
+        avg(lost_zq, n_z),
+        pct(opt_zr, n_z),
+        avg(lost_zr, n_z)
     );
 }
