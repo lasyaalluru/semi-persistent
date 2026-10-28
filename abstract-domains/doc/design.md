@@ -249,7 +249,7 @@ Layer 1: bools.rs + nats.rs        — Natural number algorithms on infinite bit
 Layer 2: tbit.rs + tnum.rs         — Recursive abstract domain operations + soundness
          anum.rs + unum.rs + div.rs
 Layer 3: chopped.rs                — Bounded (w-bit) simulation via chop
-Layer 4: domains.rs               — Machine-word execution on u8/u16/u32/u64
+Layer 4: exec_tnum.rs + exec_anum.rs + exec_unum.rs — Machine-word execution, generic over the width
 ```
 
 ### Layer 1: Natural numbers as infinite bitstrings (`bools.rs`, `nats.rs`)
@@ -325,27 +325,20 @@ The `div` spec function currently has no corresponding Layer-3 soundness
 theorem. All contracts that are stated in this layer verify without
 project-local admits.
 
-### Layer 4: Executable machine-word domains (`domains.rs`)
+### Layer 4: Executable machine-word domains (`exec_tnum.rs`, `exec_anum.rs`, `exec_unum.rs`)
 
-Native Rust implementations on u8, u16, u32, and u64. ExecAnum, ExecUnum and
-Interval come from macro generation; the u128 instantiation is disabled because
-its bitvector obligations exceed current solver capacity. ExecTnum is written
-once, generic over the width, in `exec_tnum.rs` (`impl<W: BitWord>
-ExecTnum<W>`), and each `dN` module aliases it. Its bridges are the `BitWord`
-lemmas of `bitword.rs` (`lemma_and`, `lemma_or`, `lemma_xor`, `mul_wrap`,
-`shl_wrap`, and the generic `lemma_add`, `lemma_sub`, `lemma_neg`,
-`lemma_not`, `lemma_and_not`, `lemma_shr`, `lemma_low_bit`), and its
-well-formedness is `to_tn().inv()`, taken from the Layer-3 inv lemmas.
-
-The **value bridge** connects native wrapping arithmetic to spec chopping:
-- `bridge_add(a, b)`: `wrapping_add(a,b) as nat == chop(nat_add(a,b), W)`
-- `bridge_mul(a, b)`: `wrapping_mul(a,b) as nat == chop(prod(a,b), W)`
-
-The **bitwise bridge** connects native bitwise ops to spec bitwise ops:
-- `bit_is_native_bit(n, i)`: `bit(n as nat, i) == ((n >> i) & 1 == 1)`
-- `native_xor(a, b)`: `(a ^ b) as nat == bw_xor(a as nat, b as nat)`
-- `native_or(a, b)`: `(a | b) as nat == bw_or(a as nat, b as nat)`
-- `native_and(a, b)`: `(a & b) as nat == bw_and(a as nat, b as nat)`
+Each executable domain is written once, generic over the width:
+`impl<W: BitWord> ExecTnum<W>`, `ExecAnum<W>` and `ExecUnum<W>`, with
+`Interval<W>` (`interval.rs`) over `W: Word`. `domains.rs` names them at u8,
+u16, u32 and u64 (`d8` .. `d64`). No per-width proof remains in domain code:
+the bridges are the `BitWord` lemmas of `bitword.rs` (`lemma_and`, `lemma_or`,
+`lemma_xor`, `mul_wrap`, `shl_wrap`, and the generic `lemma_add`,
+`lemma_sub`, `lemma_neg`, `lemma_not`, `lemma_and_not`, `lemma_shr`,
+`lemma_low_bit`), and bound checks use `Word::checked_add` and
+`checked_mul`. ExecTnum's well-formedness is `to_tn().inv()`, taken from the
+Layer-3 inv lemmas. Containment is stated on the word view: `W::from_int` for
+wrapping add, sub and neg, `and`/`or`/`xor`/`not` for the bitwise operations,
+and `chop` of the nat result for shifts and products.
 
 Every L4 method verifies its stated contract. Universal containment is
 currently proved for:
@@ -355,8 +348,8 @@ currently proved for:
   Layer-3 theorem through `lemma_ct()`;
 - `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn,neg,lshi,join,
   bw_and,bw_or,bw_xor,bw_not,rshi,meet,mul}`, the same way;
-- `ExecUnum::{top,add,from_interval,mul}`;
-- `Interval::{add,meet,join,div_const}`.
+- `ExecUnum::{constant,top,add,from_interval,mul}`;
+- every `Interval<W>` operation (`interval.rs`).
 
 Most `ExecTnum` operations, and `ExecAnum::{top,add,neg,lshi,join,bw_and,
 bw_or,bw_xor,bw_not,rshi,mul,to_etn,from_etn}`, also ensure, as a clause
@@ -396,10 +389,10 @@ regenerate them. The source contains no executable `admit()` or `assume()`.
 | Layer 2 (anum) | Stated contracts verified, including `div_const` |
 | Layer 2 (unum) | Add/mul containment and supporting contracts verified |
 | Layer 3 (chopped) | Stated bounded-simulation contracts verified |
-| Layer 4 (exec) | All stated contracts proved at u8/u16/u32/u64; universal containment only for the explicit inventory above |
+| Layer 4 (exec) | All stated contracts proved for every `W: BitWord`; universal containment only for the explicit inventory above |
 | Division | Tnum constant and general containment proved |
 | Anum division | Positive constant-divisor containment proved |
 | Unum domain | Sound unbounded/bounded add and mul; no general exactness theorem |
 | Reduced product | 4-domain (Tnum×Anum×Interval×Unum) |
-| Multi-width | u8, u16, u32, u64 (`u128` disabled) |
+| Multi-width | generic over `W: BitWord`; named at u8, u16, u32, u64 |
 | Rust mirror tests | See `proof-status.md` for the regenerated count |

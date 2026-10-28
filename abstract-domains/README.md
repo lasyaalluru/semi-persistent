@@ -22,7 +22,7 @@ definitions rather than constituting a second formal verification.
 ## Architecture
 
 ```
-Layer 4: domains.rs                -- Executable u8/u16/u32/u64 implementations
+Layer 4: exec_tnum.rs / exec_anum.rs / exec_unum.rs -- Executable, generic over the width
 Layer 3: chopped.rs                 -- Bounded-width simulation
 Layer 2: tnum.rs / anum.rs / unum.rs / div.rs -- Unbounded theory with soundness proofs
 Layer 1: nats.rs / bools.rs         -- Natural numbers as infinite bitstrings
@@ -72,16 +72,17 @@ and mul, and ChoppedUnum add/mul, subject to their stated
 fit and no-overflow preconditions. ChoppedTnum `div` has no Layer-3
 containment theorem.
 
-### Layer 4: Executable domains (domains.rs)
+### Layer 4: Executable domains (exec_tnum.rs, exec_anum.rs, exec_unum.rs)
 
-Native Rust implementations on u8/u16/u32/u64 (`u128` is disabled because its
-bitvector obligations exceed current solver capacity):
+Native Rust implementations, each written once as `impl<W: BitWord>` and
+proved for every width through the `BitWord` bridges (`bitword.rs`);
+`domains.rs` names them at u8/u16/u32/u64 (`d8` .. `d64`):
 
-- **ETn**: Executable Tnum. Well-formedness (`v & m == 0`) proved via `by(bit_vector)`.
-- **EAn**: Executable Anum. Exact base arithmetic.
-- **EUn**: Executable Unum. Proved-sound addition via the carry-out formula,
+- **ExecTnum<W>**: Executable Tnum. Well-formedness is `to_tn().inv()`.
+- **ExecAnum<W>**: Executable Anum. Exact base arithmetic.
+- **ExecUnum<W>**: Executable Unum. Proved-sound addition via the carry-out formula,
   widening to top when represented bounds or result ranges wrap.
-- **Interval**: `[lo, hi]` bounds tracking.
+- **Interval<W>** (`interval.rs`): `[lo, hi]` bounds tracking.
 
 These domains combine through `reduce::Product` and the fact records (see
 [the reduced-product note](doc/reduced-product.md)) once they implement
@@ -92,8 +93,8 @@ theorems, each derived from the Layer-3 theorem through `to_chopped()`, cover
 every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, division,
 shifts, join, meet) and every `ExecAnum` operation (constant, top, add, sub,
 neg, mul, division by constant, bitwise, shifts, join, meet, conversions);
-they also cover `ExecUnum` top/add/from-interval/multiply and `Interval`
-add/meet/join/division by constant. Other Layer 4 methods (most Unum helpers)
+they also cover `ExecUnum` constant/top/add/from-interval/multiply and every
+`Interval<W>` operation. Other Layer 4 methods (most Unum helpers)
 currently prove well-formedness only; see
 [the proof-status inventory](doc/proof-status.md).
 

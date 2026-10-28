@@ -107,17 +107,16 @@ Width-specific facts go in the trait as lemmas proved in `impl_word!`. They are
 not re-proved inside domain code. The bit lemmas are proved there `by
 (bit_vector)` at every width, u128 included. `shr` and `checked_shl` shift
 natively up to u64, with `x <= MAX >> k` as the overflow test; vstd has no
-u128 shift lemma, so at u128 `checked_shl` multiplies by `1 << k`. The
-per-width `abstract_domain!` stamping in `domains.rs` is the pattern being
-replaced.
+u128 shift lemma, so at u128 `checked_shl` multiplies by `1 << k`.
 
 `BitWord` (`bitword.rs`) extends `Word` with the bridge to the nat bitstring
 model of `nats.rs`: `and`, `or` and `xor` are `bw_and`, `bw_or` and `bw_xor`,
 and `mul_wrap` and `shl_wrap` are the chopped product and left shift. Its
 per-bit lemmas are proved in `impl_bitword!` at every width, u128 included;
 not, and-not, add, sub, right shift and the low bit follow generically. The
-executable Tnum is written once on it, `impl<W: BitWord> ExecTnum<W>` in
-`exec_tnum.rs`, and `domains.rs` aliases it per width.
+executable Tnum, Anum and Unum are written once on it (`impl<W: BitWord>` in
+`exec_tnum.rs`, `exec_anum.rs` and `exec_unum.rs`), and `domains.rs` names
+them, with `Interval<W>`, per width.
 
 ## 4. Semantics (`semantics.rs`)
 

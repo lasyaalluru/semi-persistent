@@ -108,7 +108,7 @@ sums only. They do not prove equality of abstract results.
 
 ## Fixed-Width Addition
 
-`ExecUnum::add` is generated for `u8`, `u16`, `u32`, and `u64`. It uses the
+`ExecUnum::add` is proved once for every `W: BitWord`. It uses the
 field formula only when the bases, extents, represented upper bounds, and
 their sum do not wrap. Otherwise it returns `top`.
 
@@ -116,10 +116,10 @@ Its Verus postcondition universally quantifies over machine values:
 
 ```text
 self.has(x) && other.has(y)
-    ==> result.has(x.wrapping_add(y))
+    ==> result.has(W::from_int(x.view() + y.view()))
 ```
 
-The proof connects the native operations to `ChoppedUnum` and the unbounded
+The proof connects the word operations to `ChoppedUnum` and the unbounded
 containment theorem. This is a soundness result; overflow-to-top and
 noncanonical wall masks prevent an unconditional fixed-width precision claim.
 
