@@ -347,7 +347,7 @@ currently proved for:
   mul,divrem_g,divrem,rsh,lsh,rshi,lshi,join,meet}`, each derived from its
   Layer-3 theorem through `lemma_ct()`;
 - `ExecAnum::{constant,top,add,sub,div_const,from_etn,to_etn,neg,lshi,join,
-  bw_and,bw_or,bw_xor,bw_not,rshi,meet,mul}`, the same way;
+  bw_and,bw_or,bw_xor,bw_not,rshi,meet,mul,mul_precise}`, the same way;
 - `ExecUnum::{constant,top,add,from_interval,mul}`;
 - every `Interval<W>` operation (`interval.rs`).
 
@@ -361,7 +361,13 @@ precision: a less precise `add` would still be sound but would break these
 proofs. `meet` does not export it: it normalizes, and equals the spec only when
 the operands share a member; neither does `ExecAnum::meet`, which is built on
 it. `ExecAnum::mul` follows `ChoppedAnum::mul_step` with the exec `add`, so its
-loop invariant is the spec equality. `ExecTnum::mul` is pair-join multiplication
+loop invariant is the spec equality. It is often top, because the bounds of the
+partial products sum past 2^W. `ExecAnum::mul_precise` trades time for
+precision: it also computes pair-join on the two Tnums, meets it with `mul`, and
+keeps whichever of `mul` and the meet has fewer span bits (the meet alone can be
+looser than `mul`, since reading an Anum as a Tnum carries the base into the
+span). At u8 with bases and spans below 16, results average 151.7 values,
+against 196.5 for `mul`. It has containment but no spec equality. `ExecTnum::mul` is pair-join multiplication
 (`ChoppedTnum::mul`, `Tnum::pair_mul`): starting from the exact product of the
 known bits, each unknown bit keeps both sums with `join(acc, acc + c)`. See
 `future/tnum-mul-div-precision.md`.

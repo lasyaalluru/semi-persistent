@@ -92,7 +92,7 @@ Every executable method verifies its stated contract. Universal containment
 theorems, each derived from the Layer-3 theorem through `to_chopped()`, cover
 every `ExecTnum` operation (constant, bitwise, add, sub, neg, mul, division,
 shifts, join, meet) and every `ExecAnum` operation (constant, top, add, sub,
-neg, mul, division by constant, bitwise, shifts, join, meet, conversions);
+neg, mul and the more precise mul_precise, division by constant, bitwise, shifts, join, meet, conversions);
 they also cover `ExecUnum` constant/top/add/from-interval/multiply and every
 `Interval<W>` operation. Other Layer 4 methods (most Unum helpers)
 currently prove well-formedness only; see

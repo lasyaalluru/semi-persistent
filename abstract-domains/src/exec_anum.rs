@@ -57,6 +57,35 @@ pub fn sum4_fits<W: Word>(a: W, b: W, c: W, d: W) -> (r: bool)
     }
 }
 
+/// The number of set bits of x, by a shift loop.
+fn popcount<W: BitWord>(x: W) -> (r: u32)
+    ensures r as nat <= W::bits()
+{
+    let mut y = x;
+    let mut n: u32 = 0;
+    proof {
+        lemma_fits(x);
+        len_le(x.view(), W::bits());
+        W::lemma_modulus();
+    }
+    while !y.eq(W::zero())
+        invariant n as nat + len(y.view()) <= W::bits(), 8 <= W::bits() <= 128
+        decreases y.view()
+    {
+        if low_bit(y) {
+            n += 1;
+        }
+        let y1 = y.shr(1);
+        proof {
+            vstd::arithmetic::power2::lemma2_to64();
+            lemma_shr(y, 1, y1);
+            assert(rshi(rsh(y.view()), 0) == rsh(y.view()));
+        }
+        y = y1;
+    }
+    n
+}
+
 /// x ^ 0 == x.
 pub proof fn xor_zero(n: nat)
     ensures bw_xor(n, 0) == n
@@ -625,6 +654,37 @@ impl<W: BitWord> ExecAnum<W> {
             };
         }
         acc
+    }
+
+    /// The more precise multiplication: mul, and its meet with pair-join
+    /// multiplication of the two Tnums (ExecTnum::mul), whichever has fewer
+    /// span bits. The meet alone can be looser than mul, since reading an Anum
+    /// as a Tnum carries the base into the span. It costs both products and a
+    /// meet, and has a containment contract but no spec equality.
+    pub fn mul_precise(&self, t: &Self) -> (r: Self)
+        ensures
+            forall|c1: W, c2: W| #![auto] self.has(c1) && t.has(c2) ==> r.to_an().has(chop(prod(c1.view(), c2.view()), W::bits())),
+    {
+        let a = self.mul(t);
+        let (x, y) = (self.to_etn(), t.to_etn());
+        let pt = x.mul(&y);
+        let p = Self::from_etn(&pt);
+        let m = a.meet(&p);
+        let r = if popcount(m.span) < popcount(a.span) { m } else { a };
+        proof {
+            let w = W::bits();
+            lemma_exp_bits::<W>();
+            assert forall|c1: W, c2: W| #![auto] self.has(c1) && t.has(c2) implies r.to_an().has(chop(prod(c1.view(), c2.view()), w)) by {
+                // The product as a word: from_int wraps as chop does.
+                let c = W::from_int(prod(c1.view(), c2.view()) as int);
+                W::lemma_from_int(prod(c1.view(), c2.view()) as int);
+                chop_is_mod(prod(c1.view(), c2.view()), w);
+                assert(c.view() == chop(prod(c1.view(), c2.view()), w));
+                assert(x.has(c1) && y.has(c2));
+                assert(a.has(c) && pt.has(c) && p.has(c));
+            };
+        }
+        r
     }
 
     pub fn min_val(&self) -> (r: W)

@@ -224,3 +224,40 @@ fn bitwise_and_mul_contain_every_result() {
         }
     }
 }
+
+#[test]
+fn mul_precise_contains_every_product_and_is_no_looser() {
+    let check = |a: ExecAnum, b: ExecAnum| {
+        let (mul, precise) = (a.mul(&b), a.mul_precise(&b));
+        let mb = members(&b);
+        for x in members(&a) {
+            for &y in &mb {
+                assert!(has(&precise, x.wrapping_mul(y)), "{x} * {y}");
+            }
+        }
+        assert!(
+            members(&precise).len() <= members(&mul).len(),
+            "({}, {}) * ({}, {})",
+            a.base,
+            a.span,
+            b.base,
+            b.span
+        );
+    };
+    for (a, b) in sample_pairs(0x2545_f491, 5_000) {
+        check(a, b);
+    }
+    // Bases and spans below 16, where mul is often top and the Tnum is tighter.
+    for b1 in 0..16u8 {
+        for s1 in 0..16u8 {
+            for b2 in (0..16u8).step_by(3) {
+                for s2 in (0..16u8).step_by(3) {
+                    check(
+                        ExecAnum { base: b1, span: s1 },
+                        ExecAnum { base: b2, span: s2 },
+                    );
+                }
+            }
+        }
+    }
+}
